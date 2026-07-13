@@ -4,13 +4,18 @@ __pycache__/
 
 # Binaries and downloaded dependencies
 bin/*
+!bin/.gitkeep
 mediamtx_*
 
 # Caches
 thumbnails/*
+!thumbnails/.gitkeep
 
 # Input/Output
 input/*
+!input/.gitkeep
 streams/*
+!streams/.gitkeep
+
 # Config (optional, depends if you want to commit default config or not)
 # config.yml
