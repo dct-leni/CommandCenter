@@ -3,14 +3,14 @@ __pycache__/
 *.pyc
 
 # Binaries and downloaded dependencies
-bin/
+bin/*
 mediamtx_*
 
 # Caches
-thumbnails/
+thumbnails/*
 
 # Input/Output
-input/
-streams/
+input/*
+streams/*
 # Config (optional, depends if you want to commit default config or not)
 # config.yml
