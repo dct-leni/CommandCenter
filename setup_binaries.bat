@@ -1,10 +1,29 @@
 @echo off
 echo ============================================
-echo   CommandCenter - Download FFmpeg ^& MediaMTX
+echo   CommandCenter - Setup Prerequisites
 echo ============================================
 echo.
-echo This script downloads portable binaries to the bin\ folder.
+echo This script installs Python 3.14 (if missing) and downloads
+echo portable binaries to the bin\ folder.
 echo Run this ONCE before using the app.
+echo.
+
+REM ---- Python 3.14 ----
+echo [0/2] Checking for Python 3.14...
+python --version 2>&1 | findstr "3.14" >nul
+if %ERRORLEVEL% equ 0 (
+    echo [OK] Python 3.14 is already installed.
+) else (
+    echo [INFO] Python 3.14 not found. Installing via winget...
+    winget install -e --id Python.Python.3.14 --accept-package-agreements --accept-source-agreements
+    
+    if %ERRORLEVEL% equ 0 (
+        echo [OK] Python 3.14 installed successfully. 
+        echo      NOTE: You may need to restart your terminal after this script finishes to update your PATH.
+    ) else (
+        echo [ERROR] Failed to install Python 3.14 via winget. Please install it manually.
+    )
+)
 echo.
 
 set BIN_DIR=%~dp0bin
@@ -26,7 +45,7 @@ if exist "%BIN_DIR%\ffmpeg.exe" (
         goto :mediamtx
     )
 
-    echo        Extracting FFmpeg...
+    echo         Extracting FFmpeg...
     powershell -Command "& { Add-Type -AssemblyName System.IO.Compression.FileSystem; $zip = [System.IO.Compression.ZipFile]::OpenRead('%FFMPEG_ZIP%'); foreach ($e in $zip.Entries) { if ($e.Name -eq 'ffmpeg.exe' -or $e.Name -eq 'ffprobe.exe') { $dest = Join-Path '%BIN_DIR%' $e.Name; [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e, $dest, $true) } }; $zip.Dispose() }"
 
     del "%FFMPEG_ZIP%" 2>nul
@@ -53,7 +72,7 @@ if exist "%BIN_DIR%\mediamtx.exe" (
         goto :done
     )
 
-    echo        Extracting MediaMTX...
+    echo         Extracting MediaMTX...
     powershell -Command "& { Add-Type -AssemblyName System.IO.Compression.FileSystem; $zip = [System.IO.Compression.ZipFile]::OpenRead('%BIN_DIR%\mediamtx.zip'); foreach ($e in $zip.Entries) { if ($e.Name -eq 'mediamtx.exe') { $dest = Join-Path '%BIN_DIR%' $e.Name; [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e, $dest, $true) } }; $zip.Dispose() }"
 
     del "%BIN_DIR%\mediamtx.zip" 2>nul

@@ -172,14 +172,20 @@ class Converter:
         output_path = str(Path(input_path).parent / info.ts_filename)
 
         try:
-            # First attempt: copy codecs (fast, no re-encoding)
-            success = await self._ffmpeg_convert(input_path, output_path, filename, copy_codecs=True)
+            # First attempt: copy codecs (fast, no re-encoding, flawless original quality)
+            success = await self._ffmpeg_convert(input_path, output_path, filename, strategy="copy")
 
             if not success:
-                # Fallback: re-encode
-                logger.info(f"Codec copy failed for {filename}, re-encoding...")
+                # Second attempt: Hardware re-encode (NVENC)
+                logger.info(f"Codec copy failed for {filename}, re-encoding with NVENC...")
                 info.progress = 0.0
-                success = await self._ffmpeg_convert(input_path, output_path, filename, copy_codecs=False)
+                success = await self._ffmpeg_convert(input_path, output_path, filename, strategy="nvenc")
+            
+            if not success:
+                # Third attempt: Software re-encode (CPU) - Fallback if no Nvidia GPU is present
+                logger.info(f"NVENC failed for {filename}, re-encoding with CPU (libx264)...")
+                info.progress = 0.0
+                success = await self._ffmpeg_convert(input_path, output_path, filename, strategy="cpu")
 
             if success:
                 info.status = ConversionStatus.DONE
@@ -215,35 +221,51 @@ class Converter:
             self._active_processes.pop(filename, None)
             self.scan_folder(self.source_folder)
 
-    async def _ffmpeg_convert(self, input_path: str, output_path: str, filename: str, copy_codecs: bool) -> bool:
+    async def _ffmpeg_convert(self, input_path: str, output_path: str, filename: str, strategy: str) -> bool:
         """Run FFmpeg conversion and track progress."""
         info = self.files[filename]
 
         # Get duration for progress calculation
         duration = info.metadata.get("duration", 0)
 
-        if copy_codecs:
-            cmd = [
-                get_ffmpeg_path(),
-                "-i", input_path,
+        base_cmd = [get_ffmpeg_path(), "-y", "-hwaccel", "auto", "-i", input_path]
+        
+        if strategy == "copy":
+            cmd = base_cmd + [
                 "-c:v", "copy",
                 "-c:a", "copy",
                 "-bsf:v", "h264_mp4toannexb",
                 "-f", "mpegts",
-                "-y",
+                output_path,
+            ]
+        elif strategy == "nvenc":
+            cmd = base_cmd + [
+                "-c:v", "h264_nvenc",
+                "-preset", "p6",           # Higher quality preset (slower/better than p4)
+                "-tune", "hq",             # High-quality tuning profile
+                "-b:v", "6M",              # Explicit high video bitrate
+                "-maxrate", "8M",          # Prevent bitrate spikes for stream stability
+                "-bufsize", "16M",         # VBR buffer
+                "-g", "60",                # Force keyframe every 2 seconds (crucial for RTMP)
+                "-c:a", "aac",
+                "-b:a", "192k",            # Higher audio bitrate
+                "-ac", "2",                # Force stereo audio
+                "-f", "mpegts",
                 output_path,
             ]
         else:
-            cmd = [
-                get_ffmpeg_path(),
-                "-hwaccel", "auto",       # Try hardware decoding if possible
-                "-i", input_path,
-                "-c:v", "h264_nvenc",     # Nvidia GPU hardware encoding
-                "-preset", "p4",          # Good balance of speed/quality for NVENC
+            # CPU Fallback (libx264)
+            cmd = base_cmd + [
+                "-c:v", "libx264",
+                "-preset", "fast",
+                "-crf", "21",              # Constant Rate Factor for consistent high quality
+                "-maxrate", "8M",
+                "-bufsize", "16M",
+                "-g", "60",
                 "-c:a", "aac",
                 "-b:a", "192k",
+                "-ac", "2",
                 "-f", "mpegts",
-                "-y",
                 output_path,
             ]
 
@@ -257,20 +279,28 @@ class Converter:
 
             self._active_processes[filename] = process
 
-            # Parse progress from stderr by line
+            # Parse progress from stderr using chunks to fix the \r block issue
             stderr_data = []
+            buffer = ""
             while True:
-                line_bytes = await process.stderr.readline()
-                if not line_bytes:
+                chunk = await process.stderr.read(4096)
+                if not chunk:
                     break
-                line = line_bytes.decode("utf-8", errors="replace")
-                stderr_data.append(line)
-
-                # Extract time from FFmpeg output
-                match = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", line)
-                if match and duration > 0:
-                    current_time = int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
-                    info.progress = min(current_time / duration, 0.99)
+                
+                buffer += chunk.decode("utf-8", errors="replace")
+                
+                if '\r' in buffer or '\n' in buffer:
+                    lines = buffer.replace('\r', '\n').split('\n')
+                    buffer = lines.pop()  # Keep the last incomplete part
+                    
+                    for line in lines:
+                        if line.strip():
+                            stderr_data.append(line)
+                        # Extract time from FFmpeg output
+                        match = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", line)
+                        if match and duration > 0:
+                            current_time = int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
+                            info.progress = min(current_time / duration, 0.99)
 
             await process.wait()
 
