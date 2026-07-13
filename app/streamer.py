@@ -9,6 +9,7 @@ import re
 import subprocess
 import logging
 import tempfile
+import time
 from datetime import datetime, date
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -16,6 +17,7 @@ from typing import Dict, List, Optional, Tuple
 
 from app.ffmpeg_setup import get_ffmpeg_path, get_mediamtx_path, is_ffmpeg_installed, is_mediamtx_installed
 from app.thumbnails import generate_thumbnail, get_video_metadata
+from app.config import load_config, update_config
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,7 @@ class StreamInfo:
     status: str = "starting"  # starting, live, error, stopped
     error: str = ""
     progress: float = 0.0
+    start_offset: float = 0.0  # Time skipped at start for sync
     metadata: dict = field(default_factory=dict)
     log_task: Optional[asyncio.Task] = field(default=None, repr=False)
     mediamtx_process: Optional[subprocess.Popen] = field(default=None, repr=False)
@@ -59,6 +62,7 @@ class Streamer:
         self._port_range_start: int = 1935
         self._port_range_end: int = 1944
         self._current_folder_name: str = ""
+        self._current_folder_start_time: float = 0.0
         self._errors: List[str] = []
 
     def scan_content_folder(self, folder_path: str) -> List[dict]:
@@ -167,9 +171,12 @@ class Streamer:
 
         return {"status": "started"}
 
-    async def stop_streaming(self) -> dict:
+    async def stop_streaming(self, is_shutdown: bool = False) -> dict:
         """Stop all active streams and the scheduler."""
         self.is_running = False
+
+        if not is_shutdown:
+            update_config({"streamer": {"auto_resume": False}})
 
         if self._scheduler_task:
             self._scheduler_task.cancel()
@@ -214,8 +221,11 @@ class Streamer:
             if f.name == name:
                 return f
         return None
+        
     async def _scheduler_loop(self):
         """Main scheduler loop — checks date and manages folder transitions."""
+        cfg = load_config()
+        
         try:
             while self.is_running:
                 today = date.today()
@@ -232,7 +242,10 @@ class Streamer:
 
                 # Check if we need to switch folders
                 if active_folder.name != self._current_folder_name:
-                    logger.info(f"Switching to folder: {active_folder.name}")
+                    update_config({"streamer": {
+                        "current_folder": active_folder.name
+                    }})
+                    logger.info(f"Loading folder: {active_folder.name} (Syncing to 00:00)")
 
                     # Stop current streams (let them finish gracefully)
                     await self._stop_all_streams()
@@ -281,16 +294,29 @@ class Streamer:
 
     async def _start_single_stream(self, filename: str, filepath: str, port: int):
         """Start MediaMTX + FFmpeg for a single file on a specific port."""
-        # FIX 1: Change URL path to match what you are trying to open in VLC (/live/stream)
         rtmp_url = f"rtmp://127.0.0.1:{port}/live/stream"
 
         metadata = get_video_metadata(filepath)
+        duration = metadata.get("duration", 0)
+        
+        # Calculate time since 00:00 (midnight) today
+        now = datetime.now()
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        elapsed_since_midnight = (now - midnight).total_seconds()
+
+        # Calculate exact position within the video file.
+        # Modulo is required because FFmpeg's -ss parameter will fail if the offset is larger than the file duration.
+        offset = 0.0
+        if duration > 0:
+            offset = elapsed_since_midnight % duration
+
         stream_info = StreamInfo(
             filename=filename,
             filepath=filepath,
             port=port,
             rtmp_url=rtmp_url,
             status="starting",
+            start_offset=offset,
             metadata=metadata,
         )
         self.active_streams[port] = stream_info
@@ -324,12 +350,18 @@ class Streamer:
                 get_ffmpeg_path(),
                 "-re",                    # Read at native frame rate
                 "-stream_loop", "-1",     # Loop forever
+            ]
+            
+            # Jump directly to sync position before reading input (fast seek)
+            if offset > 0:
+                ffmpeg_cmd.extend(["-ss", str(offset)])
+                
+            ffmpeg_cmd.extend([
                 "-i", filepath,
                 "-c", "copy",             # No re-encoding
                 "-f", "flv",              # RTMP output format
-                # FIX 1 continued: Ensure FFmpeg pushes to the same path VLC expects
-                f"rtmp://127.0.0.1:{port}/live/stream",
-            ]
+                rtmp_url,
+            ])
 
             ffmpeg_process = await asyncio.create_subprocess_exec(
                 *ffmpeg_cmd,
@@ -351,7 +383,7 @@ class Streamer:
                 return
 
             stream_info.status = "live"
-            logger.info(f"Stream started: {filename} on port {port}")
+            logger.info(f"Stream started: {filename} on port {port} (Elapsed since 00:00: {round(elapsed_since_midnight)}s, File Seek Offset: {round(offset, 2)}s)")
             
             # Start background task to read logs and update progress
             stream_info.log_task = asyncio.create_task(
@@ -445,13 +477,13 @@ paths:
 
             # Check if FFmpeg is still running
             if stream.ffmpeg_process and stream.ffmpeg_process.returncode is not None:
-                logger.warning(f"FFmpeg died on port {port}, restarting...")
+                logger.warning(f"FFmpeg died on port {port}, restarting with synced offset...")
                 await self._stop_single_stream(port)
                 await self._start_single_stream(stream.filename, stream.filepath, port)
 
             # Check if MediaMTX is still running
             elif stream.mediamtx_process and stream.mediamtx_process.poll() is not None:
-                logger.warning(f"MediaMTX died on port {port}, restarting...")
+                logger.warning(f"MediaMTX died on port {port}, restarting with synced offset...")
                 await self._stop_single_stream(port)
                 await self._start_single_stream(stream.filename, stream.filepath, port)
 
@@ -461,9 +493,6 @@ paths:
         buffer = ""
         try:
             while True:
-                # FIX 2: Use .read() instead of .readline(). 
-                # FFmpeg updates progress using carriage returns (\r) instead of newlines (\n). 
-                # .readline() won't find \n, buffers infinitely, and throws the LimitOverrunError.
                 chunk = await stderr_stream.read(4096)
                 if not chunk:
                     break
@@ -479,9 +508,12 @@ paths:
                         match = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", line)
                         if match and duration > 0:
                             current_time = int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
-                            # Since stream loops forever, progress is modulo duration
-                            current_loop_time = current_time % duration
-                            stream_info.progress = current_loop_time / duration
+                            
+                            # Because FFmpeg's time= starts at 0 due to the -ss flag,
+                            # we must add the start offset to accurately represent UI progress 
+                            # inside the full video loop
+                            total_time = current_time + stream_info.start_offset
+                            stream_info.progress = (total_time % duration) / duration
         except asyncio.CancelledError:
             pass
         except Exception as e:

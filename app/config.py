@@ -7,21 +7,24 @@ import os
 import yaml
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Optional
 
 CONFIG_PATH = Path(__file__).parent.parent / "config.yml"
 
 
 @dataclass
 class ConverterConfig:
-    source_folder: str = ""
+    source_folder: str = "input/"
 
 
 @dataclass
 class StreamerConfig:
-    content_folder: str = ""
+    content_folder: str = "streams/"
     port_range_start: int = 1935
     port_range_end: int = 1944
+    # Auto-resume settings
+    auto_resume: bool = False
+    current_folder: str = ""
+    folder_start_time: float = 0.0
 
 
 @dataclass

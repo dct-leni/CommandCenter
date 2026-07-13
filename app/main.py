@@ -5,6 +5,7 @@ Serves the Web UI and provides REST API for converter and streamer.
 
 import logging
 import os
+import asyncio
 from dataclasses import asdict
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -31,9 +32,24 @@ logger = logging.getLogger("commandcenter")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Auto-resume check on boot
+    cfg = load_config()
+    if cfg.streamer.auto_resume and cfg.streamer.content_folder:
+        logger.info(f"Auto-resume enabled, loading folder: {cfg.streamer.content_folder}")
+        
+        # FIX: The streamer singleton is empty on boot. 
+        # We must populate its internal folder list before calling start_streaming.
+        streamer.scan_content_folder(cfg.streamer.content_folder)
+        
+        asyncio.create_task(
+            streamer.start_streaming(cfg.streamer.port_range_start, cfg.streamer.port_range_end)
+        )
+        
     yield
+    
     if streamer.is_running:
-        await streamer.stop_streaming()
+        # Pass is_shutdown=True to prevent wiping auto_resume state on restart
+        await streamer.stop_streaming(is_shutdown=True)
 
 # Create FastAPI app
 app = FastAPI(title="CommandCenter", version="1.0.0", lifespan=lifespan)
@@ -269,10 +285,11 @@ async def streamer_start(body: StreamStartRequest):
     port_start = body.port_range_start or cfg.streamer.port_range_start
     port_end = body.port_range_end or cfg.streamer.port_range_end
 
-    # Save port range to config
+    # Save port range and set auto_resume
     update_config({"streamer": {
         "port_range_start": port_start,
         "port_range_end": port_end,
+        "auto_resume": True
     }})
 
     result = await streamer.start_streaming(port_start, port_end)
@@ -282,7 +299,7 @@ async def streamer_start(body: StreamStartRequest):
 @app.post("/api/streamer/stop")
 async def streamer_stop():
     """Stop all active streams."""
-    result = await streamer.stop_streaming()
+    result = await streamer.stop_streaming(is_shutdown=False)
     return result
 
 
@@ -362,6 +379,7 @@ def main():
         port=cfg.server.port,
         log_level="info",
         use_colors=False,
+        access_log=False,
     )
 
 
