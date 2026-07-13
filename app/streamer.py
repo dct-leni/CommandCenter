@@ -62,7 +62,6 @@ class Streamer:
         self._port_range_start: int = 1935
         self._port_range_end: int = 1944
         self._current_folder_name: str = ""
-        self._current_folder_start_time: float = 0.0
         self._errors: List[str] = []
 
     def scan_content_folder(self, folder_path: str) -> List[dict]:
