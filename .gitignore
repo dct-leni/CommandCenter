@@ -1,0 +1,16 @@
+# Environment
+__pycache__/
+*.pyc
+
+# Binaries and downloaded dependencies
+bin/
+mediamtx_*
+
+# Caches
+thumbnails/
+
+# Input/Output
+input/
+streams/
+# Config (optional, depends if you want to commit default config or not)
+# config.yml
