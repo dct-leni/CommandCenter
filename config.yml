@@ -2,10 +2,10 @@ converter:
   source_folder: input/
 streamer:
   content_folder: streams/
-  port_range_start: 1935
-  port_range_end: 1944
-  protocol: rtmp
-  auto_resume: false
+  port_range_start: 1923
+  port_range_end: 1925
+  protocol: hls
+  auto_resume: true
   current_folder: '1207_1507'
 server:
   host: 0.0.0.0

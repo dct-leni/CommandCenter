@@ -302,13 +302,13 @@ class Streamer:
         if protocol == "hls":
             public_port = port
             internal_rtmp_port = port + 6000
-            stream_url = f"http://127.0.0.1:{public_port}/live/stream/index.m3u8"
+            stream_url = f"http://127.0.0.1:{public_port}/stream/index.m3u8"
         else:
             public_port = port
             internal_rtmp_port = port
-            stream_url = f"rtmp://127.0.0.1:{public_port}/live/stream"
+            stream_url = f"rtmp://127.0.0.1:{public_port}/stream"
 
-        ingest_url = f"rtmp://127.0.0.1:{internal_rtmp_port}/live/stream"
+        ingest_url = f"rtmp://127.0.0.1:{internal_rtmp_port}/stream"
 
         metadata = get_video_metadata(filepath)
         duration = metadata.get("duration", 0)
@@ -435,7 +435,7 @@ api: no
 moq: no
 
 paths:
-  all:
+  stream:
     source: publisher
 """
         config_dir = Path(tempfile.gettempdir()) / "commandcenter"
