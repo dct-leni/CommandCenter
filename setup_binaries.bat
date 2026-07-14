@@ -8,13 +8,13 @@ echo portable binaries to the bin\ folder.
 echo Run this ONCE before using the app.
 echo.
 
-REM ---- Python 3.14 ----
-echo [0/2] Checking for Python 3.14...
-python --version 2>&1 | findstr "3.14" >nul
+REM ---- Python 3.10+ ----
+echo [0/2] Checking for Python 3.10 or newer...
+python -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" 2>nul
 if %ERRORLEVEL% equ 0 (
-    echo [OK] Python 3.14 is already installed.
+    echo [OK] Python 3.10 or newer is already installed.
 ) else (
-    echo [INFO] Python 3.14 not found. Installing via winget...
+    echo [INFO] Python 3.10+ not found. Installing Python 3.14 via winget...
     winget install -e --id Python.Python.3.14 --accept-package-agreements --accept-source-agreements
     
     if %ERRORLEVEL% equ 0 (
