@@ -90,6 +90,16 @@ document.addEventListener('DOMContentLoaded', async () => {
         document.getElementById('streamer-folder').value = state.config.streamer.content_folder;
         await scanStreamerFolder(state.config.streamer.content_folder);
     }
+    document.getElementById('stream-protocol').addEventListener('change', (e) => {
+        api('PUT', '/config', { streamer: { protocol: e.target.value } })
+            .then(() => showToast('Protocol saved', 'success')).catch(console.error);
+    });
+    document.getElementById('port-start').addEventListener('change', (e) => {
+        api('PUT', '/config', { streamer: { port_range_start: parseInt(e.target.value) } }).catch(console.error);
+    });
+    document.getElementById('port-end').addEventListener('change', (e) => {
+        api('PUT', '/config', { streamer: { port_range_end: parseInt(e.target.value) } }).catch(console.error);
+    });
 });
 
 function applyConfig() {
@@ -107,6 +117,9 @@ function applyConfig() {
     }
     if (streamer?.port_range_end) {
         document.getElementById('port-end').value = streamer.port_range_end;
+    }
+    if (streamer?.protocol) {
+        document.getElementById('stream-protocol').value = streamer.protocol;
     }
 }
 
@@ -371,17 +384,19 @@ function renderFolderFiles(folder) {
         
         // Metadata from folder details or stream status
         let meta = fileObj.metadata || null;
+        let streamInfo = null;
 
         if (state.streamStatus && state.streamStatus.active_streams) {
             const stream = state.streamStatus.active_streams.find(s => s.filename === filename);
             if (stream) {
+                streamInfo = stream;
                 if (stream.metadata) meta = stream.metadata;
                 
                 if (stream.status === 'live') {
                     portHtml = `
                         <span class="folder-file-port">
                             <span class="live-dot"></span>
-                            :${stream.port}
+                            ${stream.port}
                         </span>
                     `;
                     const pct = Math.round((stream.progress || 0) * 100);
@@ -391,22 +406,31 @@ function renderFolderFiles(folder) {
                         </div>
                     `;
                 } else {
-                    portHtml = `<span class="folder-file-port">:${stream.port} (${stream.status})</span>`;
+                    portHtml = `<span class="folder-file-port">${stream.port} (${stream.status})</span>`;
                 }
             }
         }
         
+        let details = [];
         if (meta && !meta.error) {
-            let details = [];
             if (meta.duration) {
                 const mins = Math.floor(meta.duration / 60);
                 const secs = Math.floor(meta.duration % 60);
                 details.push(`${mins}:${secs.toString().padStart(2, '0')}`);
             }
             if (meta.width && meta.height) details.push(`${meta.width}x${meta.height}`);
-            if (details.length > 0) {
-                metaHtml = `<div class="file-meta" style="font-size: 0.85em; margin-top: 2px;">${details.join(' • ')}</div>`;
+        }
+
+        // Display Streaming URL if stream is active (fallback to rtmp_url if stream_url is missing)
+        if (streamInfo) {
+            const displayUrl = streamInfo.stream_url || streamInfo.rtmp_url;
+            if (displayUrl) {
+                details.push(`<span onclick="copyToClipboard('${escapeAttr(displayUrl)}'); event.stopPropagation();" style="cursor: pointer; color: var(--blue); text-decoration: underline;" title="Click to copy URL">🔗 ${escapeHtml(displayUrl)}</span>`);
             }
+        }
+
+        if (details.length > 0) {
+            metaHtml = `<div class="file-meta" style="font-size: 0.85em; margin-top: 2px; display: flex; gap: 8px; align-items: center;">${details.join(' <span style="color:var(--border);">•</span> ')}</div>`;
         }
 
         return `
@@ -487,6 +511,7 @@ function updateStreamUI() {
 async function startStreaming() {
     const portStart = parseInt(document.getElementById('port-start').value);
     const portEnd = parseInt(document.getElementById('port-end').value);
+    const protocol = document.getElementById('stream-protocol').value;
 
     if (isNaN(portStart) || isNaN(portEnd) || portStart > portEnd) {
         showToast('Invalid port range', 'error');
@@ -497,6 +522,7 @@ async function startStreaming() {
         const data = await api('POST', '/streamer/start', {
             port_range_start: portStart,
             port_range_end: portEnd,
+            protocol: protocol
         });
 
         if (data.status === 'error') {
@@ -678,6 +704,12 @@ function escapeAttr(str) {
     return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
+function copyToClipboard(text) {
+    navigator.clipboard.writeText(text)
+        .then(() => showToast('URL copied to clipboard!', 'success'))
+        .catch(err => showToast('Failed to copy URL', 'error'));
+}
+
 // ──────────────────────────────────────────────
 //  Drag and Drop
 // ──────────────────────────────────────────────
@@ -737,3 +769,4 @@ window.handleDragStart = handleDragStart;
 window.handleDragOver = handleDragOver;
 window.handleDragLeave = handleDragLeave;
 window.handleDrop = handleDrop;
+window.copyToClipboard = copyToClipboard;

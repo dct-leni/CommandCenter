@@ -4,7 +4,8 @@ streamer:
   content_folder: streams/
   port_range_start: 1935
   port_range_end: 1944
-  auto_resume: true
+  protocol: rtmp
+  auto_resume: false
   current_folder: '1207_1507'
 server:
   host: 0.0.0.0

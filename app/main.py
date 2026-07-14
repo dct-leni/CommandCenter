@@ -80,6 +80,7 @@ class ConvertRequest(BaseModel):
 class StreamStartRequest(BaseModel):
     port_range_start: Optional[int] = None
     port_range_end: Optional[int] = None
+    protocol: Optional[str] = None
 
 
 class MoveFileRequest(BaseModel):
@@ -284,17 +285,18 @@ async def streamer_start(body: StreamStartRequest):
     cfg = load_config()
     port_start = body.port_range_start or cfg.streamer.port_range_start
     port_end = body.port_range_end or cfg.streamer.port_range_end
+    protocol = body.protocol or cfg.streamer.protocol
 
-    # Save port range and set auto_resume
+    # Save port range, protocol and set auto_resume
     update_config({"streamer": {
         "port_range_start": port_start,
         "port_range_end": port_end,
+        "protocol": protocol,
         "auto_resume": True
     }})
 
     result = await streamer.start_streaming(port_start, port_end)
     return result
-
 
 @app.post("/api/streamer/stop")
 async def streamer_stop():

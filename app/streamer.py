@@ -28,7 +28,8 @@ class StreamInfo:
     filename: str
     filepath: str
     port: int
-    rtmp_url: str
+    rtmp_url: str  # Internal ingest URL
+    stream_url: str = ""  # Public playback URL for UI
     status: str = "starting"  # starting, live, error, stopped
     error: str = ""
     progress: float = 0.0
@@ -198,6 +199,7 @@ class Streamer:
                 "filename": info.filename,
                 "port": info.port,
                 "rtmp_url": info.rtmp_url,
+                "stream_url": info.stream_url,  # New: Display URL for Web UI
                 "status": info.status,
                 "error": info.error,
                 "progress": round(info.progress, 3),
@@ -223,8 +225,6 @@ class Streamer:
         
     async def _scheduler_loop(self):
         """Main scheduler loop — checks date and manages folder transitions."""
-        cfg = load_config()
-        
         try:
             while self.is_running:
                 today = date.today()
@@ -293,7 +293,22 @@ class Streamer:
 
     async def _start_single_stream(self, filename: str, filepath: str, port: int):
         """Start MediaMTX + FFmpeg for a single file on a specific port."""
-        rtmp_url = f"rtmp://127.0.0.1:{port}/live/stream"
+        cfg = load_config()
+        protocol = cfg.streamer.protocol.lower()
+
+        # The 'port' parameter is the public port requested by the user in the UI.
+        # If the user wants HLS on the public port, we must move the internal RTMP 
+        # ingest port to a hidden one to prevent a binding conflict in MediaMTX.
+        if protocol == "hls":
+            public_port = port
+            internal_rtmp_port = port + 6000
+            stream_url = f"http://127.0.0.1:{public_port}/live/stream/index.m3u8"
+        else:
+            public_port = port
+            internal_rtmp_port = port
+            stream_url = f"rtmp://127.0.0.1:{public_port}/live/stream"
+
+        ingest_url = f"rtmp://127.0.0.1:{internal_rtmp_port}/live/stream"
 
         metadata = get_video_metadata(filepath)
         duration = metadata.get("duration", 0)
@@ -303,8 +318,6 @@ class Streamer:
         midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
         elapsed_since_midnight = (now - midnight).total_seconds()
 
-        # Calculate exact position within the video file.
-        # Modulo is required because FFmpeg's -ss parameter will fail if the offset is larger than the file duration.
         offset = 0.0
         if duration > 0:
             offset = elapsed_since_midnight % duration
@@ -313,7 +326,8 @@ class Streamer:
             filename=filename,
             filepath=filepath,
             port=port,
-            rtmp_url=rtmp_url,
+            rtmp_url=ingest_url,
+            stream_url=stream_url,
             status="starting",
             start_offset=offset,
             metadata=metadata,
@@ -322,7 +336,7 @@ class Streamer:
 
         try:
             # 1. Create a minimal MediaMTX config for this port
-            mtx_config = self._create_mediamtx_config(port)
+            mtx_config = self._create_mediamtx_config(internal_rtmp_port, public_port, protocol)
 
             # 2. Start MediaMTX
             mtx_process = subprocess.Popen(
@@ -359,7 +373,7 @@ class Streamer:
                 "-i", filepath,
                 "-c", "copy",             # No re-encoding
                 "-f", "flv",              # RTMP output format
-                rtmp_url,
+                ingest_url,
             ])
 
             ffmpeg_process = await asyncio.create_subprocess_exec(
@@ -382,7 +396,7 @@ class Streamer:
                 return
 
             stream_info.status = "live"
-            logger.info(f"Stream started: {filename} on port {port} (Elapsed since 00:00: {round(elapsed_since_midnight)}s, File Seek Offset: {round(offset, 2)}s)")
+            logger.info(f"Stream started: {filename} on public port {public_port} (Protocol: {protocol.upper()})")
             
             # Start background task to read logs and update progress
             stream_info.log_task = asyncio.create_task(
@@ -395,19 +409,26 @@ class Streamer:
             logger.error(f"Failed to start stream for {filename}: {e}")
             self._errors.append(str(e))
 
-    def _create_mediamtx_config(self, port: int) -> str:
-        """Create a temporary MediaMTX YAML config for a specific RTMP port."""
-        # Disable all protocols except RTMP, assign unique ports to avoid conflicts
+    def _create_mediamtx_config(self, internal_rtmp_port: int, public_port: int, protocol: str) -> str:
+        """Create a temporary MediaMTX YAML config for a specific RTMP port and target protocol."""
+        
+        hls_block = "hls: no"
+        if protocol == "hls":
+            hls_block = f"hls: yes\nhlsAddress: :{public_port}\nhlsAlwaysRemux: yes\nhlsVariant: lowLatency"
+
+        # Disable all unused protocols, assign unique ports to avoid conflicts
         config_content = f"""
 logLevel: warn
 logDestinations: [stdout]
 
-# RTMP
-rtmpAddress: :{port}
+# RTMP Ingest (Always used by FFmpeg)
+rtmpAddress: :{internal_rtmp_port}
+
+# Target Protocol configuration
+{hls_block}
 
 # Disable other protocols to avoid port conflicts
 rtsp: no
-hls: no
 webrtc: no
 srt: no
 api: no
@@ -419,7 +440,7 @@ paths:
 """
         config_dir = Path(tempfile.gettempdir()) / "commandcenter"
         config_dir.mkdir(parents=True, exist_ok=True)
-        config_path = config_dir / f"mediamtx_{port}.yml"
+        config_path = config_dir / f"mediamtx_{public_port}.yml"
 
         with open(config_path, "w") as f:
             f.write(config_content)

@@ -21,6 +21,7 @@ class StreamerConfig:
     content_folder: str = "streams/"
     port_range_start: int = 1935
     port_range_end: int = 1944
+    protocol: str = "rtmp"  # rtmp or hls
     auto_resume: bool = False
     current_folder: str = ""
 

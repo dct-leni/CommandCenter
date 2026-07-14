@@ -248,7 +248,7 @@ class Converter:
                 "-bufsize", "16M",         # VBR buffer
                 "-g", "60",                # Force keyframe every 2 seconds (crucial for RTMP)
                 "-c:a", "aac",
-                "-b:a", "192k",            # Higher audio bitrate
+                "-b:a", "320k",            # Higher audio bitrate
                 "-ac", "2",                # Force stereo audio
                 "-f", "mpegts",
                 output_path,
@@ -263,7 +263,7 @@ class Converter:
                 "-bufsize", "16M",
                 "-g", "60",
                 "-c:a", "aac",
-                "-b:a", "192k",
+                "-b:a", "320k",
                 "-ac", "2",
                 "-f", "mpegts",
                 output_path,

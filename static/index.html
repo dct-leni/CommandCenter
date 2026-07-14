@@ -79,12 +79,22 @@
                     </button>
                 </div>
 
-                <div class="port-range-row">
-                    <label>Port Range</label>
-                    <div class="port-inputs">
-                        <input type="number" id="port-start" value="1935" min="1024" max="65535">
-                        <span class="port-sep">—</span>
-                        <input type="number" id="port-end" value="1944" min="1024" max="65535">
+                <!-- FIX: Side-by-side Protocol and Port Range inputs -->
+                <div class="port-range-row" style="display: flex; gap: 16px;">
+                    <div style="flex: 1;">
+                        <label style="display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-secondary); margin-bottom: 4px;">Protocol</label>
+                        <select id="stream-protocol" style="width: 50%; padding: 8px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: inherit; font-size: 0.95rem;">
+                            <option value="rtmp">RTMP</option>
+                            <option value="hls">HLS</option>
+                        </select>
+                    </div>
+                    <div style="flex: 2;">
+                        <label style="display: block; font-size: 0.8rem; font-weight: 500; color: var(--text-secondary); margin-bottom: 4px;">Port Range</label>
+                        <div class="port-inputs">
+                            <input type="number" id="port-start" value="1935" min="1024" max="65535">
+                            <span class="port-sep">—</span>
+                            <input type="number" id="port-end" value="1944" min="1024" max="65535">
+                        </div>
                     </div>
                 </div>
 
