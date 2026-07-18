@@ -79,7 +79,7 @@ function formatMetaBadge(meta) {
 }
 
 function getThumbHtml(src, hasThumb = true, className = 'slot-file-thumb') {
-    const placeholder = `<div class="${className}-placeholder" style="width:54px;height:30px;background:var(--bg-card);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;">🎬</div>`;
+    const placeholder = `<div class="${className}-placeholder" style="width:54px;height:30px;background:var(--bg-card);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;"><i class="fa-solid fa-film"></i></div>`;
     if (hasThumb === false) return placeholder;
     const safePlaceholder = placeholder.replace(/"/g, '&quot;').replace(/'/g, "\\'");
     return `<img class="${className}" src="${src}" alt="" loading="lazy" onerror="this.outerHTML='${safePlaceholder}'">`;
@@ -257,7 +257,7 @@ function renderConverterFiles() {
     if (state.converterFiles.length === 0) {
         container.innerHTML = `
             <div class="empty-state">
-                <div class="empty-icon">📂</div>
+                <div class="empty-icon"><i class="fa-regular fa-folder-open"></i></div>
                 <p>No video files found in this folder</p>
             </div>
         `;
@@ -301,8 +301,8 @@ function renderConverterFiles() {
         ].filter(Boolean).join(' • ');
 
         let notesList = [];
-        if (file.audio_note) notesList.push(`🔊 ${escapeHtml(file.audio_note)}`);
-        if (file.scaled_note) notesList.push(`📐 ${escapeHtml(file.scaled_note)}`);
+        if (file.audio_note) notesList.push(`<i class="fa-solid fa-volume-high"></i> ${escapeHtml(file.audio_note)}`);
+        if (file.scaled_note) notesList.push(`<i class="fa-solid fa-ruler"></i> ${escapeHtml(file.scaled_note)}`);
         const notesHtml = notesList.length ? `<div class="file-notes" style="font-size: 11px; color: var(--text-muted); margin-top: 3px;">${notesList.join(' • ')}</div>` : '';
 
         return `
@@ -403,7 +403,7 @@ function renderStreamerFolders() {
     if (state.streamerFolders.length === 0) {
         container.innerHTML = `
             <div class="empty-state">
-                <div class="empty-icon">📡</div>
+                <div class="empty-icon"><i class="fa-solid fa-satellite-dish"></i></div>
                 <p>No date-range folders found (expected format: DDMM_DDMM)</p>
                 <div style="margin-top: 15px; text-align: center;">
                     <button class="btn btn-secondary" onclick="openCreateFolderModal()">+ New Folder</button>
@@ -423,14 +423,14 @@ function renderStreamerFolders() {
                  ondragleave="handleDragLeave(event)"
                  ondrop="handleDrop(event, '${escapeAttr(folder.name)}')">
                 <div class="folder-card-header" onclick="toggleFolder('${folder.name}')">
-                    <span class="folder-icon">📂</span>
+                    <span class="folder-icon"><i class="fa-regular fa-folder"></i></span>
                     <span class="folder-card-title">${folder.name}</span>
                     ${isActive ? '<span class="folder-active-tag">Active</span>' : ''}
                     <span class="folder-date-range">${folder.display_range}</span>
                     <span class="folder-file-count">${folder.file_count} files</span>
-                    <button class="folder-edit-btn" onclick="openModifyFolderModal(event, '${escapeAttr(folder.name)}')" title="Modify Date Range" style="background:none; border:none; cursor:pointer; font-size:14px; padding:2px 6px; border-radius:4px; opacity:0.7;">✏️</button>
-                    ${!isActive ? `<button class="folder-delete-btn" onclick="deleteFolder(event, '${escapeAttr(folder.name)}')" title="Remove Folder (Moves videos back to Input)" style="background:none; border:none; cursor:pointer; font-size:14px; padding:2px 6px; border-radius:4px; opacity:0.7; color:var(--red);">🗑️</button>` : ''}
-                    <span class="folder-chevron ${isExpanded ? 'open' : ''}">▶</span>
+                    <button class="folder-edit-btn" onclick="openModifyFolderModal(event, '${escapeAttr(folder.name)}')" title="Modify Date Range"><i class="fa-solid fa-pen"></i></button>
+                    ${!isActive ? `<button class="folder-delete-btn" onclick="deleteFolder(event, '${escapeAttr(folder.name)}')" title="Remove Folder (Moves videos back to Input)"><i class="fa-solid fa-trash"></i></button>` : ''}
+                    <i class="fa-solid fa-chevron-right folder-chevron ${isExpanded ? 'open' : ''}"></i>
                 </div>
                 <div class="folder-card-body ${isExpanded ? 'open' : ''}" id="folder-body-${folder.name}">
                     ${isExpanded ? renderFolderFiles(folder) : ''}
@@ -509,7 +509,7 @@ function renderFolderFiles(folder) {
             displayUrl = `rtmp://127.0.0.1:${port}/stream`;
         }
         const urlHtml = `<div class="slot-url" onclick="copyToClipboard('${escapeAttr(displayUrl)}'); event.stopPropagation();" title="Click to copy playback link (${protocol})">
-            🔗 ${escapeHtml(displayUrl)} <span style="opacity:0.75; font-size:10px;">[${protocol}]</span>
+            <i class="fa-solid fa-link"></i> ${escapeHtml(displayUrl)} <span style="opacity:0.75; font-size:10px;">[${protocol}]</span>
         </div>`;
 
         // Progress bar
@@ -534,12 +534,12 @@ function renderFolderFiles(folder) {
                         <span class="slot-file-name" title="${escapeHtml(fname)}">${escapeHtml(fname)}</span>
                         ${metaBadge ? `<span class="slot-file-meta">${metaBadge}</span>` : ''}
                     </div>
-                    ${isCurrent ? '<span class="slot-playing-badge">▶ Playing</span>' : ''}
+                    ${isCurrent ? '<span class="slot-playing-badge"><i class="fa-solid fa-play"></i> Playing</span>' : ''}
                     <div class="slot-reorder-buttons" style="display:flex; gap:2px; flex-shrink:0;">
-                        <button class="slot-reorder-btn" onclick="moveFileInSlot(event, '${escapeAttr(folder.name)}', ${port}, ${fi}, -1)" title="Move Up" style="background:none; border:none; cursor:pointer; font-size:12px; padding:2px; opacity:0.6;" ${fi === 0 ? 'disabled style="opacity:0.2;"' : ''}>▲</button>
-                        <button class="slot-reorder-btn" onclick="moveFileInSlot(event, '${escapeAttr(folder.name)}', ${port}, ${fi}, 1)" title="Move Down" style="background:none; border:none; cursor:pointer; font-size:12px; padding:2px; opacity:0.6;" ${fi === files.length - 1 ? 'disabled style="opacity:0.2;"' : ''}>▼</button>
+                        <button class="slot-reorder-btn" onclick="moveFileInSlot(event, '${escapeAttr(folder.name)}', ${port}, ${fi}, -1)" title="Move Up" ${fi === 0 ? 'disabled' : ''}><i class="fa-solid fa-caret-up"></i></button>
+                        <button class="slot-reorder-btn" onclick="moveFileInSlot(event, '${escapeAttr(folder.name)}', ${port}, ${fi}, 1)" title="Move Down" ${fi === files.length - 1 ? 'disabled' : ''}><i class="fa-solid fa-caret-down"></i></button>
                     </div>
-                    <button class="slot-remove-btn" onclick="removeFileFromSlot(event, '${escapeAttr(folder.name)}', ${port}, '${escapeAttr(fname)}')" title="Remove">✕</button>
+                    <button class="slot-remove-btn" onclick="removeFileFromSlot(event, '${escapeAttr(folder.name)}', ${port}, '${escapeAttr(fname)}')" title="Remove"><i class="fa-solid fa-xmark"></i></button>
                 </div>
             `;
         }).join('');
@@ -775,7 +775,7 @@ async function generateEpg() {
     }
 
     btn.disabled = true;
-    btn.textContent = '⏳ Generating...';
+    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Generating...';
     try {
         const data = await api('POST', `/streamer/folder/${encodeURIComponent(folderName)}/epg`);
         showToast(`EPG saved: ${data.filename}`, 'success');
@@ -783,7 +783,7 @@ async function generateEpg() {
         showToast(`EPG failed: ${e.message}`, 'error');
     } finally {
         btn.disabled = false;
-        btn.innerHTML = '<span class="btn-icon">📋</span> Generate EPG';
+        btn.innerHTML = '<span class="btn-icon"><i class="fa-solid fa-list-check"></i></span> Generate EPG';
     }
 }
 
@@ -819,7 +819,7 @@ function updateStreamUI() {
     // Show errors
     if (state.streamStatus.errors && state.streamStatus.errors.length > 0) {
         errorsEl.style.display = 'block';
-        errorsEl.innerHTML = state.streamStatus.errors.map(e => `<p>⚠ ${escapeHtml(e)}</p>`).join('');
+        errorsEl.innerHTML = state.streamStatus.errors.map(e => `<p><i class="fa-solid fa-triangle-exclamation"></i> ${escapeHtml(e)}</p>`).join('');
     } else {
         errorsEl.style.display = 'none';
     }
@@ -948,8 +948,7 @@ function renderBreadcrumb(currentPath, parentPath) {
     let accumulated = '';
     const items = [];
 
-    // Root/Drive
-    items.push(`<span class="breadcrumb-item" onclick="browseTo('')">💻</span>`);
+    items.push(`<span class="breadcrumb-item" onclick="browseTo('')"><i class="fa-solid fa-laptop"></i></span>`);
 
     parts.forEach((part, i) => {
         accumulated += part + '/';
@@ -980,7 +979,7 @@ function renderBrowserEntries(entries, currentPath) {
     body.innerHTML = dirs.map(entry => {
         return `
             <div class="modal-dir-item" ondblclick="browseTo('${escapeAttr(entry.path)}')" onclick="selectBrowserItem(this, '${escapeAttr(entry.path)}')">
-                <span class="modal-dir-icon">📁</span>
+                <span class="modal-dir-icon"><i class="fa-regular fa-folder"></i></span>
                 <span class="modal-dir-name">${escapeHtml(entry.name)}</span>
             </div>
         `;

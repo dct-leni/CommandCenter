@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,24 +8,35 @@
     <title>CommandCenter</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Chakra+Petch:ital,wght@0,500;0,600;0,700;1,500&family=Inter:wght@400;500;600&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;1,400&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
     <link rel="stylesheet" href="/static/style.css">
 </head>
+
 <body>
 
     <!-- Header -->
     <header class="app-header">
         <div class="header-left">
-            <div class="logo-mark">⚡</div>
-            <h1>CommandCenter</h1>
-            <span class="version-badge">v1.0</span>
+            <div class="logo-mark"><i class="fa-solid fa-bolt"></i></div>
+            <div class="header-titles">
+                <h1>CommandCenter</h1>
+                <span class="panel-subtitle">VIDEO & STREAMING</span>
+            </div>
+            <span class="version-badge">V0.2</span>
         </div>
         <div class="header-right">
             <div class="system-status" id="system-status">
-                <span class="status-dot" id="ffmpeg-dot"></span>
-                <span class="status-label">FFmpeg</span>
-                <span class="status-dot" id="mediamtx-dot"></span>
-                <span class="status-label">MediaMTX</span>
+                <div class="status-indicator">
+                    <span class="status-dot" id="ffmpeg-dot"></span>
+                    <span class="status-label">FFmpeg</span>
+                </div>
+                <div class="status-indicator">
+                    <span class="status-dot" id="mediamtx-dot"></span>
+                    <span class="status-label">MediaMTX</span>
+                </div>
             </div>
         </div>
     </header>
@@ -35,6 +47,7 @@
         <section class="panel panel-converter" id="panel-converter">
             <div class="panel-header">
                 <h2>Converter</h2>
+                <span class="panel-subtitle">// TRANSCODE MODULE</span>
             </div>
 
             <!-- Folder Selector -->
@@ -42,7 +55,7 @@
                 <div class="input-group">
                     <input type="text" id="converter-folder" placeholder="Select source folder..." readonly>
                     <button class="btn btn-secondary" id="converter-browse-btn" title="Browse">
-                        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.879a1.5 1.5 0 0 1 1.06.44l1.122 1.12A1.5 1.5 0 0 0 9.62 4H13.5A1.5 1.5 0 0 1 15 5.5v7a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 1 12.5v-9z"/></svg>
+                        <i class="fa-regular fa-folder-open"></i>
                     </button>
                 </div>
                 <div class="action-row">
@@ -56,7 +69,7 @@
             <!-- File List -->
             <div class="file-list" id="converter-file-list">
                 <div class="empty-state">
-                    <div class="empty-icon">📂</div>
+                    <div class="empty-icon"><i class="fa-regular fa-folder-open"></i></div>
                     <p>Select a folder to scan for video files</p>
                 </div>
             </div>
@@ -66,6 +79,7 @@
         <section class="panel panel-streamer" id="panel-streamer">
             <div class="panel-header">
                 <h2>Streamer</h2>
+                <span class="panel-subtitle">// MULTI-SLOT BROADCAST</span>
             </div>
 
             <!-- Folder Selector + Controls -->
@@ -73,15 +87,17 @@
                 <div class="input-group">
                     <input type="text" id="streamer-folder" placeholder="Select content folder..." readonly>
                     <button class="btn btn-secondary" id="streamer-browse-btn" title="Browse">
-                        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 3.5A1.5 1.5 0 0 1 2.5 2h3.879a1.5 1.5 0 0 1 1.06.44l1.122 1.12A1.5 1.5 0 0 0 9.62 4H13.5A1.5 1.5 0 0 1 15 5.5v7a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 1 12.5v-9z"/></svg>
+                        <i class="fa-regular fa-folder-open"></i>
                     </button>
                 </div>
 
                 <!-- Single row: Protocol, Port Range, Start, Stop, EPG, Status -->
-                <div class="action-row" style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 10px;">
+                <div class="action-row"
+                    style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 10px;">
                     <div style="display: flex; align-items: center; gap: 6px;">
                         <span style="font-size: 13px; color: var(--text-secondary); font-weight: 500;">Protocol</span>
-                        <select id="stream-protocol" style="padding: 6px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: inherit; font-size: 13px;">
+                        <select id="stream-protocol"
+                            style="padding: 6px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: inherit; font-size: 13px;">
                             <option value="rtmp">RTMP</option>
                             <option value="hls">HLS</option>
                         </select>
@@ -90,20 +106,23 @@
                     <div style="display: flex; align-items: center; gap: 6px;">
                         <span style="font-size: 13px; color: var(--text-secondary); font-weight: 500;">Port Range</span>
                         <div class="port-inputs" style="display: flex; align-items: center; gap: 4px;">
-                            <input type="number" id="port-start" value="1935" min="1024" max="65535" style="width: 72px; padding: 6px 8px; font-size: 13px;">
+                            <input type="number" id="port-start" value="1935" min="1024" max="65535"
+                                style="width: 72px; padding: 6px 8px; font-size: 13px;">
                             <span class="port-sep">—</span>
-                            <input type="number" id="port-end" value="1944" min="1024" max="65535" style="width: 72px; padding: 6px 8px; font-size: 13px;">
+                            <input type="number" id="port-end" value="1944" min="1024" max="65535"
+                                style="width: 72px; padding: 6px 8px; font-size: 13px;">
                         </div>
                     </div>
 
                     <button class="btn btn-accent" id="stream-start-btn" disabled>
-                        <span class="btn-icon">▶</span> Start Streaming
+                        <span class="btn-icon"><i class="fa-solid fa-play"></i></span> Start Streaming
                     </button>
                     <button class="btn btn-danger" id="stream-stop-btn" disabled>
-                        <span class="btn-icon">⏹</span> Stop
+                        <span class="btn-icon"><i class="fa-solid fa-stop"></i></span> Stop
                     </button>
-                    <button class="btn btn-secondary" id="epg-generate-btn" disabled title="Generate EPG XML for the selected folder">
-                        <span class="btn-icon">📋</span> Generate EPG
+                    <button class="btn btn-secondary" id="epg-generate-btn" disabled
+                        title="Generate EPG XML for the selected folder">
+                        <span class="btn-icon"><i class="fa-solid fa-list-check"></i></span> Generate EPG
                     </button>
                     <div class="stream-status-badge" id="stream-status-badge">
                         Idle
@@ -117,7 +136,7 @@
             <!-- Folder List -->
             <div class="folder-list" id="streamer-folder-list">
                 <div class="empty-state">
-                    <div class="empty-icon">📡</div>
+                    <div class="empty-icon"><i class="fa-solid fa-satellite-dish"></i></div>
                     <p>Select a content folder to discover date-range subfolders</p>
                 </div>
             </div>
@@ -129,7 +148,7 @@
         <div class="modal">
             <div class="modal-header">
                 <h3>Browse Folders</h3>
-                <button class="modal-close" id="modal-close-btn">✕</button>
+                <button class="modal-close" id="modal-close-btn"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div class="modal-breadcrumb" id="modal-breadcrumb"></div>
             <div class="modal-body" id="modal-body">
@@ -150,7 +169,7 @@
         <div class="modal" style="max-width: 540px;">
             <div class="modal-header">
                 <h3>Select Video (<span id="file-picker-port"></span>)</h3>
-                <button class="modal-close" id="file-picker-close">✕</button>
+                <button class="modal-close" id="file-picker-close"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div class="modal-body" id="file-picker-body" style="max-height: 400px; overflow-y: auto;">
                 <div class="modal-loading">Loading converted files...</div>
@@ -163,16 +182,22 @@
         <div class="modal" style="max-width: 440px;">
             <div class="modal-header">
                 <h3>Create Date-Range Folder</h3>
-                <button class="modal-close" onclick="closeCreateFolderModal()">✕</button>
+                <button class="modal-close" onclick="closeCreateFolderModal()"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div class="modal-body" style="padding: 16px; display: flex; flex-direction: column; gap: 12px;">
-                <p style="font-size: 13px; color: var(--text-secondary); margin: 0;">Enter folder name in <code>DDMM_DDMM</code> format (e.g. <code>1207_1907</code> for 12 July → 19 July):</p>
+                <p style="font-size: 13px; color: var(--text-secondary); margin: 0;">Enter folder name in
+                    <code>DDMM_DDMM</code> format (e.g. <code>1207_1907</code> for 12 July → 19 July):
+                </p>
                 <div>
-                    <label style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Folder Name</label>
-                    <input type="text" id="folder-create-name" placeholder="DDMM_DDMM (e.g. 1207_1907)" style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 14px;">
+                    <label
+                        style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Folder
+                        Name</label>
+                    <input type="text" id="folder-create-name" placeholder="DDMM_DDMM (e.g. 1207_1907)"
+                        style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 14px;">
                 </div>
             </div>
-            <div class="modal-footer" style="padding: 12px 16px; display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--border);">
+            <div class="modal-footer"
+                style="padding: 12px 16px; display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--border);">
                 <button class="btn btn-secondary" onclick="closeCreateFolderModal()">Cancel</button>
                 <button class="btn btn-primary" onclick="submitCreateFolder()">Create</button>
             </div>
@@ -184,16 +209,22 @@
         <div class="modal" style="max-width: 440px;">
             <div class="modal-header">
                 <h3>Modify Date-Range Folder</h3>
-                <button class="modal-close" onclick="closeModifyFolderModal()">✕</button>
+                <button class="modal-close" onclick="closeModifyFolderModal()"><i class="fa-solid fa-xmark"></i></button>
             </div>
             <div class="modal-body" style="padding: 16px; display: flex; flex-direction: column; gap: 12px;">
-                <p style="font-size: 13px; color: var(--text-secondary); margin: 0;">Update date range for folder <strong id="folder-modify-old-name" style="font-family: 'JetBrains Mono', monospace;"></strong>:</p>
+                <p style="font-size: 13px; color: var(--text-secondary); margin: 0;">Update date range for folder
+                    <strong id="folder-modify-old-name" style="font-family: 'JetBrains Mono', monospace;"></strong>:
+                </p>
                 <div>
-                    <label style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">New Folder Name (DDMM_DDMM)</label>
-                    <input type="text" id="folder-modify-name" placeholder="DDMM_DDMM (e.g. 1207_2007)" style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 14px;">
+                    <label
+                        style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">New
+                        Folder Name (DDMM_DDMM)</label>
+                    <input type="text" id="folder-modify-name" placeholder="DDMM_DDMM (e.g. 1207_2007)"
+                        style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 14px;">
                 </div>
             </div>
-            <div class="modal-footer" style="padding: 12px 16px; display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--border);">
+            <div class="modal-footer"
+                style="padding: 12px 16px; display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--border);">
                 <button class="btn btn-secondary" onclick="closeModifyFolderModal()">Cancel</button>
                 <button class="btn btn-primary" onclick="submitModifyFolder()">Save</button>
             </div>
@@ -202,4 +233,5 @@
 
     <script src="/static/app.js"></script>
 </body>
+
 </html>

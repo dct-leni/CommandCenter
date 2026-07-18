@@ -131,12 +131,15 @@ async def put_config(body: ConfigUpdate):
     updates = body.model_dump(exclude_none=True)
     if streamer.is_running and "streamer" in updates:
         s_updates = updates["streamer"]
-        blocked_keys = {"protocol", "port_range_start", "port_range_end", "content_folder"}
-        if any(k in s_updates for k in blocked_keys):
-            raise HTTPException(
-                status_code=400,
-                detail="Cannot modify protocol, port range, or streams folder while streaming is in progress. Stop streaming first."
-            )
+        cfg = load_config()
+        if "protocol" in s_updates and s_updates["protocol"] != cfg.streamer.protocol:
+            raise HTTPException(status_code=400, detail="Cannot modify protocol while streaming is in progress. Stop streaming first.")
+        if "port_range_start" in s_updates and s_updates["port_range_start"] != cfg.streamer.port_range_start:
+            raise HTTPException(status_code=400, detail="Cannot modify port range while streaming is in progress. Stop streaming first.")
+        if "port_range_end" in s_updates and s_updates["port_range_end"] != cfg.streamer.port_range_end:
+            raise HTTPException(status_code=400, detail="Cannot modify port range while streaming is in progress. Stop streaming first.")
+        if "content_folder" in s_updates and s_updates["content_folder"].strip() != cfg.streamer.content_folder:
+            raise HTTPException(status_code=400, detail="Cannot modify streams folder while streaming is in progress. Stop streaming first.")
     cfg = update_config(updates)
     if "streamer" in updates:
         streamer.cleanup_playlists()
@@ -262,14 +265,15 @@ async def converter_move(body: MoveFileRequest):
 @app.post("/api/streamer/scan")
 async def streamer_scan(body: FolderPath):
     """Scan root folder for date-range subfolders."""
-    if streamer.is_running:
+    path = body.path.strip()
+    if not path or not Path(path).is_dir():
+        raise HTTPException(status_code=400, detail="Invalid folder path")
+
+    if streamer.is_running and path != streamer.content_folder:
         raise HTTPException(
             status_code=400,
             detail="Cannot change streams folder while streaming is in progress. Stop streaming first."
         )
-    path = body.path.strip()
-    if not path or not Path(path).is_dir():
-        raise HTTPException(status_code=400, detail="Invalid folder path")
 
     # Save to config
     update_config({"streamer": {"content_folder": path}})
@@ -345,6 +349,16 @@ async def streamer_update_slot(folder_name: str, body: SlotUpdate):
     if not folder:
         raise HTTPException(status_code=404, detail="Folder not found")
     ok = streamer.update_slot(folder_name, body.port, body.files)
+    
+    # Restart the active stream dynamically to apply new order
+    if streamer.is_running and body.port in streamer.active_streams:
+        slots = streamer._load_slots_for_folder(folder)
+        updated_slot = next((s for s in slots if s.port == body.port), None)
+        if updated_slot:
+            logger.info(f"Restarting stream on port {body.port} due to slot update")
+            await streamer._stop_single_stream(body.port)
+            await streamer._start_slot_stream(updated_slot, folder)
+
     return {"status": "ok", "folder": folder_name, "port": body.port, "files": body.files}
 
 
@@ -355,6 +369,20 @@ async def streamer_remove_slot_file(folder_name: str, body: SlotRemoveFile):
     if not folder:
         raise HTTPException(status_code=404, detail="Folder not found")
     streamer.remove_file_from_slot(folder_name, body.port, body.filename)
+    
+    # Restart active stream dynamically or remove from active if no files left
+    if streamer.is_running and body.port in streamer.active_streams:
+        slots = streamer._load_slots_for_folder(folder)
+        updated_slot = next((s for s in slots if s.port == body.port), None)
+        if updated_slot:
+            logger.info(f"Restarting stream on port {body.port} due to file removal")
+            await streamer._stop_single_stream(body.port)
+            if updated_slot.files:
+                await streamer._start_slot_stream(updated_slot, folder)
+            else:
+                if body.port in streamer.active_streams:
+                    del streamer.active_streams[body.port]
+
     return {"status": "ok"}
 
 

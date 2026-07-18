@@ -37,6 +37,7 @@ class StreamInfo:
     progress: float = 0.0
     current_file_index: int = 0  # which file in slot is currently playing
     start_offset: float = 0.0   # Time skipped at start for sync
+    cycle_start_offset: float = 0.0 # Time offset since beginning of the cycle
     metadata: dict = field(default_factory=dict)  # metadata of first file in slot
     log_task: Optional[asyncio.Task] = field(default=None, repr=False)
     mediamtx_process: Optional[subprocess.Popen] = field(default=None, repr=False)
@@ -72,6 +73,7 @@ class StreamInfo:
             "progress": round(self.progress, 3),
             "current_file_index": self.current_file_index,
             "start_offset": self.start_offset,
+            "cycle_start_offset": self.cycle_start_offset,
             "metadata": self.metadata,
         }
 
@@ -792,6 +794,10 @@ class Streamer:
         # Primary metadata = first file
         metadata = get_video_metadata(slot.paths[0]) if slot.paths else {}
 
+        # Compute cycle start offset (duration of all previous files + seek offset)
+        cum_dur = sum(slot.durations[:file_index])
+        cycle_start_offset = cum_dur + seek_offset
+
         stream_info = StreamInfo(
             port=port,
             slot_files=list(slot.files),
@@ -802,6 +808,7 @@ class Streamer:
             status="starting",
             current_file_index=file_index,
             start_offset=seek_offset,
+            cycle_start_offset=cycle_start_offset,
             metadata=metadata,
         )
         self.active_streams[port] = stream_info
@@ -998,8 +1005,8 @@ paths:
                                 + int(match.group(2)) * 60
                                 + float(match.group(3))
                             )
-                            # Add the initial seek offset to get true cycle position
-                            true_pos = (stream_info.start_offset + ffmpeg_elapsed) % cycle_duration
+                            # Add the initial cycle start offset to get true cycle position
+                            true_pos = (stream_info.cycle_start_offset + ffmpeg_elapsed) % cycle_duration
                             stream_info.progress = true_pos / cycle_duration
 
                             # Update current_file_index
