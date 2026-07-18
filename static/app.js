@@ -223,9 +223,13 @@ async function checkSystemStatus() {
         state.systemStatus = await api('GET', '/system/status');
         const ffmpegDot = document.getElementById('ffmpeg-dot');
         const mediamtxDot = document.getElementById('mediamtx-dot');
+        const codecLabel = document.getElementById('codec-status-label');
 
         ffmpegDot.className = `status-dot ${state.systemStatus.ffmpeg ? 'ok' : 'error'}`;
         mediamtxDot.className = `status-dot ${state.systemStatus.mediamtx ? 'ok' : 'error'}`;
+        if (codecLabel && state.systemStatus.best_encoder) {
+            codecLabel.textContent = `Codec: ${state.systemStatus.best_encoder}`;
+        }
     } catch (e) {
         console.error('System status check failed:', e);
     }

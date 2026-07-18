@@ -22,7 +22,6 @@ if %ERRORLEVEL% equ 0 (
         echo      NOTE: You may need to restart your terminal after this script finishes to update your PATH.
     ) else (
         echo [ERROR] Failed to install Python 3.14 via winget. Please install it manually.
-    )
 )
 echo.
 
@@ -30,7 +29,7 @@ set BIN_DIR=%~dp0bin
 if not exist "%BIN_DIR%" mkdir "%BIN_DIR%"
 
 REM ---- FFmpeg / FFprobe ----
-set FFMPEG_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip
+set FFMPEG_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-8.1.zip
 set FFMPEG_ZIP=%BIN_DIR%\ffmpeg.zip
 
 REM Only skip the download if BOTH ffmpeg.exe and ffprobe.exe are present.

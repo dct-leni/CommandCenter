@@ -9,7 +9,7 @@ streamer:
   port_range_start: 1923
   port_range_end: 1925
   protocol: hls
-  auto_resume: true
+  auto_resume: false
   current_folder: '1207_1907'
   channel_prefix: Salon
   epg_timezone: '+0300'
