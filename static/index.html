@@ -133,11 +133,18 @@
             <!-- Stream errors -->
             <div class="stream-errors" id="stream-errors" style="display: none;"></div>
 
-            <!-- Folder List -->
-            <div class="folder-list" id="streamer-folder-list">
-                <div class="empty-state">
-                    <div class="empty-icon"><i class="fa-solid fa-satellite-dish"></i></div>
-                    <p>Select a content folder to discover date-range subfolders</p>
+            <!-- Unified Scrollable Container for Folders & Relays -->
+            <div class="streamer-scroll-container" id="streamer-scroll-area">
+                <!-- Folder List -->
+                <div class="folder-list-dynamic" id="streamer-folder-list">
+                    <div class="empty-state">
+                        <div class="empty-icon"><i class="fa-solid fa-satellite-dish"></i></div>
+                        <p>Select a content folder to discover date-range subfolders</p>
+                    </div>
+                </div>
+
+                <!-- Live Streams List -->
+                <div class="folder-list-dynamic" id="live-streams-list" style="margin-top: 12px;">
                 </div>
             </div>
         </section>
@@ -182,7 +189,8 @@
         <div class="modal" style="max-width: 440px;">
             <div class="modal-header">
                 <h3>Create Date-Range Folder</h3>
-                <button class="modal-close" onclick="closeCreateFolderModal()"><i class="fa-solid fa-xmark"></i></button>
+                <button class="modal-close" onclick="closeCreateFolderModal()"><i
+                        class="fa-solid fa-xmark"></i></button>
             </div>
             <div class="modal-body" style="padding: 16px; display: flex; flex-direction: column; gap: 12px;">
                 <p style="font-size: 13px; color: var(--text-secondary); margin: 0;">Enter folder name in
@@ -209,7 +217,8 @@
         <div class="modal" style="max-width: 440px;">
             <div class="modal-header">
                 <h3>Modify Date-Range Folder</h3>
-                <button class="modal-close" onclick="closeModifyFolderModal()"><i class="fa-solid fa-xmark"></i></button>
+                <button class="modal-close" onclick="closeModifyFolderModal()"><i
+                        class="fa-solid fa-xmark"></i></button>
             </div>
             <div class="modal-body" style="padding: 16px; display: flex; flex-direction: column; gap: 12px;">
                 <p style="font-size: 13px; color: var(--text-secondary); margin: 0;">Update date range for folder
@@ -227,6 +236,87 @@
                 style="padding: 12px 16px; display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--border);">
                 <button class="btn btn-secondary" onclick="closeModifyFolderModal()">Cancel</button>
                 <button class="btn btn-primary" onclick="submitModifyFolder()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Live Stream Create/Edit Modal -->
+    <div class="modal-overlay" id="livestream-modal" style="display: none;">
+        <div class="modal" style="max-width: 460px;">
+            <div class="modal-header">
+                <h3 id="livestream-modal-title">Create Live HTTP Stream</h3>
+                <button class="modal-close" onclick="closeLiveStreamModal()"><i class="fa-solid fa-xmark"></i></button>
+            </div>
+            <div class="modal-body" style="padding: 16px; display: flex; flex-direction: column; gap: 14px;">
+                <div>
+                    <label
+                        style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Stream
+                        / Channel Name</label>
+                    <input type="text" id="livestream-name" placeholder="e.g. HDMI Relay or Salon Live"
+                        style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 13.5px;">
+                    <input type="hidden" id="livestream-id">
+                </div>
+                <div>
+                    <label
+                        style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Source
+                        Stream URL</label>
+                    <input type="text" id="livestream-url" placeholder="e.g. http://127.0.0.1:1971/hdmi or rtmp://..."
+                        style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                    <div>
+                        <label
+                            style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Output
+                            HTTP Port</label>
+                        <input type="number" id="livestream-port" placeholder="1913" value="1913"
+                            style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
+                    </div>
+                    <div>
+                        <label
+                            style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Video
+                            Codec</label>
+                        <select id="livestream-codec"
+                            style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--bg-input); border: 1px solid var(--border); color: var(--text-primary); font-size: 13px;">
+                            <option value="h264_nvenc">h264_nvenc (NVIDIA GPU)</option>
+                            <option value="libx264">libx264 (CPU)</option>
+                            <option value="copy">copy (Direct Passthrough)</option>
+                        </select>
+                    </div>
+                </div>
+                <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
+                    <input type="checkbox" id="livestream-autostart"
+                        style="width: 16px; height: 16px; cursor: pointer;">
+                    <label for="livestream-autostart"
+                        style="font-size: 13px; color: var(--text-primary); cursor: pointer;">Auto-start stream on
+                        server boot</label>
+                </div>
+            </div>
+            <div class="modal-footer"
+                style="padding: 12px 16px; display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--border);">
+                <button class="btn btn-secondary" onclick="closeLiveStreamModal()">Cancel</button>
+                <button class="btn btn-primary" id="livestream-save-btn" onclick="submitLiveStream()">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Global Heavy Operation Loading Overlay -->
+    <div class="modal-overlay" id="loading-overlay"
+        style="display: none; z-index: 10000; background: rgba(8, 10, 16, 0.85); backdrop-filter: blur(8px);">
+        <div class="modal loading-popup-card"
+            style="max-width: 420px; text-align: center; padding: 32px 24px; border: 1px solid var(--border); box-shadow: 0 20px 50px rgba(0, 0, 0, 0.7);">
+            <div class="loading-spinner-container" style="margin-bottom: 20px; display: flex; justify-content: center;">
+                <div class="loading-spinner-ring"></div>
+            </div>
+            <h3 id="loading-overlay-title"
+                style="margin: 0 0 10px 0; font-size: 18px; font-weight: 600; color: var(--text-primary);">Processing
+                File Transfer...</h3>
+            <p id="loading-overlay-message"
+                style="font-size: 14px; color: var(--text-secondary); margin: 0 0 16px 0; line-height: 1.5;">Moving
+                large video file(s). Please wait while the operation completes.</p>
+            <div
+                style="display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 12px; color: var(--accent); background: rgba(0, 240, 255, 0.08); padding: 8px 14px; border-radius: var(--radius-sm); border: 1px dashed rgba(0, 240, 255, 0.25);">
+                <i class="fa-solid fa-circle-info"></i>
+                <span>Do not close or refresh the browser window</span>
             </div>
         </div>
     </div>

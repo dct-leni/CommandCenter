@@ -17,12 +17,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
 
-from app.config import load_config, update_config, save_config
+from app.config import load_config, update_config, save_config, LiveStreamItem
 from app.ffmpeg_setup import get_binaries_status
 from app.converter import converter
 from app.streamer import streamer
 from app.thumbnails import get_thumbnail_path, generate_thumbnail
 from app.epg import generate_epg
+from app.live_relay import live_relay_manager
 
 # Configure logging
 logging.basicConfig(
@@ -36,24 +37,33 @@ async def lifespan(app: FastAPI):
     # Resolve external IP on app start
     asyncio.create_task(streamer._resolve_external_ip())
 
-    # Auto-resume check on boot
+    # Populate configured folders and handle auto-resume on boot
     cfg = load_config()
-    if cfg.streamer.auto_resume and cfg.streamer.content_folder:
-        logger.info(f"Auto-resume enabled, loading folder: {cfg.streamer.content_folder}")
-        
-        # FIX: The streamer singleton is empty on boot. 
-        # We must populate its internal folder list before calling start_streaming.
+    if cfg.streamer.content_folder and Path(cfg.streamer.content_folder).is_dir():
         streamer.scan_content_folder(cfg.streamer.content_folder)
+        if cfg.streamer.auto_resume:
+            logger.info(f"Auto-resume enabled, starting stream for folder: {cfg.streamer.content_folder}")
+            asyncio.create_task(
+                streamer.start_streaming(cfg.streamer.port_range_start, cfg.streamer.port_range_end)
+            )
         
-        asyncio.create_task(
-            streamer.start_streaming(cfg.streamer.port_range_start, cfg.streamer.port_range_end)
-        )
-        
+    # Resume auto_start live streams across server restarts
+    for ls_item in cfg.streamer.live_streams:
+        if ls_item.get("auto_start"):
+            try:
+                logger.info(f"Auto-resuming live relay stream: {ls_item.get('name')} on :{ls_item.get('port')}")
+                asyncio.create_task(live_relay_manager.start_stream(ls_item.get("id")))
+            except Exception as e:
+                logger.error(f"Failed to auto-resume live stream {ls_item.get('id')}: {e}")
+
     yield
     
     if streamer.is_running:
         # Pass is_shutdown=True to prevent wiping auto_resume state on restart
         await streamer.stop_streaming(is_shutdown=True)
+
+    for ls_status in list(live_relay_manager.active_relays.values()):
+        await live_relay_manager.stop_stream(ls_status.id)
 
 # Create FastAPI app
 app = FastAPI(title="CommandCenter", version="1.0.0", lifespan=lifespan)
@@ -110,6 +120,22 @@ class FolderModifyRequest(BaseModel):
     new_name: str
 
 
+class LiveStreamCreateRequest(BaseModel):
+    name: str
+    url: str
+    port: int
+    codec: str = "h264_nvenc"
+    auto_start: bool = False
+
+
+class LiveStreamUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    url: Optional[str] = None
+    port: Optional[int] = None
+    codec: Optional[str] = None
+    auto_start: Optional[bool] = None
+
+
 # ──────────────────────────────────────────────
 #  Root — serve index.html
 # ──────────────────────────────────────────────
@@ -117,6 +143,48 @@ class FolderModifyRequest(BaseModel):
 @app.get("/")
 async def root():
     return FileResponse(str(STATIC_DIR / "index.html"))
+
+
+# ──────────────────────────────────────────────
+#  Port Conflict Validation Helpers
+# ──────────────────────────────────────────────
+
+def check_port_conflict(port: int, cfg, ignore_live_stream_id: Optional[str] = None):
+    """Verify that a requested livestream port does not cross folder stream slots or other livestreams."""
+    if cfg.streamer.port_range_start <= port <= cfg.streamer.port_range_end:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Port {port} falls within the folder stream port range ({cfg.streamer.port_range_start}-{cfg.streamer.port_range_end}). Livestream and folder stream ports cannot cross."
+        )
+
+    for folder_name, slots in cfg.streamer.playlists.items():
+        for slot in slots:
+            if slot.get("port") == port:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Port {port} is already assigned to a folder stream slot in folder '{folder_name}'. Livestream and folder stream ports cannot cross."
+                )
+
+    for item in cfg.streamer.live_streams:
+        if item.get("id") != ignore_live_stream_id and item.get("port") == port:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Port {port} is already in use by live stream '{item.get('name', item.get('id'))}'."
+            )
+
+
+def check_port_range_conflict(port_start: int, port_end: int, cfg):
+    """Verify that a requested folder stream port range does not cross existing livestreams."""
+    if port_start > port_end:
+        raise HTTPException(status_code=400, detail="Invalid port range: start port cannot be greater than end port.")
+
+    for item in cfg.streamer.live_streams:
+        ls_port = item.get("port")
+        if ls_port is not None and port_start <= ls_port <= port_end:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot set folder stream port range ({port_start}-{port_end}): Port {ls_port} is currently assigned to live stream '{item.get('name', item.get('id'))}'. Livestream and folder stream ports cannot cross."
+            )
 
 
 # ──────────────────────────────────────────────
@@ -143,6 +211,14 @@ async def put_config(body: ConfigUpdate):
             raise HTTPException(status_code=400, detail="Cannot modify port range while streaming is in progress. Stop streaming first.")
         if "content_folder" in s_updates and s_updates["content_folder"].strip() != cfg.streamer.content_folder:
             raise HTTPException(status_code=400, detail="Cannot modify streams folder while streaming is in progress. Stop streaming first.")
+    if "streamer" in updates:
+        cfg = load_config()
+        s_updates = updates["streamer"]
+        new_start = s_updates.get("port_range_start", cfg.streamer.port_range_start)
+        new_end = s_updates.get("port_range_end", cfg.streamer.port_range_end)
+        if new_start != cfg.streamer.port_range_start or new_end != cfg.streamer.port_range_end:
+            check_port_range_conflict(new_start, new_end, cfg)
+
     cfg = update_config(updates)
     if "streamer" in updates:
         streamer.cleanup_playlists()
@@ -170,8 +246,10 @@ async def converter_scan(body: FolderPath):
     if not path or not Path(path).is_dir():
         raise HTTPException(status_code=400, detail="Invalid folder path")
 
-    # Save to config
-    update_config({"converter": {"source_folder": path}})
+    # Save to config if changed
+    cfg = load_config()
+    if cfg.converter.source_folder != path:
+        update_config({"converter": {"source_folder": path}})
 
     files = converter.scan_folder(path)
     return {"folder": path, "files": files, "count": len(files)}
@@ -278,8 +356,10 @@ async def streamer_scan(body: FolderPath):
             detail="Cannot change streams folder while streaming is in progress. Stop streaming first."
         )
 
-    # Save to config
-    update_config({"streamer": {"content_folder": path}})
+    # Save to config if changed
+    cfg = load_config()
+    if cfg.streamer.content_folder != path:
+        update_config({"streamer": {"content_folder": path}})
 
     folders = streamer.scan_content_folder(path)
     return {"folder": path, "folders": folders, "count": len(folders)}
@@ -348,6 +428,14 @@ async def streamer_delete_folder(folder_name: str):
 @app.put("/api/streamer/folder/{folder_name}/slot")
 async def streamer_update_slot(folder_name: str, body: SlotUpdate):
     """Update the file list for a specific port slot in a folder."""
+    cfg = load_config()
+    for item in cfg.streamer.live_streams:
+        if item.get("port") == body.port:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Port {body.port} is currently assigned to live stream '{item.get('name', item.get('id'))}'. Livestream and folder stream ports cannot cross."
+            )
+
     folder = streamer._find_folder(folder_name)
     if not folder:
         raise HTTPException(status_code=404, detail="Folder not found")
@@ -494,6 +582,8 @@ async def streamer_start(body: StreamStartRequest):
     port_end = body.port_range_end or cfg.streamer.port_range_end
     protocol = body.protocol or cfg.streamer.protocol
 
+    check_port_range_conflict(port_start, port_end, cfg)
+
     # Save port range, protocol and set auto_resume
     update_config({"streamer": {
         "port_range_start": port_start,
@@ -516,6 +606,96 @@ async def streamer_stop():
 async def streamer_status():
     """Get current streaming status."""
     return streamer.get_status()
+
+
+# ──────────────────────────────────────────────
+#  Live Relay Streams
+# ──────────────────────────────────────────────
+
+@app.get("/api/streamer/live_streams")
+async def get_live_streams():
+    """List all configured live relay streams with status."""
+    return {"live_streams": live_relay_manager.get_all_status()}
+
+
+@app.get("/api/streamer/live_stream/{stream_id}/thumbnail")
+async def live_stream_thumbnail(stream_id: str):
+    """Get the cached thumbnail for a live stream."""
+    from app.thumbnails import THUMBNAILS_DIR
+    thumb_path = THUMBNAILS_DIR / f"live_{stream_id}.jpg"
+    if thumb_path.exists():
+        return FileResponse(str(thumb_path))
+    raise HTTPException(status_code=404, detail="Thumbnail not found")
+
+
+@app.post("/api/streamer/live_stream")
+async def create_live_stream(body: LiveStreamCreateRequest):
+    """Create a new live relay stream."""
+    import uuid
+    cfg = load_config()
+    check_port_conflict(body.port, cfg)
+    stream_id = f"live_{uuid.uuid4().hex[:8]}"
+    new_item = {
+        "id": stream_id,
+        "name": body.name,
+        "url": body.url,
+        "port": body.port,
+        "codec": body.codec,
+        "auto_start": body.auto_start,
+    }
+    cfg.streamer.live_streams.append(new_item)
+    update_config({"streamer": {"live_streams": cfg.streamer.live_streams}})
+    return {"status": "success", "live_stream": new_item}
+
+
+@app.put("/api/streamer/live_stream/{stream_id}")
+async def update_live_stream(stream_id: str, body: LiveStreamUpdateRequest):
+    """Update an existing live relay stream."""
+    cfg = load_config()
+    if body.port is not None:
+        check_port_conflict(body.port, cfg, ignore_live_stream_id=stream_id)
+    for item in cfg.streamer.live_streams:
+        if item.get("id") == stream_id:
+            if body.name is not None:
+                item["name"] = body.name
+            if body.url is not None:
+                item["url"] = body.url
+            if body.port is not None:
+                item["port"] = body.port
+            if body.codec is not None:
+                item["codec"] = body.codec
+            if body.auto_start is not None:
+                item["auto_start"] = body.auto_start
+            update_config({"streamer": {"live_streams": cfg.streamer.live_streams}})
+            return {"status": "success", "live_stream": item}
+    raise HTTPException(status_code=404, detail="Live stream not found")
+
+
+@app.delete("/api/streamer/live_stream/{stream_id}")
+async def delete_live_stream(stream_id: str):
+    """Delete a live relay stream."""
+    await live_relay_manager.stop_stream(stream_id)
+    cfg = load_config()
+    cfg.streamer.live_streams = [x for x in cfg.streamer.live_streams if x.get("id") != stream_id]
+    update_config({"streamer": {"live_streams": cfg.streamer.live_streams}})
+    return {"status": "success"}
+
+
+@app.post("/api/streamer/live_stream/{stream_id}/start")
+async def start_live_stream(stream_id: str):
+    """Start the FFmpeg relay process for a live stream."""
+    try:
+        res = await live_relay_manager.start_stream(stream_id)
+        return {"status": "success", "live_stream": res}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/streamer/live_stream/{stream_id}/stop")
+async def stop_live_stream(stream_id: str):
+    """Stop the FFmpeg relay process for a live stream."""
+    res = await live_relay_manager.stop_stream(stream_id)
+    return {"status": "success", "live_stream": res}
 
 
 # ──────────────────────────────────────────────

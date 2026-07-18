@@ -17,6 +17,7 @@ const state = {
     folderBrowserPath: '',
     expandedFolders: new Set(),
     pollingInterval: null,
+    liveStreams: [],
 };
 
 // ──────────────────────────────────────────────
@@ -43,13 +44,42 @@ async function api(method, path, body = null) {
     }
 }
 
+function showLoadingOverlay(title = 'Processing File Transfer...', message = 'Moving large video file(s). Please wait while the operation completes.') {
+    const overlay = document.getElementById('loading-overlay');
+    const titleEl = document.getElementById('loading-overlay-title');
+    const msgEl = document.getElementById('loading-overlay-message');
+    if (titleEl) titleEl.textContent = title;
+    if (msgEl) msgEl.textContent = message;
+    if (overlay) overlay.style.display = 'flex';
+}
+
+function hideLoadingOverlay() {
+    const overlay = document.getElementById('loading-overlay');
+    if (overlay) overlay.style.display = 'none';
+}
+
+window.showLoadingOverlay = showLoadingOverlay;
+window.hideLoadingOverlay = hideLoadingOverlay;
+
 async function rescanFolders(converter = true, streamer = true) {
     if (converter && state.config?.converter?.source_folder) {
         await scanConverterFolder(state.config.converter.source_folder);
     }
     if (streamer && state.config?.streamer?.content_folder) {
-        await scanStreamerFolder(state.config.streamer.content_folder);
+        if (state.streamStatus?.is_running) {
+            try {
+                const data = await api('GET', '/streamer/folders');
+                await setStreamerFoldersAndRefresh(data.folders);
+                const startBtn = document.getElementById('stream-start-btn');
+                if (startBtn) startBtn.disabled = false;
+            } catch (e) {
+                await scanStreamerFolder(state.config.streamer.content_folder);
+            }
+        } else {
+            await scanStreamerFolder(state.config.streamer.content_folder);
+        }
     }
+    await fetchLiveStreams();
 }
 
 async function updateConfigSetting(updates, rescan = false) {
@@ -78,8 +108,8 @@ function formatMetaBadge(meta) {
     return parts.join(' · ');
 }
 
-function getThumbHtml(src, hasThumb = true, className = 'slot-file-thumb') {
-    const placeholder = `<div class="${className}-placeholder" style="width:54px;height:30px;background:var(--bg-card);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;"><i class="fa-solid fa-film"></i></div>`;
+function getThumbHtml(src, hasThumb = true, className = 'slot-file-thumb', placeholderIcon = 'fa-film') {
+    const placeholder = `<div class="${className}-placeholder"><i class="fa-solid ${placeholderIcon}"></i></div>`;
     if (hasThumb === false) return placeholder;
     const safePlaceholder = placeholder.replace(/"/g, '&quot;').replace(/'/g, "\\'");
     return `<img class="${className}" src="${src}" alt="" loading="lazy" onerror="this.outerHTML='${safePlaceholder}'">`;
@@ -230,6 +260,9 @@ async function pollStreamStatus() {
         const data = await api('GET', '/streamer/status');
         state.streamStatus = data;
         updateStreamUI();
+        const lsData = await api('GET', '/streamer/live_streams');
+        state.liveStreams = lsData.live_streams || [];
+        renderLiveStreams();
     } catch (e) {
         // Silent fail on poll
     }
@@ -405,8 +438,9 @@ function renderStreamerFolders() {
             <div class="empty-state">
                 <div class="empty-icon"><i class="fa-solid fa-satellite-dish"></i></div>
                 <p>No date-range folders found (expected format: DDMM_DDMM)</p>
-                <div style="margin-top: 15px; text-align: center;">
+                <div style="margin-top: 15px; display: flex; justify-content: center; gap: 10px;">
                     <button class="btn btn-secondary" onclick="openCreateFolderModal()">+ New Folder</button>
+                    <button class="btn btn-secondary" onclick="openCreateLiveStreamModal()">+ New Stream</button>
                 </div>
             </div>
         `;
@@ -440,9 +474,12 @@ function renderStreamerFolders() {
     }).join('');
 
     const newFolderBtnHtml = `
-        <div style="display: flex; justify-content: center; margin: 20px 0;">
+        <div style="display: flex; justify-content: center; gap: 10px; margin: 20px 0;">
             <button class="btn btn-secondary" onclick="openCreateFolderModal()" style="padding: 8px 16px;">
                 + New Folder
+            </button>
+            <button class="btn btn-secondary" onclick="openCreateLiveStreamModal()" style="padding: 8px 16px;">
+                + New Stream
             </button>
         </div>
     `;
@@ -671,6 +708,7 @@ async function addFileToSlot(folderName, port, filename) {
         return;
     }
 
+    showLoadingOverlay('Adding Video to Slot...', `Moving '${filename}' to folder '${folderName}' for port :${port}...`);
     try {
         await api('PUT', `/streamer/folder/${encodeURIComponent(folderName)}/slot`, {
             port,
@@ -682,17 +720,22 @@ async function addFileToSlot(folderName, port, filename) {
         }
     } catch (e) {
         showToast(`Failed to add file: ${e.message}`, 'error');
+    } finally {
+        hideLoadingOverlay();
     }
 }
 
 async function removeFileFromSlot(event, folderName, port, filename) {
     event.stopPropagation();
+    showLoadingOverlay('Removing Video from Slot...', `Moving '${filename}' back to converter input if unused...`);
     try {
         await api('DELETE', `/streamer/folder/${encodeURIComponent(folderName)}/slot/file`, { port, filename });
         showToast(`Removed ${filename}`, 'success');
         await refreshFolderDetail(folderName);
     } catch (e) {
         showToast(`Failed to remove file: ${e.message}`, 'error');
+    } finally {
+        hideLoadingOverlay();
     }
 }
 
@@ -1110,12 +1153,15 @@ async function handleDrop(e, targetFolder) {
     const filename = e.dataTransfer.getData('text/plain');
     if (!filename) return;
 
+    showLoadingOverlay('Moving Video File...', `Moving '${filename}' to stream folder '${targetFolder}'...`);
     try {
         const data = await api('POST', '/converter/move', { filename, target_folder: targetFolder });
         showToast(data.message, 'success');
         await rescanFolders();
     } catch (err) {
         showToast(`Failed to move file: ${err.message}`, 'error');
+    } finally {
+        hideLoadingOverlay();
     }
 }
 
@@ -1131,11 +1177,14 @@ async function handleSlotDrop(e, targetFolder, port) {
 
     if (convFile && convFile.status === 'done') {
         targetFileName = convFile.ts_filename || convFile.filename;
+        showLoadingOverlay('Moving & Assigning Video...', `Moving '${convFile.filename}' to folder '${targetFolder}'...`);
         try {
             await api('POST', '/converter/move', { filename: convFile.filename, target_folder: targetFolder });
             await rescanFolders(true, false);
         } catch (err) {
             if (!err.message.includes('not found')) showToast(`Move warning: ${err.message}`, 'info');
+        } finally {
+            hideLoadingOverlay();
         }
     }
 
@@ -1147,6 +1196,7 @@ async function deleteFolder(event, folderName) {
     if (!confirm(`Are you sure you want to delete the folder '${folderName}'? Any video files inside will be moved back to the converter's input folder.`)) {
         return;
     }
+    showLoadingOverlay('Deleting Folder...', `Moving video files inside '${folderName}' back to input folder and removing directory...`);
     try {
         const data = await api('DELETE', `/streamer/folder/${encodeURIComponent(folderName)}`);
         if (data && data.folders) {
@@ -1162,6 +1212,8 @@ async function deleteFolder(event, folderName) {
         showToast(`Folder '${folderName}' deleted, files returned to input`, 'success');
     } catch (e) {
         showToast(`Failed to delete folder: ${e.message}`, 'error');
+    } finally {
+        hideLoadingOverlay();
     }
 }
 
@@ -1209,3 +1261,175 @@ window.removeFileFromSlot = removeFileFromSlot;
 window.generateEpg = generateEpg;
 window.deleteFolder = deleteFolder;
 window.moveFileInSlot = moveFileInSlot;
+
+// ──────────────────────────────────────────────
+//  Live Streams (HTTP Relay)
+// ──────────────────────────────────────────────
+
+async function fetchLiveStreams() {
+    try {
+        const data = await api('GET', '/streamer/live_streams');
+        state.liveStreams = data.live_streams || [];
+        renderLiveStreams();
+    } catch (e) {
+        console.error('Failed to fetch live streams:', e);
+    }
+}
+
+function renderLiveStreams() {
+    const container = document.getElementById('live-streams-list');
+    if (!container) return;
+
+    if (!state.liveStreams || state.liveStreams.length === 0) {
+        container.innerHTML = '';
+        return;
+    }
+
+    const html = state.liveStreams.map(item => {
+        const isRunning = item.status === 'running' || item.status === 'listening';
+        let statusBadge = '';
+        if (item.status === 'running') {
+            statusBadge = `<span class="livestream-status running"><i class="fa-solid fa-play"></i> Running (:${item.port})</span>`;
+        } else if (item.status === 'listening') {
+            statusBadge = `<span class="livestream-status listening"><i class="fa-solid fa-plug"></i> Listening (:${item.port})</span>`;
+        } else if (item.status === 'error') {
+            statusBadge = `<span class="livestream-status error" style="max-width: 350px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-flex; align-items: center;" title="${escapeAttr(item.error || 'Error')}"><i class="fa-solid fa-triangle-exclamation"></i> Error: ${escapeAttr(item.error || 'Unknown Error')}</span>`;
+        } else {
+            statusBadge = `<span class="livestream-status stopped"><i class="fa-solid fa-stop"></i> Stopped</span>`;
+        }
+
+        const thumbSrc = item.thumbnail_url || `/api/streamer/live_stream/${item.id}/thumbnail?v=0`;
+        const thumbHtml = getThumbHtml(thumbSrc, item.has_thumbnail, 'livestream-thumb', 'fa-tower-broadcast');
+
+        return `
+            <div class="folder-card livestream-card ${isRunning ? 'active' : ''}" id="livestream-${item.id}">
+                <div class="folder-card-header" style="cursor: default; display: flex; align-items: center; gap: 10px; padding: 10px 12px;">
+                    ${thumbHtml}
+                    <span class="folder-card-title" style="margin-left: 5px;">${escapeAttr(item.name)}</span>
+                    ${statusBadge}
+                    <span class="folder-date-range" style="font-family: 'JetBrains Mono', monospace; font-size: 12px; margin-left: auto;">Port: ${item.port} | ${item.codec}</span>
+                    <span class="folder-file-count" style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 20px;" title="${escapeAttr(item.url)}">${escapeAttr(item.url)}</span>
+                    
+                    <div class="livestream-actions" style="margin-left: 20px; display: flex; align-items: center; gap: 8px;">
+                        ${isRunning ? `
+                            <button class="btn btn-danger" onclick="stopLiveStream('${item.id}')" title="Stop Stream" style="padding: 4px 10px; font-size: 12px; height: 28px;">
+                                <i class="fa-solid fa-stop"></i> Stop
+                            </button>
+                        ` : `
+                            <button class="btn btn-emerald" onclick="startLiveStream('${item.id}')" title="Start Stream" style="padding: 4px 10px; font-size: 12px; height: 28px;">
+                                <i class="fa-solid fa-play"></i> Start
+                            </button>
+                        `}
+                        <button class="folder-edit-btn" onclick="openEditLiveStreamModal('${item.id}')" title="Edit Stream" style="height: 28px; width: 28px; display: flex; align-items: center; justify-content: center;"><i class="fa-solid fa-pen"></i></button>
+                        <button class="folder-delete-btn" onclick="deleteLiveStream('${item.id}')" title="Delete Stream" style="height: 28px; width: 28px; display: flex; align-items: center; justify-content: center;"><i class="fa-solid fa-trash"></i></button>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+
+    container.innerHTML = `
+        <div style="font-size: 13px; font-weight: 600; color: var(--text-secondary); margin: 20px 0 10px 0; display: flex; align-items: center; gap: 8px; font-family: 'Chakra Petch', sans-serif; text-transform: uppercase; letter-spacing: 0.5px;">
+            <i class="fa-solid fa-tower-broadcast" style="color: var(--accent);"></i> Live HTTP Relays
+        </div>
+        ${html}
+    `;
+}
+
+function openCreateLiveStreamModal() {
+    document.getElementById('livestream-modal-title').textContent = 'Create Live HTTP Stream';
+    document.getElementById('livestream-id').value = '';
+    document.getElementById('livestream-name').value = '';
+    document.getElementById('livestream-url').value = '';
+    document.getElementById('livestream-port').value = '1913';
+    document.getElementById('livestream-codec').value = 'h264_nvenc';
+    document.getElementById('livestream-autostart').checked = false;
+    document.getElementById('livestream-save-btn').textContent = 'Create';
+    document.getElementById('livestream-modal').style.display = 'flex';
+}
+
+function openEditLiveStreamModal(streamId) {
+    const item = state.liveStreams.find(x => x.id === streamId);
+    if (!item) return;
+    document.getElementById('livestream-modal-title').textContent = 'Edit Live HTTP Stream';
+    document.getElementById('livestream-id').value = item.id;
+    document.getElementById('livestream-name').value = item.name || '';
+    document.getElementById('livestream-url').value = item.url || '';
+    document.getElementById('livestream-port').value = item.port || 1913;
+    document.getElementById('livestream-codec').value = item.codec || 'h264_nvenc';
+    document.getElementById('livestream-autostart').checked = !!item.auto_start;
+    document.getElementById('livestream-save-btn').textContent = 'Save';
+    document.getElementById('livestream-modal').style.display = 'flex';
+}
+
+function closeLiveStreamModal() {
+    document.getElementById('livestream-modal').style.display = 'none';
+}
+
+async function submitLiveStream() {
+    const streamId = document.getElementById('livestream-id').value;
+    const name = document.getElementById('livestream-name').value.trim();
+    const url = document.getElementById('livestream-url').value.trim();
+    const port = parseInt(document.getElementById('livestream-port').value, 10);
+    const codec = document.getElementById('livestream-codec').value;
+    const auto_start = document.getElementById('livestream-autostart').checked;
+
+    if (!name || !url || isNaN(port)) {
+        showToast('Please enter valid Name, URL, and Port', 'error');
+        return;
+    }
+
+    try {
+        if (streamId) {
+            await api('PUT', `/streamer/live_stream/${streamId}`, { name, url, port, codec, auto_start });
+            showToast('Live stream updated', 'success');
+        } else {
+            await api('POST', '/streamer/live_stream', { name, url, port, codec, auto_start });
+            showToast('Live stream created', 'success');
+        }
+        closeLiveStreamModal();
+        await fetchLiveStreams();
+    } catch (e) {
+        showToast(`Error saving live stream: ${e.message}`, 'error');
+    }
+}
+
+async function startLiveStream(streamId) {
+    try {
+        showToast('Starting live stream...', 'info');
+        await api('POST', `/streamer/live_stream/${streamId}/start`);
+        showToast('Live stream started', 'success');
+        await fetchLiveStreams();
+    } catch (e) {
+        showToast(`Failed to start stream: ${e.message}`, 'error');
+    }
+}
+
+async function stopLiveStream(streamId) {
+    try {
+        await api('POST', `/streamer/live_stream/${streamId}/stop`);
+        showToast('Live stream stopped', 'success');
+        await fetchLiveStreams();
+    } catch (e) {
+        showToast(`Failed to stop stream: ${e.message}`, 'error');
+    }
+}
+
+async function deleteLiveStream(streamId) {
+    if (!confirm('Are you sure you want to delete this live stream?')) return;
+    try {
+        await api('DELETE', `/streamer/live_stream/${streamId}`);
+        showToast('Live stream deleted', 'success');
+        await fetchLiveStreams();
+    } catch (e) {
+        showToast(`Failed to delete stream: ${e.message}`, 'error');
+    }
+}
+
+window.openCreateLiveStreamModal = openCreateLiveStreamModal;
+window.openEditLiveStreamModal = openEditLiveStreamModal;
+window.closeLiveStreamModal = closeLiveStreamModal;
+window.submitLiveStream = submitLiveStream;
+window.startLiveStream = startLiveStream;
+window.stopLiveStream = stopLiveStream;
+window.deleteLiveStream = deleteLiveStream;

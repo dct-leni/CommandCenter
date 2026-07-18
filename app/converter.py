@@ -590,7 +590,7 @@ class Converter:
             "error": info.error,
             "ts_filename": info.ts_filename,
             "metadata": info.metadata,
-            "has_thumbnail": info.thumbnail is not None,
+            "has_thumbnail": info.thumbnail is not None or Path(info.filepath).exists(),
             "audio_note": info.audio_note,
             "scaled_note": info.scaled_note,
         }

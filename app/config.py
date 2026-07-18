@@ -23,6 +23,16 @@ class ConverterConfig:
 
 
 @dataclass
+class LiveStreamItem:
+    id: str
+    name: str
+    url: str
+    port: int
+    codec: str = "h264_nvenc"
+    auto_start: bool = False
+
+
+@dataclass
 class StreamerConfig:
     content_folder: str = "streams/"
     port_range_start: int = 1935
@@ -33,6 +43,8 @@ class StreamerConfig:
     channel_prefix: str = "Salon"       # Channel name prefix (e.g. "Salon" → "Salon1 HD")
     epg_timezone: str = "+0300"         # XMLTV timezone offset string
     playlists: dict = field(default_factory=dict)  # folder_name → [{port, files}]
+    live_streams: List[dict] = field(default_factory=list)  # List of LiveStreamItem dicts
+
 
 
 @dataclass
@@ -58,20 +70,54 @@ def load_config() -> AppConfig:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
 
-    converter_data = data.get("converter", {})
-    streamer_data = data.get("streamer", {})
-    server_data = data.get("server", {})
+    converter_data = data.get("converter")
+    if not isinstance(converter_data, dict):
+        converter_data = {}
+    streamer_data = data.get("streamer")
+    if not isinstance(streamer_data, dict):
+        streamer_data = {}
+    server_data = data.get("server")
+    if not isinstance(server_data, dict):
+        server_data = {}
 
-    return AppConfig(
+    cfg = AppConfig(
         converter=ConverterConfig(**{k: v for k, v in converter_data.items() if k in ConverterConfig.__dataclass_fields__}),
         streamer=StreamerConfig(**{k: v for k, v in streamer_data.items() if k in StreamerConfig.__dataclass_fields__}),
         server=ServerConfig(**{k: v for k, v in server_data.items() if k in ServerConfig.__dataclass_fields__}),
     )
 
+    # Check if any section or dataclass option is missing from config.yml
+    missing = False
+    for section_name, section_cls, section_data in [
+        ("converter", ConverterConfig, converter_data),
+        ("streamer", StreamerConfig, streamer_data),
+        ("server", ServerConfig, server_data),
+    ]:
+        if section_name not in data or not isinstance(data.get(section_name), dict):
+            missing = True
+            break
+        for field_name in section_cls.__dataclass_fields__:
+            if field_name not in section_data:
+                missing = True
+                break
+
+    if missing:
+        save_config(cfg)
+
+    return cfg
+
 
 def save_config(cfg: AppConfig) -> None:
     """Save configuration to config.yml."""
     data = asdict(cfg)
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as rf:
+                old_data = yaml.safe_load(rf)
+            if old_data == data:
+                return
+        except Exception:
+            pass
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
@@ -80,17 +126,17 @@ def update_config(updates: dict) -> AppConfig:
     """Merge partial updates into existing config and save."""
     cfg = load_config()
 
-    if "converter" in updates:
+    if "converter" in updates and isinstance(updates["converter"], dict):
         for k, v in updates["converter"].items():
             if hasattr(cfg.converter, k):
                 setattr(cfg.converter, k, v)
 
-    if "streamer" in updates:
+    if "streamer" in updates and isinstance(updates["streamer"], dict):
         for k, v in updates["streamer"].items():
             if hasattr(cfg.streamer, k):
                 setattr(cfg.streamer, k, v)
 
-    if "server" in updates:
+    if "server" in updates and isinstance(updates["server"], dict):
         for k, v in updates["server"].items():
             if hasattr(cfg.server, k):
                 setattr(cfg.server, k, v)

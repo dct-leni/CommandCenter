@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from app.ffmpeg_setup import get_ffmpeg_path, get_mediamtx_path, is_ffmpeg_installed, is_mediamtx_installed
-from app.thumbnails import generate_thumbnail, get_video_metadata
+from app.thumbnails import generate_thumbnail, get_thumbnail_path, get_video_metadata
 from app.config import load_config, save_config, update_config
 
 logger = logging.getLogger(__name__)
@@ -273,7 +273,7 @@ class Streamer:
                                 "filename": fname,
                                 "size": conv_path.stat().st_size,
                                 "metadata": meta,
-                                "has_thumbnail": generate_thumbnail(str(conv_path)) is not None,
+                                "has_thumbnail": True,
                             })
                         else:
                             files_detail.append({
@@ -298,7 +298,7 @@ class Streamer:
                         "filename": fname,
                         "size": fpath.stat().st_size if fpath.exists() else 0,
                         "metadata": meta,
-                        "has_thumbnail": generate_thumbnail(str(fpath)) is not None,
+                        "has_thumbnail": fpath.exists(),
                     })
                 slots_detail.append({
                     "port": port,
@@ -321,7 +321,7 @@ class Streamer:
                     "filename": fname,
                     "size": fpath.stat().st_size if fpath.exists() else 0,
                     "metadata": meta,
-                    "has_thumbnail": generate_thumbnail(str(fpath)) is not None,
+                    "has_thumbnail": fpath.exists(),
                 }]
                 slots_detail.append({
                     "port": port,

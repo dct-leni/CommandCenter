@@ -15,12 +15,39 @@ from app.ffmpeg_setup import get_ffmpeg_path, is_ffmpeg_installed
 logger = logging.getLogger(__name__)
 
 THUMBNAILS_DIR = Path(__file__).parent.parent / "thumbnails"
+_METADATA_CACHE: dict = {}
+_METADATA_CACHE_LOADED: bool = False
+
+def _load_metadata_cache():
+    global _METADATA_CACHE, _METADATA_CACHE_LOADED
+    if _METADATA_CACHE_LOADED:
+        return
+    cache_file = THUMBNAILS_DIR / "metadata_cache.json"
+    if cache_file.exists():
+        try:
+            import json
+            with open(cache_file, "r", encoding="utf-8") as f:
+                _METADATA_CACHE = json.load(f)
+        except Exception:
+            pass
+    _METADATA_CACHE_LOADED = True
+
+def _save_metadata_cache():
+    THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
+    cache_file = THUMBNAILS_DIR / "metadata_cache.json"
+    try:
+        import json
+        with open(cache_file, "w", encoding="utf-8") as f:
+            json.dump(_METADATA_CACHE, f, indent=2)
+    except Exception:
+        pass
 
 
 def _get_cache_key(video_path: str) -> str:
-    """Generate a cache key based on file path and modification time."""
+    """Generate a cache key based on filename and modification time."""
     stat = os.stat(video_path)
-    key_str = f"{video_path}:{stat.st_mtime}:{stat.st_size}"
+    filename = Path(video_path).name
+    key_str = f"{filename}:{stat.st_mtime}:{stat.st_size}"
     return hashlib.md5(key_str.encode()).hexdigest()
 
 
@@ -97,7 +124,17 @@ def generate_thumbnail(video_path: str, force: bool = False) -> Optional[str]:
 
 
 def get_video_metadata(video_path: str) -> dict:
-    """Get video file metadata using ffprobe."""
+    """Get video file metadata using ffprobe with disk & memory caching."""
+    _load_metadata_cache()
+    try:
+        stat = os.stat(video_path)
+        filename = Path(video_path).name
+        cache_key = f"{filename}:{stat.st_mtime}:{stat.st_size}"
+        if cache_key in _METADATA_CACHE:
+            return _METADATA_CACHE[cache_key]
+    except Exception:
+        return {"error": "File not accessible"}
+
     from app.ffmpeg_setup import get_ffprobe_path, is_ffmpeg_installed
 
     if not is_ffmpeg_installed():
@@ -129,7 +166,7 @@ def get_video_metadata(video_path: str) -> dict:
             fmt = data.get("format", {})
             video_stream = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), {})
 
-            return {
+            meta = {
                 "duration": float(fmt.get("duration", 0)),
                 "size": int(fmt.get("size", 0)),
                 "bitrate": int(fmt.get("bit_rate", 0)),
@@ -138,6 +175,12 @@ def get_video_metadata(video_path: str) -> dict:
                 "height": int(video_stream.get("height", 0)),
                 "fps": _parse_fps(video_stream.get("r_frame_rate", "0/1")),
             }
+            try:
+                _METADATA_CACHE[cache_key] = meta
+                _save_metadata_cache()
+            except Exception:
+                pass
+            return meta
         else:
             return {"error": result.stderr[-200:]}
 
