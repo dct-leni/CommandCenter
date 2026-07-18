@@ -434,11 +434,11 @@ class LiveStreamManager:
                 cmd.extend(["-i", relay.url])
 
                 if codec_to_use == "h264_nvenc":
-                    cmd.extend(["-c:v", "h264_nvenc", "-preset", "p2", "-tune", "ll", "-g", "50", "-repeat-headers", "1"])
+                    cmd.extend(["-c:v", "h264_nvenc", "-preset", "p2", "-tune", "ll", "-g", "50"])
                 elif codec_to_use == "h264_qsv":
-                    cmd.extend(["-c:v", "h264_qsv", "-preset", "veryfast", "-g", "50", "-repeat_headers", "1"])
+                    cmd.extend(["-c:v", "h264_qsv", "-preset", "veryfast", "-g", "50"])
                 elif codec_to_use == "libx264":
-                    cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-g", "50", "-x264-params", "repeat-headers=1"])
+                    cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-g", "50"])
                 else:
                     cmd.extend(["-c:v", "copy"])
 
