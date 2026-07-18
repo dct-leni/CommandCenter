@@ -318,6 +318,7 @@ class LiveStreamManager:
 
                 if relay.clients:
                     # Write chunk to all active writers
+                    drain_tasks = []
                     for writer in list(relay.clients):
                         if writer.transport.is_closing():
                             relay.clients.discard(writer)
@@ -335,12 +336,16 @@ class LiveStreamManager:
 
                         try:
                             writer.write(chunk)
+                            drain_tasks.append(writer.drain())
                         except Exception:
                             relay.clients.discard(writer)
                             try:
                                 writer.close()
                             except Exception:
                                 pass
+                    
+                    if drain_tasks:
+                        await asyncio.gather(*drain_tasks, return_exceptions=True)
         except asyncio.CancelledError:
             pass
         except Exception as e:
