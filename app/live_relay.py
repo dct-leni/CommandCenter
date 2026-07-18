@@ -3,6 +3,7 @@ Live Stream Relay Manager for CommandCenter.
 Manages background FFmpeg processes to ingest HTTP/RTSP/RTMP streams,
 encode them (with optional NVENC hardware acceleration), and broadcast
 MPEG-TS over HTTP to multiple concurrent client connections.
+Uses a local TCP loopback to avoid stdout binary corruption on Windows.
 """
 
 import asyncio
@@ -35,10 +36,11 @@ class LiveRelayStatus:
     process: Optional[asyncio.subprocess.Process] = field(default=None, repr=False)
     restart_task: Optional[asyncio.Task] = field(default=None, repr=False)
     log_task: Optional[asyncio.Task] = field(default=None, repr=False)
-    broadcast_task: Optional[asyncio.Task] = field(default=None, repr=False)
     last_logs: List[str] = field(default_factory=list, repr=False)
     clients: set = field(default_factory=set, repr=False)
     server: Optional[asyncio.Server] = field(default=None, repr=False)
+    loopback_server: Optional[asyncio.Server] = field(default=None, repr=False)
+    loopback_port: int = 0
 
     @property
     def has_thumbnail(self) -> bool:
@@ -207,6 +209,56 @@ class LiveStreamManager:
         )
         self.active_relays[stream_id] = relay
 
+        # Start Loopback Server to receive binary data from FFmpeg
+        try:
+            async def handle_loopback(reader, writer):
+                try:
+                    while relay.status in ("running", "listening"):
+                        chunk = await reader.read(65536)
+                        if not chunk:
+                            break
+                        
+                        if relay.clients:
+                            drain_tasks = []
+                            for ext_writer in list(relay.clients):
+                                if ext_writer.transport.is_closing():
+                                    relay.clients.discard(ext_writer)
+                                    continue
+                                if ext_writer.transport.get_write_buffer_size() > 52428800:
+                                    logger.warning(f"Closing stalled client connection on port {relay.port} (buffer backlog > 50MB)")
+                                    relay.clients.discard(ext_writer)
+                                    try:
+                                        ext_writer.close()
+                                    except Exception:
+                                        pass
+                                    continue
+                                try:
+                                    ext_writer.write(chunk)
+                                    drain_tasks.append(ext_writer.drain())
+                                except Exception:
+                                    relay.clients.discard(ext_writer)
+                                    try:
+                                        ext_writer.close()
+                                    except Exception:
+                                        pass
+                            if drain_tasks:
+                                await asyncio.gather(*drain_tasks, return_exceptions=True)
+                except Exception as e:
+                    logger.error(f"Loopback error for {relay.name}: {e}")
+                finally:
+                    try:
+                        writer.close()
+                    except Exception:
+                        pass
+
+            relay.loopback_server = await asyncio.start_server(handle_loopback, "127.0.0.1", 0)
+            relay.loopback_port = relay.loopback_server.sockets[0].getsockname()[1]
+        except Exception as e:
+            logger.error(f"Failed to start loopback server for {relay.name}: {e}")
+            relay.status = "error"
+            relay.error = f"Loopback init error: {e}"
+            return relay.to_dict()
+
         # Handle incoming HTTP clients on the TCP socket
         async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
             try:
@@ -255,6 +307,10 @@ class LiveStreamManager:
             relay.server = await asyncio.start_server(handle_client, "0.0.0.0", relay.port)
         except Exception as e:
             logger.error(f"Failed to start TCP listener on port {relay.port}: {e}")
+            # Clean up loopback server
+            if relay.loopback_server:
+                relay.loopback_server.close()
+                relay.loopback_server = None
             relay.status = "error"
             relay.error = f"Port bind error: {e}"
             return relay.to_dict()
@@ -275,8 +331,6 @@ class LiveStreamManager:
             relay.restart_task.cancel()
         if relay.log_task and not relay.log_task.done():
             relay.log_task.cancel()
-        if relay.broadcast_task and not relay.broadcast_task.done():
-            relay.broadcast_task.cancel()
 
         # Stop TCP server
         if relay.server:
@@ -285,6 +339,14 @@ class LiveStreamManager:
             except Exception as e:
                 logger.error(f"Error closing relay TCP server: {e}")
             relay.server = None
+
+        # Stop Loopback server
+        if relay.loopback_server:
+            try:
+                relay.loopback_server.close()
+            except Exception as e:
+                logger.error(f"Error closing loopback server: {e}")
+            relay.loopback_server = None
 
         # Disconnect all connected clients
         for writer in list(relay.clients):
@@ -307,49 +369,6 @@ class LiveStreamManager:
         relay.process = None
         logger.info(f"Stopped live relay '{relay.name}'")
         return relay.to_dict()
-
-    async def _broadcast_loop(self, relay: LiveRelayStatus, stdout: asyncio.StreamReader):
-        """Read from FFmpeg's stdout and broadcast to all connected clients."""
-        try:
-            while relay.status in ("running", "listening"):
-                chunk = await stdout.read(65536)  # Read 64KB chunks
-                if not chunk:
-                    break
-
-                if relay.clients:
-                    # Write chunk to all active writers
-                    drain_tasks = []
-                    for writer in list(relay.clients):
-                        if writer.transport.is_closing():
-                            relay.clients.discard(writer)
-                            continue
-                        
-                        # Guard against memory leaks from very slow/stalled clients (> 50MB backlog buffer)
-                        if writer.transport.get_write_buffer_size() > 52428800:
-                            logger.warning(f"Closing stalled client connection on port {relay.port} (buffer backlog > 50MB)")
-                            relay.clients.discard(writer)
-                            try:
-                                writer.close()
-                            except Exception:
-                                pass
-                            continue
-
-                        try:
-                            writer.write(chunk)
-                            drain_tasks.append(writer.drain())
-                        except Exception:
-                            relay.clients.discard(writer)
-                            try:
-                                writer.close()
-                            except Exception:
-                                pass
-                    
-                    if drain_tasks:
-                        await asyncio.gather(*drain_tasks, return_exceptions=True)
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.error(f"Broadcast error for live stream {relay.name}: {e}")
 
     async def _auto_restart_loop(self, relay: LiveRelayStatus):
         """Loop keeping the FFmpeg listen process running while status is active."""
@@ -415,11 +434,11 @@ class LiveStreamManager:
                 else:
                     cmd.extend(["-c:v", "copy"])
 
-                # Output parameters - pipe directly to stdout for Python distribution
+                # Output parameters - stream to Python's local loopback TCP port
                 cmd.extend([
                     "-c:a", "copy",
                     "-f", "mpegts",
-                    "-"
+                    f"tcp://127.0.0.1:{relay.loopback_port}"
                 ])
 
                 relay.status = "listening"
@@ -437,15 +456,7 @@ class LiveStreamManager:
                     relay.log_task.cancel()
                 relay.log_task = asyncio.create_task(self._read_relay_logs(relay, process.stderr))
 
-                if relay.broadcast_task and not relay.broadcast_task.done():
-                    relay.broadcast_task.cancel()
-                relay.broadcast_task = asyncio.create_task(self._broadcast_loop(relay, process.stdout))
-
                 await process.wait()
-
-                # Cancel the broadcast task for this run
-                if relay.broadcast_task and not relay.broadcast_task.done():
-                    relay.broadcast_task.cancel()
 
                 # If process exited but status is still active (not stopped by user)
                 if relay.status in ("running", "listening"):
