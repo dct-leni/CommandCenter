@@ -685,6 +685,13 @@ async def delete_live_stream(stream_id: str):
 async def start_live_stream(stream_id: str):
     """Start the FFmpeg relay process for a live stream."""
     try:
+        # Dynamically set auto_start to True in config so it auto-resumes on boot
+        cfg = load_config()
+        for item in cfg.streamer.live_streams:
+            if item.get("id") == stream_id:
+                item["auto_start"] = True
+                update_config({"streamer": {"live_streams": cfg.streamer.live_streams}})
+                break
         res = await live_relay_manager.start_stream(stream_id)
         return {"status": "success", "live_stream": res}
     except Exception as e:
@@ -694,6 +701,13 @@ async def start_live_stream(stream_id: str):
 @app.post("/api/streamer/live_stream/{stream_id}/stop")
 async def stop_live_stream(stream_id: str):
     """Stop the FFmpeg relay process for a live stream."""
+    # Dynamically set auto_start to False in config so it stays stopped on boot
+    cfg = load_config()
+    for item in cfg.streamer.live_streams:
+        if item.get("id") == stream_id:
+            item["auto_start"] = False
+            update_config({"streamer": {"live_streams": cfg.streamer.live_streams}})
+            break
     res = await live_relay_manager.stop_stream(stream_id)
     return {"status": "success", "live_stream": res}
 
