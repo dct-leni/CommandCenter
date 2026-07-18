@@ -239,11 +239,17 @@ async function checkSystemStatus() {
 //  Polling
 // ──────────────────────────────────────────────
 
+let pollCount = 0;
 function startPolling() {
     if (state.pollingInterval) clearInterval(state.pollingInterval);
     state.pollingInterval = setInterval(async () => {
         await pollConverterStatus();
         await pollStreamStatus();
+        
+        pollCount++;
+        if (pollCount % 5 === 0) {
+            await checkSystemStatus();
+        }
     }, 2000);
 }
 
@@ -1297,7 +1303,7 @@ function renderLiveStreams() {
         } else if (item.status === 'listening') {
             statusBadge = `<span class="livestream-status listening"><i class="fa-solid fa-plug"></i> Listening (:${item.port})</span>`;
         } else if (item.status === 'error') {
-            statusBadge = `<span class="livestream-status error" style="max-width: 350px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-flex; align-items: center;" title="${escapeAttr(item.error || 'Error')}"><i class="fa-solid fa-triangle-exclamation"></i> Error: ${escapeAttr(item.error || 'Unknown Error')}</span>`;
+            statusBadge = `<span class="livestream-status error" style="max-width: 750px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-flex; align-items: center;" title="${escapeAttr(item.error || 'Error')}"><i class="fa-solid fa-triangle-exclamation"></i> Error: ${escapeAttr(item.error || 'Unknown Error')}</span>`;
         } else {
             statusBadge = `<span class="livestream-status stopped"><i class="fa-solid fa-stop"></i> Stopped</span>`;
         }
@@ -1311,7 +1317,7 @@ function renderLiveStreams() {
                     ${thumbHtml}
                     <span class="folder-card-title" style="margin-left: 5px;">${escapeAttr(item.name)}</span>
                     ${statusBadge}
-                    <span class="folder-date-range" style="font-family: 'JetBrains Mono', monospace; font-size: 12px; margin-left: auto;">Port: ${item.port} | ${item.codec}</span>
+                    <span class="folder-date-range" style="font-family: 'JetBrains Mono', monospace; font-size: 12px; margin-left: auto;">Port: ${item.port}</span>
                     <span class="folder-file-count" style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 20px;" title="${escapeAttr(item.url)}">${escapeAttr(item.url)}</span>
                     
                     <div class="livestream-actions" style="margin-left: 20px; display: flex; align-items: center; gap: 8px;">

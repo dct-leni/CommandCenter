@@ -1,8 +1,8 @@
 """
 Live Stream Relay Manager for CommandCenter.
 Manages background FFmpeg processes to ingest HTTP/RTSP/RTMP streams,
-encode them (with optional NVENC hardware acceleration), and re-stream
-MPEG-TS over HTTP (-listen 1) with auto-restart loops.
+encode them (with optional NVENC hardware acceleration), and broadcast
+MPEG-TS over HTTP to multiple concurrent client connections.
 """
 
 import asyncio
@@ -35,7 +35,10 @@ class LiveRelayStatus:
     process: Optional[asyncio.subprocess.Process] = field(default=None, repr=False)
     restart_task: Optional[asyncio.Task] = field(default=None, repr=False)
     log_task: Optional[asyncio.Task] = field(default=None, repr=False)
+    broadcast_task: Optional[asyncio.Task] = field(default=None, repr=False)
     last_logs: List[str] = field(default_factory=list, repr=False)
+    clients: set = field(default_factory=set, repr=False)
+    server: Optional[asyncio.Server] = field(default=None, repr=False)
 
     @property
     def has_thumbnail(self) -> bool:
@@ -55,13 +58,19 @@ class LiveRelayStatus:
         from app.ffmpeg_setup import get_best_encoder
         best_encoder = get_best_encoder()
         actual_codec = best_encoder if self.codec in ("h264_nvenc", "h264_qsv") else self.codec
+        
+        # UI status: show "running" if we have active clients connected, otherwise "listening"
+        status_to_show = self.status
+        if self.status in ("running", "listening"):
+            status_to_show = "running" if self.clients else "listening"
+
         return {
             "id": self.id,
             "name": self.name,
             "url": self.url,
             "port": self.port,
             "codec": actual_codec,
-            "status": self.status,
+            "status": status_to_show,
             "error": self.error,
             "fps": round(self.fps, 1),
             "bitrate": self.bitrate,
@@ -89,8 +98,9 @@ class LiveStreamManager:
                 continue
             if sid in self.active_relays:
                 relay = self.active_relays[sid]
-                if relay.status in ("running", "listening"):
-                    self.trigger_thumbnail_generation(sid, relay.port)
+                # Only capture thumbnails when viewers are actively watching
+                if relay.status == "running" and relay.clients:
+                    self.trigger_thumbnail_generation(sid, relay.url)
                 results.append(relay.to_dict())
             else:
                 thumb_path = THUMBNAILS_DIR / f"live_{sid}.jpg"
@@ -115,7 +125,7 @@ class LiveStreamManager:
                 })
         return results
 
-    def trigger_thumbnail_generation(self, stream_id: str, port: int):
+    def trigger_thumbnail_generation(self, stream_id: str, stream_url: str):
         """Trigger background generation of live stream thumbnail if running."""
         now = time.time()
         last_time = _LAST_THUMBNAIL_TIME.get(stream_id, 0.0)
@@ -126,14 +136,13 @@ class LiveStreamManager:
         
         async def task():
             try:
-                local_url = f"http://127.0.0.1:{port}/"
                 THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
                 thumb_path = THUMBNAILS_DIR / f"live_{stream_id}.jpg"
                 temp_path = THUMBNAILS_DIR / f"live_{stream_id}_temp.jpg"
 
                 cmd = [
                     get_ffmpeg_path(),
-                    "-i", local_url,
+                    "-i", stream_url,
                     "-vframes", "1",
                     "-q:v", "6",
                     "-vf", "scale=120:-1",
@@ -197,6 +206,59 @@ class LiveStreamManager:
             error=None,
         )
         self.active_relays[stream_id] = relay
+
+        # Handle incoming HTTP clients on the TCP socket
+        async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+            try:
+                # Read HTTP request headers to satisfy client handshake
+                await reader.readuntil(b"\r\n\r\n")
+            except Exception:
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+                return
+
+            headers = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: video/mp2t\r\n"
+                "Connection: close\r\n"
+                "Access-Control-Allow-Origin: *\r\n"
+                "\r\n"
+            )
+            try:
+                writer.write(headers.encode("utf-8"))
+                await writer.drain()
+            except Exception:
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+                return
+
+            relay.clients.add(writer)
+            
+            try:
+                # Keep socket alive until client disconnects (read returns EOF)
+                await reader.read()
+            except Exception:
+                pass
+            finally:
+                relay.clients.discard(writer)
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+
+        # Start the Python TCP Server to broadcast stream packets
+        try:
+            relay.server = await asyncio.start_server(handle_client, "0.0.0.0", relay.port)
+        except Exception as e:
+            logger.error(f"Failed to start TCP listener on port {relay.port}: {e}")
+            relay.status = "error"
+            relay.error = f"Port bind error: {e}"
+            return relay.to_dict()
+
         relay.restart_task = asyncio.create_task(self._auto_restart_loop(relay))
         logger.info(f"Started live relay loop for '{relay.name}' on HTTP port :{relay.port}")
         return relay.to_dict()
@@ -213,7 +275,26 @@ class LiveStreamManager:
             relay.restart_task.cancel()
         if relay.log_task and not relay.log_task.done():
             relay.log_task.cancel()
+        if relay.broadcast_task and not relay.broadcast_task.done():
+            relay.broadcast_task.cancel()
 
+        # Stop TCP server
+        if relay.server:
+            try:
+                relay.server.close()
+            except Exception as e:
+                logger.error(f"Error closing relay TCP server: {e}")
+            relay.server = None
+
+        # Disconnect all connected clients
+        for writer in list(relay.clients):
+            try:
+                writer.close()
+            except Exception:
+                pass
+        relay.clients.clear()
+
+        # Kill FFmpeg process
         if relay.process and relay.process.returncode is None:
             try:
                 relay.process.terminate()
@@ -227,6 +308,44 @@ class LiveStreamManager:
         logger.info(f"Stopped live relay '{relay.name}'")
         return relay.to_dict()
 
+    async def _broadcast_loop(self, relay: LiveRelayStatus, stdout: asyncio.StreamReader):
+        """Read from FFmpeg's stdout and broadcast to all connected clients."""
+        try:
+            while relay.status in ("running", "listening"):
+                chunk = await stdout.read(65536)  # Read 64KB chunks
+                if not chunk:
+                    break
+
+                if relay.clients:
+                    # Write chunk to all active writers
+                    for writer in list(relay.clients):
+                        if writer.transport.is_closing():
+                            relay.clients.discard(writer)
+                            continue
+                        
+                        # Guard against memory leaks from very slow/stalled clients (> 50MB backlog buffer)
+                        if writer.transport.get_write_buffer_size() > 52428800:
+                            logger.warning(f"Closing stalled client connection on port {relay.port} (buffer backlog > 50MB)")
+                            relay.clients.discard(writer)
+                            try:
+                                writer.close()
+                            except Exception:
+                                pass
+                            continue
+
+                        try:
+                            writer.write(chunk)
+                        except Exception:
+                            relay.clients.discard(writer)
+                            try:
+                                writer.close()
+                            except Exception:
+                                pass
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Broadcast error for live stream {relay.name}: {e}")
+
     async def _auto_restart_loop(self, relay: LiveRelayStatus):
         """Loop keeping the FFmpeg listen process running while status is active."""
         warned_nvenc = False
@@ -236,7 +355,7 @@ class LiveStreamManager:
                 from app.ffmpeg_setup import get_best_encoder
                 best_encoder = get_best_encoder()
 
-                # If the user selected hardware transcoding, resolve it to the best available encoder (NVENC -> QSV -> libx264)
+                # Resolve requested codec to best available hardware/software choice
                 if codec_to_use in ("h264_nvenc", "h264_qsv"):
                     resolved_codec = best_encoder
                 else:
@@ -264,13 +383,18 @@ class LiveStreamManager:
                 if relay.url.startswith("rtsp://"):
                     cmd.extend(["-rtsp_transport", "udp"])
 
-                # Reconnect flags for HTTP input streams
+                # Reconnect flags and timeouts for HTTP input streams
                 if relay.url.startswith("http://") or relay.url.startswith("https://"):
                     cmd.extend([
                         "-reconnect", "1",
                         "-reconnect_streamed", "1",
                         "-reconnect_delay_max", "5",
+                        "-timeout", "5000000",
                     ])
+                elif relay.url.startswith("rtsp://"):
+                    cmd.extend(["-stimeout", "5000000"])
+                elif relay.url.startswith("rtmp://"):
+                    cmd.extend(["-rw_timeout", "5000000"])
                 elif not is_network_input:
                     # Local file input
                     cmd.append("-re")
@@ -286,13 +410,11 @@ class LiveStreamManager:
                 else:
                     cmd.extend(["-c:v", "copy"])
 
-                # Output parameters - we set send_buffer_size=10MB on the HTTP socket listener
-                # to buffer network traffic for smooth player playback
+                # Output parameters - pipe directly to stdout for Python distribution
                 cmd.extend([
                     "-c:a", "copy",
                     "-f", "mpegts",
-                    "-listen", "1",
-                    f"http://0.0.0.0:{relay.port}/?send_buffer_size=10485760"
+                    "-"
                 ])
 
                 relay.status = "listening"
@@ -310,38 +432,38 @@ class LiveStreamManager:
                     relay.log_task.cancel()
                 relay.log_task = asyncio.create_task(self._read_relay_logs(relay, process.stderr))
 
+                if relay.broadcast_task and not relay.broadcast_task.done():
+                    relay.broadcast_task.cancel()
+                relay.broadcast_task = asyncio.create_task(self._broadcast_loop(relay, process.stdout))
+
                 await process.wait()
 
-                # If process exited but status is still active
-                if relay.status in ("running", "listening"):
-                    if relay.status == "running":
-                        # Normal client disconnect (e.g. VLC or watchdog stopped reading).
-                        # Reset status back to listening and start a fresh FFmpeg process.
-                        relay.status = "listening"
-                        await asyncio.sleep(1.0)
-                    else:
-                        # Process exited before ever reaching 'running' state. Treat as a startup/connection failure.
-                        if process.returncode != 0:
-                            # Give a tiny slice for log_task to catch any final lines
-                            await asyncio.sleep(0.2)
-                            logger.error(f"Live relay '{relay.name}' process exited with error code {process.returncode}")
-                            
-                            # Inspect last logs for error reason
-                            error_detail = "Check input stream URL or network connection."
-                            if relay.last_logs:
-                                # Filter for lines with error keywords to find the root cause
-                                keywords = ["error", "refused", "invalid", "timeout", "not found", "cannot", "failed", "unable", "denied"]
-                                important_lines = [line for line in relay.last_logs if any(kw in line.lower() for kw in keywords)]
-                                if important_lines:
-                                    error_detail = important_lines[-1]
-                                else:
-                                    error_detail = relay.last_logs[-1]
+                # Cancel the broadcast task for this run
+                if relay.broadcast_task and not relay.broadcast_task.done():
+                    relay.broadcast_task.cancel()
 
-                            relay.status = "error"
-                            relay.error = f"FFmpeg error ({process.returncode}): {error_detail}"
-                            break
-                        else:
-                            await asyncio.sleep(1.0)
+                # If process exited but status is still active (not stopped by user)
+                if relay.status in ("running", "listening"):
+                    if process.returncode != 0:
+                        # Give a tiny slice for log_task to catch any final lines
+                        await asyncio.sleep(0.2)
+                        logger.error(f"Live relay '{relay.name}' process exited with error code {process.returncode}")
+                        
+                        # Inspect last logs for error reason
+                        error_detail = "Check input stream URL or network connection."
+                        if relay.last_logs:
+                            keywords = ["error", "refused", "invalid", "timeout", "not found", "cannot", "failed", "unable", "denied"]
+                            important_lines = [line for line in relay.last_logs if any(kw in line.lower() for kw in keywords)]
+                            if important_lines:
+                                error_detail = important_lines[-1]
+                            else:
+                                error_detail = relay.last_logs[-1]
+
+                        relay.status = "error"
+                        relay.error = f"FFmpeg error ({process.returncode}): {error_detail}"
+                        break
+                    else:
+                        await asyncio.sleep(1.0)
 
             except asyncio.CancelledError:
                 break
@@ -369,8 +491,6 @@ class LiveStreamManager:
                 if len(relay.last_logs) > 10:
                     relay.last_logs.pop(0)
 
-                if "frame=" in line_str or "fps=" in line_str:
-                    relay.status = "running"
                 fps_match = fps_pattern.search(line_str)
                 if fps_match:
                     try:
