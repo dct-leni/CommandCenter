@@ -22,6 +22,7 @@ if %ERRORLEVEL% equ 0 (
         echo      NOTE: You may need to restart your terminal after this script finishes to update your PATH.
     ) else (
         echo [ERROR] Failed to install Python 3.14 via winget. Please install it manually.
+    )
 )
 echo.
 
@@ -75,8 +76,8 @@ if exist "%BIN_DIR%\mediamtx.exe" (
 ) else (
     echo [2/2] Downloading MediaMTX...
 
-    REM Get latest release URL from GitHub API
-    powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/bluenviron/mediamtx/releases/latest' -UseBasicParsing; $asset = $rel.assets | Where-Object { $_.name -match 'windows.*amd64.*\.zip$' } | Select-Object -First 1; if ($asset) { Invoke-WebRequest -Uri $asset.browser_download_url -OutFile '%BIN_DIR%\mediamtx.zip' -UseBasicParsing; Write-Host $asset.name } else { Write-Host 'NOT_FOUND' } }"
+    REM Download MediaMTX v1.19.2 release directly
+    powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://github.com/bluenviron/mediamtx/releases/download/v1.19.2/mediamtx_v1.19.2_windows_amd64.zip' -OutFile '%BIN_DIR%\mediamtx.zip' -UseBasicParsing }"
 
     if not exist "%BIN_DIR%\mediamtx.zip" (
         echo [ERROR] Failed to download MediaMTX. Check your internet connection.
