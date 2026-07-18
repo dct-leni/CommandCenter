@@ -29,32 +29,44 @@ echo.
 set BIN_DIR=%~dp0bin
 if not exist "%BIN_DIR%" mkdir "%BIN_DIR%"
 
-REM ---- FFmpeg ----
+REM ---- FFmpeg / FFprobe ----
 set FFMPEG_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip
 set FFMPEG_ZIP=%BIN_DIR%\ffmpeg.zip
 
+REM Only skip the download if BOTH ffmpeg.exe and ffprobe.exe are present.
+if exist "%BIN_DIR%\ffmpeg.exe" if exist "%BIN_DIR%\ffprobe.exe" (
+    echo [OK] FFmpeg and FFprobe already exist, skipping.
+    goto :mediamtx
+)
+
 if exist "%BIN_DIR%\ffmpeg.exe" (
-    echo [OK] FFmpeg already exists, skipping.
+    echo [INFO] FFmpeg found but FFprobe is missing. Re-downloading to get ffprobe.exe...
 ) else (
     echo [1/2] Downloading FFmpeg...
+)
 
-    powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '%FFMPEG_URL%' -OutFile '%FFMPEG_ZIP%' -UseBasicParsing }"
+powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '%FFMPEG_URL%' -OutFile '%FFMPEG_ZIP%' -UseBasicParsing }"
 
-    if not exist "%FFMPEG_ZIP%" (
-        echo [ERROR] Failed to download FFmpeg. Check your internet connection.
-        goto :mediamtx
-    )
+if not exist "%FFMPEG_ZIP%" (
+    echo [ERROR] Failed to download FFmpeg. Check your internet connection.
+    goto :mediamtx
+)
 
-    echo         Extracting FFmpeg...
-    powershell -Command "& { Add-Type -AssemblyName System.IO.Compression.FileSystem; $zip = [System.IO.Compression.ZipFile]::OpenRead('%FFMPEG_ZIP%'); foreach ($e in $zip.Entries) { if ($e.Name -eq 'ffmpeg.exe' -or $e.Name -eq 'ffprobe.exe') { $dest = Join-Path '%BIN_DIR%' $e.Name; [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e, $dest, $true) } }; $zip.Dispose() }"
+echo         Extracting FFmpeg and FFprobe...
+powershell -Command "& { Add-Type -AssemblyName System.IO.Compression.FileSystem; $zip = [System.IO.Compression.ZipFile]::OpenRead('%FFMPEG_ZIP%'); foreach ($e in $zip.Entries) { if ($e.Name -eq 'ffmpeg.exe' -or $e.Name -eq 'ffprobe.exe') { $dest = Join-Path '%BIN_DIR%' $e.Name; [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e, $dest, $true) } }; $zip.Dispose() }"
 
-    del "%FFMPEG_ZIP%" 2>nul
+del "%FFMPEG_ZIP%" 2>nul
 
-    if exist "%BIN_DIR%\ffmpeg.exe" (
-        echo [OK] FFmpeg installed successfully.
-    ) else (
-        echo [ERROR] FFmpeg extraction failed.
-    )
+if exist "%BIN_DIR%\ffmpeg.exe" (
+    echo [OK] FFmpeg installed successfully.
+) else (
+    echo [ERROR] FFmpeg extraction failed.
+)
+
+if exist "%BIN_DIR%\ffprobe.exe" (
+    echo [OK] FFprobe installed successfully.
+) else (
+    echo [ERROR] FFprobe extraction failed - the downloaded build may not include it.
 )
 
 :mediamtx

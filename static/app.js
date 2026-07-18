@@ -43,16 +43,69 @@ async function api(method, path, body = null) {
     }
 }
 
+async function rescanFolders(converter = true, streamer = true) {
+    if (converter && state.config?.converter?.source_folder) {
+        await scanConverterFolder(state.config.converter.source_folder);
+    }
+    if (streamer && state.config?.streamer?.content_folder) {
+        await scanStreamerFolder(state.config.streamer.content_folder);
+    }
+}
+
+async function updateConfigSetting(updates, rescan = false) {
+    try {
+        const data = await api('PUT', '/config', updates);
+        if (data && typeof data === 'object') {
+            state.config = data;
+        }
+        if (rescan) await rescanFolders();
+        else renderStreamerFolders();
+        showToast('Settings saved', 'success');
+    } catch (err) {
+        console.error(err);
+    }
+}
+
+function formatMetaBadge(meta) {
+    if (!meta || meta.error) return '';
+    const parts = [
+        meta.duration ? formatDuration(meta.duration) : '',
+        meta.width && meta.height ? `${meta.width}×${meta.height}` : '',
+        meta.codec && meta.codec !== 'unknown' ? meta.codec.toUpperCase() : '',
+        meta.fps ? `${Math.round(meta.fps)}fps` : '',
+        formatBitrate(meta.bitrate)
+    ].filter(Boolean);
+    return parts.join(' · ');
+}
+
+function getThumbHtml(src, hasThumb = true, className = 'slot-file-thumb') {
+    const placeholder = `<div class="${className}-placeholder" style="width:54px;height:30px;background:var(--bg-card);border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:14px;flex-shrink:0;">🎬</div>`;
+    if (hasThumb === false) return placeholder;
+    const safePlaceholder = placeholder.replace(/"/g, '&quot;').replace(/'/g, "\\'");
+    return `<img class="${className}" src="${src}" alt="" loading="lazy" onerror="this.outerHTML='${safePlaceholder}'">`;
+}
+
 // ──────────────────────────────────────────────
 //  Initialization
 // ──────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', async () => {
-    // Load config
-    try {
-        state.config = await api('GET', '/config');
-        applyConfig();
-    } catch (e) {
+    // Load config (retrying in case of server restart)
+    let configLoaded = false;
+    for (let attempt = 1; attempt <= 6; attempt++) {
+        try {
+            state.config = await api('GET', '/config');
+            applyConfig();
+            configLoaded = true;
+            break;
+        } catch (e) {
+            console.warn(`Attempt ${attempt} to load config failed:`, e);
+            if (attempt < 6) {
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+        }
+    }
+    if (!configLoaded) {
         showToast('Failed to load config', 'error');
     }
 
@@ -67,38 +120,46 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('stream-stop-btn').addEventListener('click', stopStreaming);
     document.getElementById('modal-close-btn').addEventListener('click', closeFolderBrowser);
     document.getElementById('modal-select-btn').addEventListener('click', selectFolder);
+    document.getElementById('epg-generate-btn').addEventListener('click', generateEpg);
+    document.getElementById('file-picker-close').addEventListener('click', () => {
+        document.getElementById('file-picker-modal').style.display = 'none';
+    });
 
-    // Close modal on overlay click
+    // Close modals on overlay click
     document.getElementById('folder-modal').addEventListener('click', (e) => {
         if (e.target === e.currentTarget) closeFolderBrowser();
+    });
+    document.getElementById('file-picker-modal').addEventListener('click', (e) => {
+        if (e.target === e.currentTarget) document.getElementById('file-picker-modal').style.display = 'none';
     });
 
     // Keyboard shortcuts
     document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') closeFolderBrowser();
+        if (e.key === 'Escape') {
+            closeFolderBrowser();
+            document.getElementById('file-picker-modal').style.display = 'none';
+        }
     });
 
     // Start polling
     startPolling();
 
     // If config has saved folders, auto-scan
-    if (state.config?.converter?.source_folder) {
-        document.getElementById('converter-folder').value = state.config.converter.source_folder;
-        await scanConverterFolder(state.config.converter.source_folder);
-    }
-    if (state.config?.streamer?.content_folder) {
-        document.getElementById('streamer-folder').value = state.config.streamer.content_folder;
-        await scanStreamerFolder(state.config.streamer.content_folder);
-    }
+    await rescanFolders();
+
     document.getElementById('stream-protocol').addEventListener('change', (e) => {
-        api('PUT', '/config', { streamer: { protocol: e.target.value } })
-            .then(() => showToast('Protocol saved', 'success')).catch(console.error);
+        if (state.config?.streamer) state.config.streamer.protocol = e.target.value;
+        updateConfigSetting({ streamer: { protocol: e.target.value } });
     });
     document.getElementById('port-start').addEventListener('change', (e) => {
-        api('PUT', '/config', { streamer: { port_range_start: parseInt(e.target.value) } }).catch(console.error);
+        const val = parseInt(e.target.value);
+        if (state.config?.streamer && !isNaN(val)) state.config.streamer.port_range_start = val;
+        updateConfigSetting({ streamer: { port_range_start: val } }, true);
     });
     document.getElementById('port-end').addEventListener('change', (e) => {
-        api('PUT', '/config', { streamer: { port_range_end: parseInt(e.target.value) } }).catch(console.error);
+        const val = parseInt(e.target.value);
+        if (state.config?.streamer && !isNaN(val)) state.config.streamer.port_range_end = val;
+        updateConfigSetting({ streamer: { port_range_end: val } }, true);
     });
 });
 
@@ -204,10 +265,6 @@ function renderConverterFiles() {
     }
 
     container.innerHTML = state.converterFiles.map(file => {
-        const sizeStr = formatSize(file.size);
-        const durationStr = file.metadata?.duration ? formatDuration(file.metadata.duration) : '';
-        const metaParts = [sizeStr, durationStr, file.extension].filter(Boolean);
-
         let statusHtml = '';
         let actionHtml = '';
 
@@ -231,42 +288,30 @@ function renderConverterFiles() {
                 break;
         }
 
-        const thumbHtml = file.has_thumbnail
-            ? `<img class="file-thumb" src="/api/converter/thumbnail/${encodeURIComponent(file.filename)}" alt="" loading="lazy">`
-            : `<div class="file-thumb-placeholder">🎬</div>`;
+        const thumbHtml = getThumbHtml(`/api/converter/thumbnail/${encodeURIComponent(file.filename)}`, file.has_thumbnail, 'file-thumb');
         const isDraggable = (file.extension === '.ts' || file.status === 'done');
         const dragAttr = isDraggable ? 'draggable="true"' : '';
         const dragEvent = isDraggable ? `ondragstart="handleDragStart(event, '${escapeAttr(file.filename)}')"` : '';
 
-        let metaDetails = [
+        const metaBadge = formatMetaBadge(file.metadata);
+        const metaDetails = [
             formatSize(file.size),
-            file.extension.toUpperCase().replace('.', '')
-        ];
-        if (file.metadata && !file.metadata.error) {
-            if (file.metadata.duration) {
-                const mins = Math.floor(file.metadata.duration / 60);
-                const secs = Math.floor(file.metadata.duration % 60);
-                metaDetails.push(`${mins}:${secs.toString().padStart(2, '0')}`);
-            }
-            if (file.metadata.width && file.metadata.height) {
-                metaDetails.push(`${file.metadata.width}x${file.metadata.height}`);
-            }
-            if (file.metadata.codec && file.metadata.codec !== 'unknown') {
-                metaDetails.push(file.metadata.codec.toUpperCase());
-            }
-            if (file.metadata.fps) {
-                metaDetails.push(`${Math.round(file.metadata.fps)}fps`);
-            }
-        }
-        
+            file.extension.toUpperCase().replace('.', ''),
+            metaBadge
+        ].filter(Boolean).join(' • ');
+
+        let notesList = [];
+        if (file.audio_note) notesList.push(`🔊 ${escapeHtml(file.audio_note)}`);
+        if (file.scaled_note) notesList.push(`📐 ${escapeHtml(file.scaled_note)}`);
+        const notesHtml = notesList.length ? `<div class="file-notes" style="font-size: 11px; color: var(--text-muted); margin-top: 3px;">${notesList.join(' • ')}</div>` : '';
+
         return `
             <div class="file-item" ${dragAttr} ${dragEvent}>
                 ${thumbHtml}
                 <div class="file-info">
                     <div class="file-name" title="${escapeHtml(file.filename)}">${escapeHtml(file.filename)}</div>
-                    <div class="file-meta">
-                        ${metaDetails.join(' • ')}
-                    </div>
+                    <div class="file-meta">${metaDetails}</div>
+                    ${notesHtml}
                 </div>
                 <div class="file-actions">
                     ${statusHtml}
@@ -320,11 +365,32 @@ async function convertAll() {
 //  Streamer
 // ──────────────────────────────────────────────
 
+async function setStreamerFoldersAndRefresh(folders) {
+    const folderDetailsPromises = folders.map(async (folder) => {
+        if (state.expandedFolders.has(folder.name)) {
+            try {
+                const detail = await api('GET', `/streamer/folder/${encodeURIComponent(folder.name)}`);
+                return { ...folder, ...detail };
+            } catch (e) {
+                console.error(`Failed to refresh expanded folder detail for ${folder.name}:`, e);
+            }
+        }
+        // Fallback to existing detail if available
+        const existing = (state.streamerFolders || []).find(f => f.name === folder.name);
+        if (existing && existing.slots) {
+            return { ...folder, ...existing };
+        }
+        return folder;
+    });
+    
+    state.streamerFolders = await Promise.all(folderDetailsPromises);
+    renderStreamerFolders();
+}
+
 async function scanStreamerFolder(path) {
     try {
         const data = await api('POST', '/streamer/scan', { path });
-        state.streamerFolders = data.folders;
-        renderStreamerFolders();
+        await setStreamerFoldersAndRefresh(data.folders);
         document.getElementById('stream-start-btn').disabled = false;
     } catch (e) {
         showToast(`Failed to scan folder: ${e.message}`, 'error');
@@ -339,12 +405,15 @@ function renderStreamerFolders() {
             <div class="empty-state">
                 <div class="empty-icon">📡</div>
                 <p>No date-range folders found (expected format: DDMM_DDMM)</p>
+                <div style="margin-top: 15px; text-align: center;">
+                    <button class="btn btn-secondary" onclick="openCreateFolderModal()">+ New Folder</button>
+                </div>
             </div>
         `;
         return;
     }
 
-    container.innerHTML = state.streamerFolders.map(folder => {
+    const cardsHtml = state.streamerFolders.map(folder => {
         const isExpanded = state.expandedFolders.has(folder.name);
         const isActive = folder.is_active;
 
@@ -359,6 +428,8 @@ function renderStreamerFolders() {
                     ${isActive ? '<span class="folder-active-tag">Active</span>' : ''}
                     <span class="folder-date-range">${folder.display_range}</span>
                     <span class="folder-file-count">${folder.file_count} files</span>
+                    <button class="folder-edit-btn" onclick="openModifyFolderModal(event, '${escapeAttr(folder.name)}')" title="Modify Date Range" style="background:none; border:none; cursor:pointer; font-size:14px; padding:2px 6px; border-radius:4px; opacity:0.7;">✏️</button>
+                    ${!isActive ? `<button class="folder-delete-btn" onclick="deleteFolder(event, '${escapeAttr(folder.name)}')" title="Remove Folder (Moves videos back to Input)" style="background:none; border:none; cursor:pointer; font-size:14px; padding:2px 6px; border-radius:4px; opacity:0.7; color:var(--red);">🗑️</button>` : ''}
                     <span class="folder-chevron ${isExpanded ? 'open' : ''}">▶</span>
                 </div>
                 <div class="folder-card-body ${isExpanded ? 'open' : ''}" id="folder-body-${folder.name}">
@@ -367,86 +438,124 @@ function renderStreamerFolders() {
             </div>
         `;
     }).join('');
+
+    const newFolderBtnHtml = `
+        <div style="display: flex; justify-content: center; margin: 20px 0;">
+            <button class="btn btn-secondary" onclick="openCreateFolderModal()" style="padding: 8px 16px;">
+                + New Folder
+            </button>
+        </div>
+    `;
+
+    container.innerHTML = cardsHtml + newFolderBtnHtml;
 }
 
 function renderFolderFiles(folder) {
-    const files = folder.files_detail || folder.files.map(name => ({ filename: name }));
+    const slots = folder.slots || [];
+    const existingSlotsMap = new Map(slots.map(s => [s.port, s]));
+    const startPort = (state.config && state.config.streamer && state.config.streamer.port_range_start) ? state.config.streamer.port_range_start : 1935;
+    const endPort = (state.config && state.config.streamer && state.config.streamer.port_range_end) ? state.config.streamer.port_range_end : 1944;
 
-    if (!files || files.length === 0) {
-        return '<div class="modal-loading">No .ts files found</div>';
+    const allPortsSet = new Set();
+    for (let p = startPort; p <= endPort; p++) {
+        allPortsSet.add(p);
+    }
+    for (const slot of slots) {
+        allPortsSet.add(slot.port);
     }
 
-    return files.map(fileObj => {
-        const filename = fileObj.filename;
-        let portHtml = '';
-        let progressHtml = '';
-        let metaHtml = '';
-        
-        // Metadata from folder details or stream status
-        let meta = fileObj.metadata || null;
-        let streamInfo = null;
+    const allPorts = Array.from(allPortsSet).sort((a, b) => a - b);
 
-        if (state.streamStatus && state.streamStatus.active_streams) {
-            const stream = state.streamStatus.active_streams.find(s => s.filename === filename);
-            if (stream) {
-                streamInfo = stream;
-                if (stream.metadata) meta = stream.metadata;
-                
-                if (stream.status === 'live') {
-                    portHtml = `
-                        <span class="folder-file-port">
-                            <span class="live-dot"></span>
-                            ${stream.port}
-                        </span>
-                    `;
-                    const pct = Math.round((stream.progress || 0) * 100);
-                    progressHtml = `
-                        <div class="stream-progress-container" style="width: 100%; height: 4px; background: var(--bg-input); border-radius: 2px; margin-top: 4px; overflow: hidden;">
-                            <div class="stream-progress-fill" style="width: ${pct}%; height: 100%; background: var(--blue); transition: width 0.5s linear;"></div>
+    return allPorts.map(port => {
+        const slot = existingSlotsMap.get(port);
+        if (!slot) {
+            return `
+                <div class="slot-card slot-new-card" id="slot-${folder.name}-${port}" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleSlotDrop(event, '${escapeAttr(folder.name)}', ${port})">
+                    <div class="slot-header" style="border-bottom:none; justify-content:space-between;">
+                        <div style="display:flex; align-items:center; gap:8px;">
+                            <span class="slot-port-badge" style="border-style:dashed; color:var(--text-muted);">+ New Port :${port}</span>
+                            <span style="font-size:12px; color:var(--text-muted);">Drag & drop video here or click "+ Add File" to create port :${port}</span>
                         </div>
-                    `;
-                } else {
-                    portHtml = `<span class="folder-file-port">${stream.port} (${stream.status})</span>`;
-                }
-            }
-        }
-        
-        let details = [];
-        if (meta && !meta.error) {
-            if (meta.duration) {
-                const mins = Math.floor(meta.duration / 60);
-                const secs = Math.floor(meta.duration % 60);
-                details.push(`${mins}:${secs.toString().padStart(2, '0')}`);
-            }
-            if (meta.width && meta.height) details.push(`${meta.width}x${meta.height}`);
+                        <button class="slot-add-btn" onclick="openAddFileModal('${escapeAttr(folder.name)}', ${port})">+ Add File</button>
+                    </div>
+                </div>
+            `;
         }
 
-        // Display Streaming URL if stream is active (fallback to rtmp_url if stream_url is missing)
-        if (streamInfo) {
-            const displayUrl = streamInfo.stream_url || streamInfo.rtmp_url;
-            if (displayUrl) {
-                details.push(`<span onclick="copyToClipboard('${escapeAttr(displayUrl)}'); event.stopPropagation();" style="cursor: pointer; color: var(--blue); text-decoration: underline;" title="Click to copy URL">🔗 ${escapeHtml(displayUrl)}</span>`);
-            }
-        }
+        const files = slot.files || [];
+        const filesDetail = slot.files_detail || [];
 
-        if (details.length > 0) {
-            metaHtml = `<div class="file-meta" style="font-size: 0.85em; margin-top: 2px; display: flex; gap: 8px; align-items: center;">${details.join(' <span style="color:var(--border);">•</span> ')}</div>`;
+        // Find live stream for this port
+        const liveStream = state.streamStatus && state.streamStatus.active_streams
+            ? state.streamStatus.active_streams.find(s => s.port === port)
+            : null;
+
+        const isLive = liveStream && liveStream.status === 'live';
+        const pct = liveStream ? Math.round((liveStream.progress || 0) * 100) : 0;
+        const currentFile = liveStream ? liveStream.filename : null;
+
+        const portBadge = isLive
+            ? `<span class="slot-port-badge live"><span class="live-dot"></span>:${port}</span>`
+            : `<span class="slot-port-badge">:${port}</span>`;
+
+        // Stream URL link always visible (RTMP/HLS)
+        const protocol = (state.config && state.config.streamer && state.config.streamer.protocol) ? state.config.streamer.protocol.toUpperCase() : 'RTMP';
+        let displayUrl = '';
+        if (liveStream && (liveStream.status === 'live' || liveStream.status === 'starting') && (liveStream.stream_url || liveStream.rtmp_url)) {
+            displayUrl = liveStream.stream_url || liveStream.rtmp_url;
+        } else if (protocol === 'HLS') {
+            displayUrl = `http://127.0.0.1:${port}/stream/index.m3u8`;
+        } else {
+            displayUrl = `rtmp://127.0.0.1:${port}/stream`;
         }
+        const urlHtml = `<div class="slot-url" onclick="copyToClipboard('${escapeAttr(displayUrl)}'); event.stopPropagation();" title="Click to copy playback link (${protocol})">
+            🔗 ${escapeHtml(displayUrl)} <span style="opacity:0.75; font-size:10px;">[${protocol}]</span>
+        </div>`;
+
+        // Progress bar
+        const progressHtml = isLive ? `
+            <div class="slot-progress-bar">
+                <div class="slot-progress-fill" style="width:${pct}%"></div>
+            </div>
+        ` : '';
+
+        // File entries
+        const fileRows = files.map((fname, fi) => {
+            const detail = filesDetail[fi] || {};
+            const isCurrent = isLive && fname === currentFile;
+            const metaBadge = formatMetaBadge(detail.metadata);
+            const thumbSrc = `/api/streamer/folder/${encodeURIComponent(folder.name)}/thumbnail/${encodeURIComponent(fname)}`;
+            const thumbHtml = getThumbHtml(thumbSrc, detail.has_thumbnail, 'slot-file-thumb');
+
+            return `
+                <div class="slot-file-entry ${isCurrent ? 'is-playing' : ''}" draggable="true" ondragstart="handleDragStart(event, '${escapeAttr(fname)}')">
+                    ${thumbHtml}
+                    <div class="slot-file-info">
+                        <span class="slot-file-name" title="${escapeHtml(fname)}">${escapeHtml(fname)}</span>
+                        ${metaBadge ? `<span class="slot-file-meta">${metaBadge}</span>` : ''}
+                    </div>
+                    ${isCurrent ? '<span class="slot-playing-badge">▶ Playing</span>' : ''}
+                    <div class="slot-reorder-buttons" style="display:flex; gap:2px; flex-shrink:0;">
+                        <button class="slot-reorder-btn" onclick="moveFileInSlot(event, '${escapeAttr(folder.name)}', ${port}, ${fi}, -1)" title="Move Up" style="background:none; border:none; cursor:pointer; font-size:12px; padding:2px; opacity:0.6;" ${fi === 0 ? 'disabled style="opacity:0.2;"' : ''}>▲</button>
+                        <button class="slot-reorder-btn" onclick="moveFileInSlot(event, '${escapeAttr(folder.name)}', ${port}, ${fi}, 1)" title="Move Down" style="background:none; border:none; cursor:pointer; font-size:12px; padding:2px; opacity:0.6;" ${fi === files.length - 1 ? 'disabled style="opacity:0.2;"' : ''}>▼</button>
+                    </div>
+                    <button class="slot-remove-btn" onclick="removeFileFromSlot(event, '${escapeAttr(folder.name)}', ${port}, '${escapeAttr(fname)}')" title="Remove">✕</button>
+                </div>
+            `;
+        }).join('');
 
         return `
-            <div class="folder-file-item" style="flex-wrap: wrap;">
-                <div style="display: flex; align-items: center; width: 100%;">
-                    <img class="folder-file-thumb" 
-                         src="/api/streamer/folder/${encodeURIComponent(folder.name)}/thumbnail/${encodeURIComponent(filename)}" 
-                         alt="" loading="lazy"
-                         onerror="this.style.display='none'">
-                    <div style="display: flex; flex-direction: column; flex: 1; min-width: 0;">
-                        <span class="folder-file-name" title="${escapeHtml(filename)}">${escapeHtml(filename)}</span>
-                        ${metaHtml}
-                    </div>
-                    ${portHtml}
+            <div class="slot-card" id="slot-${folder.name}-${port}" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleSlotDrop(event, '${escapeAttr(folder.name)}', ${port})">
+                <div class="slot-header">
+                    ${portBadge}
+                    <span class="slot-file-count">${files.length} file${files.length !== 1 ? 's' : ''}</span>
+                    ${urlHtml}
+                    <button class="slot-add-btn" onclick="openAddFileModal('${escapeAttr(folder.name)}', ${port})">+ Add File</button>
                 </div>
                 ${progressHtml}
+                <div class="slot-file-list">
+                    ${fileRows || '<div class="slot-empty">No files. Click + Add File to assign videos.</div>'}
+                </div>
             </div>
         `;
     }).join('');
@@ -458,13 +567,19 @@ async function toggleFolder(name) {
     } else {
         state.expandedFolders.add(name);
 
-        // Fetch folder details for expanded view
+        // Fetch folder details (includes slot config) for expanded view
         try {
             const detail = await api('GET', `/streamer/folder/${encodeURIComponent(name)}`);
-            // Update folder in state with detailed data
             const idx = state.streamerFolders.findIndex(f => f.name === name);
             if (idx !== -1) {
                 state.streamerFolders[idx] = { ...state.streamerFolders[idx], ...detail };
+            }
+
+            // Enable EPG button for this folder
+            const epgBtn = document.getElementById('epg-generate-btn');
+            if (epgBtn) {
+                epgBtn.disabled = false;
+                epgBtn.dataset.folder = name;
             }
         } catch (e) {
             console.error('Failed to load folder details:', e);
@@ -472,6 +587,207 @@ async function toggleFolder(name) {
     }
     renderStreamerFolders();
 }
+
+// ──────────────────────────────────────────────
+//  Slot Management
+// ──────────────────────────────────────────────
+
+let _filePickerState = { folder: null, port: null };
+
+async function refreshFolderDetail(folderName) {
+    try {
+        const detail = await api('GET', `/streamer/folder/${encodeURIComponent(folderName)}`);
+        const idx = state.streamerFolders.findIndex(f => f.name === folderName);
+        if (idx !== -1) state.streamerFolders[idx] = { ...state.streamerFolders[idx], ...detail };
+        renderStreamerFolders();
+        if (state.config?.converter?.source_folder) {
+            scanConverterFolder(state.config.converter.source_folder);
+        }
+    } catch (e) {
+        console.error('Failed to refresh folder:', e);
+    }
+}
+
+async function openAddFileModal(folderName, port) {
+    _filePickerState = { folder: folderName, port };
+    document.getElementById('file-picker-port').textContent = port;
+    document.getElementById('file-picker-modal').style.display = 'flex';
+    document.getElementById('file-picker-body').innerHTML = '<div class="modal-loading">Loading converted files...</div>';
+
+    try {
+        const data = await api('GET', '/converter/status');
+        const doneFiles = (data.files || []).filter(f => f.status === 'done');
+
+        const folderDetail = state.streamerFolders.find(f => f.name === folderName);
+        const currentSlot = (folderDetail?.slots || []).find(s => s.port === port);
+        const alreadyAdded = new Set(currentSlot ? currentSlot.files : []);
+
+        if (doneFiles.length === 0) {
+            document.getElementById('file-picker-body').innerHTML = '<div class="modal-loading">No converted .ts files found in converter.</div>';
+            return;
+        }
+
+        document.getElementById('file-picker-body').innerHTML = doneFiles.map(f => {
+            const added = alreadyAdded.has(f.ts_filename || f.filename);
+            const fname = f.ts_filename || f.filename;
+            const metaBadge = formatMetaBadge(f.metadata);
+            const thumbSrc = `/api/converter/thumbnail/${encodeURIComponent(f.filename)}`;
+            const thumbHtml = getThumbHtml(thumbSrc, true, 'slot-file-thumb');
+
+            return `
+                <div class="file-picker-item ${added ? 'added' : ''}" onclick="${added ? '' : `addFileToSlot('${escapeAttr(folderName)}', ${port}, '${escapeAttr(fname)}')`}">
+                    ${thumbHtml}
+                    <div class="slot-file-info">
+                        <span class="slot-file-name">${escapeHtml(fname)}</span>
+                        ${metaBadge ? `<span class="slot-file-meta">${metaBadge}</span>` : ''}
+                    </div>
+                    ${added ? '<span class="slot-playing-badge">Added</span>' : '<button class="btn btn-primary" style="font-size:0.85em;padding:4px 10px;">Add</button>'}
+                </div>
+            `;
+        }).join('');
+    } catch (e) {
+        document.getElementById('file-picker-body').innerHTML = `<div class="modal-loading" style="color:var(--red)">Error: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+async function addFileToSlot(folderName, port, filename) {
+    const folderDetail = state.streamerFolders.find(f => f.name === folderName);
+    const slots = folderDetail ? (folderDetail.slots || []) : [];
+    const slot = slots.find(s => s.port === port);
+    const currentFiles = slot ? [...slot.files] : [];
+
+    if (currentFiles.includes(filename)) {
+        showToast('File already in this slot', 'info');
+        return;
+    }
+
+    try {
+        await api('PUT', `/streamer/folder/${encodeURIComponent(folderName)}/slot`, {
+            port,
+            files: [...currentFiles, filename],
+        });
+        await refreshFolderDetail(folderName);
+        if (document.getElementById('file-picker-modal').style.display === 'flex') {
+            openAddFileModal(folderName, port);
+        }
+    } catch (e) {
+        showToast(`Failed to add file: ${e.message}`, 'error');
+    }
+}
+
+async function removeFileFromSlot(event, folderName, port, filename) {
+    event.stopPropagation();
+    try {
+        await api('DELETE', `/streamer/folder/${encodeURIComponent(folderName)}/slot/file`, { port, filename });
+        showToast(`Removed ${filename}`, 'success');
+        await refreshFolderDetail(folderName);
+    } catch (e) {
+        showToast(`Failed to remove file: ${e.message}`, 'error');
+    }
+}
+
+let _modifyFolderName = null;
+
+function openCreateFolderModal() {
+    document.getElementById('folder-create-name').value = '';
+    document.getElementById('folder-create-modal').style.display = 'flex';
+}
+
+function closeCreateFolderModal() {
+    document.getElementById('folder-create-modal').style.display = 'none';
+}
+
+async function submitCreateFolder() {
+    const nameInput = document.getElementById('folder-create-name');
+    const name = nameInput.value.trim();
+    if (!name) {
+        showToast('Please enter a folder name', 'error');
+        return;
+    }
+    try {
+        const data = await api('POST', '/streamer/folders', { name });
+        if (data && data.folders) {
+            await setStreamerFoldersAndRefresh(data.folders);
+        } else {
+            await rescanFolders(false, true);
+        }
+        closeCreateFolderModal();
+        showToast(`Folder '${name}' created`, 'success');
+    } catch (e) {
+        showToast(`Failed to create folder: ${e.message}`, 'error');
+    }
+}
+
+function openModifyFolderModal(event, folderName) {
+    if (event) event.stopPropagation();
+    const folderDetail = state.streamerFolders.find(f => f.name === folderName);
+    if (state.streamStatus?.is_running && (folderName === state.streamStatus.current_folder || folderDetail?.is_active)) {
+        showToast('Cannot modify active folder while streaming is running. Stop streaming first.', 'error');
+        return;
+    }
+    _modifyFolderName = folderName;
+    document.getElementById('folder-modify-old-name').textContent = folderName;
+    document.getElementById('folder-modify-name').value = folderName;
+    document.getElementById('folder-modify-modal').style.display = 'flex';
+}
+
+function closeModifyFolderModal() {
+    document.getElementById('folder-modify-modal').style.display = 'none';
+    _modifyFolderName = null;
+}
+
+async function submitModifyFolder() {
+    if (!_modifyFolderName) return;
+    const nameInput = document.getElementById('folder-modify-name');
+    const new_name = nameInput.value.trim();
+    if (!new_name) {
+        showToast('Please enter a folder name', 'error');
+        return;
+    }
+    try {
+        const data = await api('PUT', `/streamer/folder/${encodeURIComponent(_modifyFolderName)}`, { new_name });
+        if (data && data.folders) {
+            if (state.expandedFolders.has(_modifyFolderName)) {
+                state.expandedFolders.delete(_modifyFolderName);
+                state.expandedFolders.add(new_name);
+            }
+            await setStreamerFoldersAndRefresh(data.folders);
+        } else {
+            await rescanFolders(false, true);
+        }
+        closeModifyFolderModal();
+        showToast(`Folder updated to '${new_name}'`, 'success');
+    } catch (e) {
+        showToast(`Failed to modify folder: ${e.message}`, 'error');
+    }
+}
+
+// ──────────────────────────────────────────────
+//  EPG Generation
+// ──────────────────────────────────────────────
+
+async function generateEpg() {
+    const btn = document.getElementById('epg-generate-btn');
+    const folderName = btn && btn.dataset.folder;
+    if (!folderName) {
+        showToast('Open a folder first to generate EPG', 'info');
+        return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = '⏳ Generating...';
+    try {
+        const data = await api('POST', `/streamer/folder/${encodeURIComponent(folderName)}/epg`);
+        showToast(`EPG saved: ${data.filename}`, 'success');
+    } catch (e) {
+        showToast(`EPG failed: ${e.message}`, 'error');
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<span class="btn-icon">📋</span> Generate EPG';
+    }
+}
+
+
 
 function updateStreamUI() {
     if (!state.streamStatus) return;
@@ -481,7 +797,13 @@ function updateStreamUI() {
     const stopBtn = document.getElementById('stream-stop-btn');
     const errorsEl = document.getElementById('stream-errors');
 
-    if (state.streamStatus.is_running) {
+    const isRunning = state.streamStatus.is_running;
+    document.getElementById('stream-protocol').disabled = isRunning;
+    document.getElementById('port-start').disabled = isRunning;
+    document.getElementById('port-end').disabled = isRunning;
+    document.getElementById('streamer-browse-btn').disabled = isRunning;
+
+    if (isRunning) {
         const liveCount = state.streamStatus.active_streams.filter(s => s.status === 'live').length;
         badge.textContent = `Live · ${liveCount} streams`;
         badge.className = 'stream-status-badge live';
@@ -518,6 +840,10 @@ async function startStreaming() {
         return;
     }
 
+    if (state.config && state.config.streamer) {
+        state.config.streamer.protocol = protocol;
+    }
+
     try {
         const data = await api('POST', '/streamer/start', {
             port_range_start: portStart,
@@ -528,7 +854,35 @@ async function startStreaming() {
         if (data.status === 'error') {
             showToast(data.error, 'error');
         } else {
-            showToast('Streaming started', 'success');
+            showToast('Streaming starting...', 'info');
+            setTimeout(async () => {
+                let success = false;
+                for (let attempt = 1; attempt <= 6; attempt++) {
+                    try {
+                        const [cfgData, statusData] = await Promise.all([
+                            api('GET', '/config'),
+                            api('GET', '/streamer/status')
+                        ]);
+                        state.config = cfgData;
+                        state.streamStatus = statusData;
+                        updateStreamUI();
+                        if (state.streamerFolders.length === 0 && state.config?.streamer?.content_folder) {
+                            await scanStreamerFolder(state.config.streamer.content_folder);
+                        } else {
+                            renderStreamerFolders();
+                        }
+                        showToast('Streaming started', 'success');
+                        success = true;
+                        break;
+                    } catch (err) {
+                        console.warn(`Status check attempt ${attempt} failed:`, err);
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                    }
+                }
+                if (!success) {
+                    showToast('Failed to verify streaming status. Please refresh.', 'error');
+                }
+            }, 1000);
         }
     } catch (e) {
         showToast(`Failed to start streaming: ${e.message}`, 'error');
@@ -694,6 +1048,14 @@ function formatDuration(seconds) {
     return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+function formatBitrate(bitrate) {
+    if (!bitrate || bitrate <= 0) return '';
+    if (bitrate < 1000000) {
+        return `${Math.round(bitrate / 1000)} kbps`;
+    }
+    return `${(bitrate / 1000000).toFixed(1)} Mbps`;
+}
+
 function escapeHtml(str) {
     if (!str) return '';
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -735,28 +1097,89 @@ function handleDragLeave(e) {
 
 async function handleDrop(e, targetFolder) {
     e.preventDefault();
-    const card = e.currentTarget;
-    card.classList.remove('drag-over');
-
+    e.currentTarget.classList.remove('drag-over');
     const filename = e.dataTransfer.getData('text/plain');
     if (!filename) return;
 
     try {
-        const data = await api('POST', '/converter/move', {
-            filename: filename,
-            target_folder: targetFolder
-        });
+        const data = await api('POST', '/converter/move', { filename, target_folder: targetFolder });
         showToast(data.message, 'success');
-        
-        // Immediately rescan to update UI
-        if (state.config && state.config.converter && state.config.converter.source_folder) {
-            scanConverterFolder(state.config.converter.source_folder);
-        }
-        if (state.config && state.config.streamer && state.config.streamer.content_folder) {
-            scanStreamerFolder(state.config.streamer.content_folder);
-        }
+        await rescanFolders();
     } catch (err) {
         showToast(`Failed to move file: ${err.message}`, 'error');
+    }
+}
+
+async function handleSlotDrop(e, targetFolder, port) {
+    e.preventDefault();
+    e.stopPropagation();
+    e.currentTarget.classList.remove('drag-over');
+    const filename = e.dataTransfer.getData('text/plain');
+    if (!filename) return;
+
+    const convFile = state.converterFiles.find(f => f.filename === filename || f.ts_filename === filename);
+    let targetFileName = filename;
+
+    if (convFile && convFile.status === 'done') {
+        targetFileName = convFile.ts_filename || convFile.filename;
+        try {
+            await api('POST', '/converter/move', { filename: convFile.filename, target_folder: targetFolder });
+            await rescanFolders(true, false);
+        } catch (err) {
+            if (!err.message.includes('not found')) showToast(`Move warning: ${err.message}`, 'info');
+        }
+    }
+
+    await addFileToSlot(targetFolder, port, targetFileName);
+}
+
+async function deleteFolder(event, folderName) {
+    if (event) event.stopPropagation();
+    if (!confirm(`Are you sure you want to delete the folder '${folderName}'? Any video files inside will be moved back to the converter's input folder.`)) {
+        return;
+    }
+    try {
+        const data = await api('DELETE', `/streamer/folder/${encodeURIComponent(folderName)}`);
+        if (data && data.folders) {
+            state.expandedFolders.delete(folderName);
+            await setStreamerFoldersAndRefresh(data.folders);
+        } else {
+            await rescanFolders(true, true);
+        }
+        // Rescan converter panel so moved files show up immediately
+        if (state.config?.converter?.source_folder) {
+            await scanConverterFolder(state.config.converter.source_folder);
+        }
+        showToast(`Folder '${folderName}' deleted, files returned to input`, 'success');
+    } catch (e) {
+        showToast(`Failed to delete folder: ${e.message}`, 'error');
+    }
+}
+
+async function moveFileInSlot(event, folderName, port, currentIndex, direction) {
+    if (event) event.stopPropagation();
+    const folderDetail = state.streamerFolders.find(f => f.name === folderName);
+    if (!folderDetail) return;
+    const slot = (folderDetail.slots || []).find(s => s.port === port);
+    if (!slot) return;
+    const files = [...slot.files];
+
+    const targetIndex = currentIndex + direction;
+    if (targetIndex < 0 || targetIndex >= files.length) return;
+
+    // Swap the elements
+    const temp = files[currentIndex];
+    files[currentIndex] = files[targetIndex];
+    files[targetIndex] = temp;
+
+    try {
+        await api('PUT', `/streamer/folder/${encodeURIComponent(folderName)}/slot`, {
+            port,
+            files: files,
+        });
+        await refreshFolderDetail(folderName);
+    } catch (e) {
+        showToast(`Failed to reorder files: ${e.message}`, 'error');
     }
 }
 
@@ -769,4 +1192,11 @@ window.handleDragStart = handleDragStart;
 window.handleDragOver = handleDragOver;
 window.handleDragLeave = handleDragLeave;
 window.handleDrop = handleDrop;
+window.handleSlotDrop = handleSlotDrop;
 window.copyToClipboard = copyToClipboard;
+window.openAddFileModal = openAddFileModal;
+window.addFileToSlot = addFileToSlot;
+window.removeFileFromSlot = removeFileFromSlot;
+window.generateEpg = generateEpg;
+window.deleteFolder = deleteFolder;
+window.moveFileInSlot = moveFileInSlot;

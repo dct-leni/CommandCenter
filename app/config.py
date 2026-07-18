@@ -7,6 +7,7 @@ import os
 import yaml
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
+from typing import List
 
 CONFIG_PATH = Path(__file__).parent.parent / "config.yml"
 
@@ -14,6 +15,11 @@ CONFIG_PATH = Path(__file__).parent.parent / "config.yml"
 @dataclass
 class ConverterConfig:
     source_folder: str = "input/"
+    # Audio languages to keep (ISO 639-2/1 tags, or anything matched against
+    # stream language tags / titles). First match wins in the order listed;
+    # if none of these are found, the converter falls back to the first
+    # audio track present.
+    languages: List[str] = field(default_factory=lambda: ["tur", "tr", "trk"])
 
 
 @dataclass
@@ -24,6 +30,9 @@ class StreamerConfig:
     protocol: str = "rtmp"  # rtmp or hls
     auto_resume: bool = False
     current_folder: str = ""
+    channel_prefix: str = "Salon"       # Channel name prefix (e.g. "Salon" → "Salon1 HD")
+    epg_timezone: str = "+0300"         # XMLTV timezone offset string
+    playlists: dict = field(default_factory=dict)  # folder_name → [{port, files}]
 
 
 @dataclass

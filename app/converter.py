@@ -1,33 +1,49 @@
 """
 Video file converter — converts various video formats to MPEG-TS (.ts).
 Tracks conversion progress and manages file renaming.
+
+Behavior added on top of the original converter:
+  - Only One audio tracks are kept (language tag "tur"/"tr"). If no language track is found, the first
+    audio stream is kept as a safe fallback (and this is logged).
+  - Subtitle streams are always dropped (we simply never -map them).
+  - Video is capped at "HD" (longest side <= 1920px). If the source is
+    already HD or smaller, we do a pure stream copy (fast, lossless).
+    If the source is above HD (2K/4K/etc.) we must re-encode to scale
+    it down, so the copy strategy is skipped and we go straight to
+    NVENC (falling back to CPU/libx264 if NVENC isn't available).
 """
 
 import asyncio
+import json
 import os
 import re
+import shutil
 import subprocess
 import logging
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 from enum import Enum
-
+ 
 from app.ffmpeg_setup import get_ffmpeg_path, is_ffmpeg_installed
 from app.thumbnails import generate_thumbnail, get_video_metadata
-
+from app.config import load_config
+ 
 logger = logging.getLogger(__name__)
-
+ 
 VIDEO_EXTENSIONS = {".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".mpg", ".mpeg"}
-
-
+ 
+# Longest side (width or height) allowed. 1920 == standard "HD" (1080p landscape).
+MAX_HD_DIMENSION = 1920
+ 
+ 
 class ConversionStatus(str, Enum):
     PENDING = "pending"
     CONVERTING = "converting"
     DONE = "done"
     ERROR = "error"
-
-
+ 
+ 
 @dataclass
 class FileInfo:
     filename: str
@@ -40,54 +56,179 @@ class FileInfo:
     ts_filename: str = ""
     metadata: dict = field(default_factory=dict)
     thumbnail: Optional[str] = None
+    # Populated once we probe the file, right before conversion.
+    audio_note: str = ""       # human-readable note about which audio track(s) were kept
+    scaled_note: str = ""      # human-readable note about whether/how video was scaled
+ 
+ 
+def _get_ffprobe_path() -> str:
+    """Best-effort resolution of the ffprobe binary that ships alongside ffmpeg."""
+    ffmpeg_path = get_ffmpeg_path()
+    p = Path(ffmpeg_path)
+    candidate_name = "ffprobe.exe" if p.suffix.lower() == ".exe" else "ffprobe"
+    candidate = p.parent / candidate_name
+    if candidate.exists():
+        return str(candidate)
+    # Fall back to a plain name replace, then to just "ffprobe" on PATH.
+    if "ffmpeg" in p.name.lower():
+        guess = p.parent / p.name.lower().replace("ffmpeg", "ffprobe")
+        if guess.exists():
+            return str(guess)
+    return "ffprobe"
+ 
+ 
+async def probe_streams(input_path: str) -> dict:
+    """
+    Run ffprobe and return a dict:
+      {
+        "video": {"index": int, "width": int, "height": int} | None,
+        "audio": [{"index": int, "language": str, "title": str}, ...],
+      }
+    """
+    ffprobe = _get_ffprobe_path()
+    cmd = [
+        ffprobe, "-v", "quiet",
+        "-print_format", "json",
+        "-show_streams",
+        input_path,
+    ]
+    result = {"video": None, "audio": []}
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        stdout, _ = await process.communicate()
+        data = json.loads(stdout.decode("utf-8", errors="replace") or "{}")
+    except Exception as e:
+        logger.warning(f"ffprobe failed for {input_path}: {e}")
+        return result
+ 
+    for stream in data.get("streams", []):
+        codec_type = stream.get("codec_type")
+        idx = stream.get("index")
+        if codec_type == "video" and result["video"] is None:
+            result["video"] = {
+                "index": idx,
+                "width": stream.get("width", 0),
+                "height": stream.get("height", 0),
+            }
+        elif codec_type == "audio":
+            tags = stream.get("tags", {}) or {}
+            language = (tags.get("language") or "").lower()
+            title = (tags.get("title") or "").lower()
+            result["audio"].append({"index": idx, "language": language, "title": title})
+ 
+    return result
+ 
+ 
+def _select_audio_by_language(audio_streams: List[dict], languages: List[str]) -> (List[int], str):
+    """
+    Return (list of absolute stream indices to keep, human-readable note).
+    `languages` is the configured list of language tags to keep (e.g.
+    ["tur", "tr", "trk"]), matched against each stream's language tag or,
+    as a loose fallback, checked as a substring of the stream title.
+    """
+    wanted = {lang.lower() for lang in languages}
+ 
+    matched = [
+        a for a in audio_streams
+        if a["language"] in wanted or any(lang in a["title"] for lang in wanted if lang)
+    ]
+    if matched:
+        return [a["index"] for a in matched], f"kept {len(matched)} audio track(s) matching {sorted(wanted)}"
+ 
+    if audio_streams:
+        first = audio_streams[0]
+        return [first["index"]], f"no audio matching {sorted(wanted)} found — kept first audio track as fallback"
+ 
+    return [], "no audio streams found"
+ 
+ 
+def _compute_target_size(width: int, height: int) -> Optional[tuple]:
+    """
+    Return (new_width, new_height) if downscaling is needed to fit within
+    Full HD (1920x1080) bounding box, else None (no scaling needed).
+    Dimensions are rounded down to even numbers (required by most encoders).
+    """
+    if not width or not height:
+        return None
 
+    if width <= 1920 and height <= 1080:
+        return None
 
+    scale_factor = min(1920 / width, 1080 / height)
+    new_w = int(width * scale_factor) // 2 * 2
+    new_h = int(height * scale_factor) // 2 * 2
+    return (max(new_w, 2), max(new_h, 2))
+ 
+ 
 class Converter:
     """Manages video-to-TS conversion for a folder."""
-
+ 
     def __init__(self):
         self.files: Dict[str, FileInfo] = {}
         self.source_folder: str = ""
         self._active_processes: Dict[str, subprocess.Popen] = {}
         self._conversion_tasks: Dict[str, asyncio.Task] = {}
-
+        # Every directory we've ever seen a thumbnail written into, so we can
+        # still find + remove orphans even if every file in a folder vanished
+        # in one go (in which case this scan has zero "valid" thumbnails to
+        # infer the directory from).
+        self._known_thumbnail_dirs: set = set()
+ 
+    def scan_configured_folder(self) -> List[dict]:
+        """Scan the folder configured in config.yml (converter.source_folder)."""
+        cfg = load_config()
+        return self.scan_folder(cfg.converter.source_folder)
+ 
     def scan_folder(self, folder_path: str) -> List[dict]:
         """Scan a folder for video files and return their info."""
         self.source_folder = folder_path
         folder = Path(folder_path)
-
+ 
         if not folder.exists() or not folder.is_dir():
             return []
-
+ 
         old_files = self.files.copy()
         self.files.clear()
         results = []
-
+ 
         for f in sorted(folder.iterdir()):
             if not f.is_file():
                 continue
-
+ 
             ext = f.suffix.lower()
-
+ 
             # Check if this is an already-converted .ts file
             if ext == ".ts":
-                info = FileInfo(
-                    filename=f.name,
-                    filepath=str(f),
-                    size=f.stat().st_size,
-                    extension=ext,
-                    status=ConversionStatus.DONE,
-                    progress=1.0,
-                    ts_filename=f.name,
-                )
-                # Generate thumbnail for .ts files too
-                thumb = generate_thumbnail(str(f))
-                if thumb:
-                    info.thumbnail = thumb
+                if f.name in old_files:
+                    info = old_files[f.name]
+                    info.size = f.stat().st_size
+                else:
+                    info = FileInfo(
+                        filename=f.name,
+                        filepath=str(f),
+                        size=f.stat().st_size,
+                        extension=ext,
+                        status=ConversionStatus.DONE,
+                        progress=1.0,
+                        ts_filename=f.name,
+                    )
+                # Generate thumbnail for .ts files too if missing
+                if not info.thumbnail:
+                    thumb = generate_thumbnail(str(f))
+                    if thumb:
+                        info.thumbnail = thumb
+                # Fetch metadata if missing
+                if not info.metadata or not info.metadata.get("duration"):
+                    info.metadata = get_video_metadata(str(f))
                 self.files[f.name] = info
                 results.append(self._file_to_dict(info))
                 continue
-
+ 
             # Check for convertible video files
             if ext in VIDEO_EXTENSIONS:
                 # Preserve state for actively converting or failed files
@@ -96,10 +237,10 @@ class Converter:
                     self.files[f.name] = info
                     results.append(self._file_to_dict(info))
                     continue
-
+ 
                 ts_name = f.stem + ".ts"
                 ts_path = folder / ts_name
-
+ 
                 # Check if already converted
                 if ts_path.exists():
                     status = ConversionStatus.DONE
@@ -107,55 +248,106 @@ class Converter:
                 else:
                     status = ConversionStatus.PENDING
                     progress = 0.0
-
-                info = FileInfo(
-                    filename=f.name,
-                    filepath=str(f),
-                    size=f.stat().st_size,
-                    extension=ext,
-                    status=status,
-                    progress=progress,
-                    ts_filename=ts_name,
-                )
-
-                # Generate thumbnail
-                thumb = generate_thumbnail(str(f))
-                if thumb:
-                    info.thumbnail = thumb
-
-                # Get metadata
-                info.metadata = get_video_metadata(str(f))
-
+ 
+                if f.name in old_files:
+                    info = old_files[f.name]
+                    info.status = status
+                    info.progress = progress
+                    info.size = f.stat().st_size
+                else:
+                    info = FileInfo(
+                        filename=f.name,
+                        filepath=str(f),
+                        size=f.stat().st_size,
+                        extension=ext,
+                        status=status,
+                        progress=progress,
+                        ts_filename=ts_name,
+                    )
+ 
+                # Generate thumbnail if missing
+                if not info.thumbnail:
+                    probe_target = str(ts_path if status == ConversionStatus.DONE else f)
+                    thumb = generate_thumbnail(probe_target)
+                    if thumb:
+                        info.thumbnail = thumb
+ 
+                # Get metadata if missing
+                if not info.metadata or not info.metadata.get("duration"):
+                    probe_target = str(ts_path if status == ConversionStatus.DONE else f)
+                    info.metadata = get_video_metadata(probe_target)
+ 
                 self.files[f.name] = info
                 results.append(self._file_to_dict(info))
-
+ 
+        removed = self._cleanup_orphaned_thumbnails()
+        if removed:
+            logger.info(f"Removed {removed} orphaned thumbnail(s) for missing files.")
+ 
         return results
-
+ 
+    def _cleanup_orphaned_thumbnails(self) -> int:
+        """
+        Remove thumbnail files left behind for videos/.ts files that no
+        longer exist in the scanned folder (deleted, renamed, or moved).
+        Returns the number of thumbnail files removed.
+        """
+        valid_thumbs = set()
+        for info in self.files.values():
+            if info.thumbnail:
+                try:
+                    valid_thumbs.add(str(Path(info.thumbnail).resolve()))
+                    self._known_thumbnail_dirs.add(Path(info.thumbnail).resolve().parent)
+                except OSError:
+                    continue
+ 
+        removed = 0
+        for thumb_dir in list(self._known_thumbnail_dirs):
+            if not thumb_dir.exists():
+                self._known_thumbnail_dirs.discard(thumb_dir)
+                continue
+            for f in thumb_dir.iterdir():
+                if not f.is_file():
+                    continue
+                try:
+                    if str(f.resolve()) not in valid_thumbs:
+                        f.unlink()
+                        removed += 1
+                        logger.info(f"Removed orphaned thumbnail: {f}")
+                except OSError as e:
+                    logger.warning(f"Could not remove orphaned thumbnail {f}: {e}")
+ 
+        return removed
+ 
+    def cleanup_orphaned_thumbnails(self) -> int:
+        """Public wrapper so callers (e.g. an API route) can trigger cleanup on demand."""
+        return self._cleanup_orphaned_thumbnails()
+ 
     async def convert_file(self, filename: str) -> bool:
         """Start converting a single file to .ts format."""
         if not is_ffmpeg_installed():
             logger.error("FFmpeg not installed")
             return False
-
+ 
         if filename not in self.files:
             logger.error(f"File not found: {filename}")
             return False
-
+ 
         info = self.files[filename]
         if info.status == ConversionStatus.DONE:
             return True
         if info.status == ConversionStatus.CONVERTING:
             return True  # Already in progress
-
+ 
         info.status = ConversionStatus.CONVERTING
         info.progress = 0.0
         info.error = ""
-
+ 
         # Start conversion in background
         task = asyncio.create_task(self._run_conversion(filename))
         self._conversion_tasks[filename] = task
         return True
-
+ 
     async def convert_all(self) -> int:
         """Start converting all pending files. Returns count of started conversions."""
         count = 0
@@ -164,35 +356,76 @@ class Converter:
                 await self.convert_file(filename)
                 count += 1
         return count
-
+ 
     async def _run_conversion(self, filename: str):
         """Run the actual FFmpeg conversion process."""
         info = self.files[filename]
         input_path = info.filepath
         output_path = str(Path(input_path).parent / info.ts_filename)
-
+ 
         try:
-            # First attempt: copy codecs (fast, no re-encoding, flawless original quality)
-            success = await self._ffmpeg_convert(input_path, output_path, filename, strategy="copy")
-
+            # Probe the file so we know which audio track(s) to keep and
+            # whether the video needs to be scaled down to HD.
+            streams = await probe_streams(input_path)
+ 
+            cfg = load_config()
+            languages = cfg.converter.languages or ["tur", "tr", "trk"]
+ 
+            audio_indices, audio_note = _select_audio_by_language(streams["audio"], languages)
+            info.audio_note = audio_note
+            logger.info(f"{filename}: {audio_note}")
+ 
+            target_size = None
+            if streams["video"]:
+                target_size = _compute_target_size(streams["video"]["width"], streams["video"]["height"])
+ 
+            needs_scale = target_size is not None
+            info.scaled_note = (
+                f"downscaling to {target_size[0]}x{target_size[1]} (HD cap)"
+                if needs_scale else "no scaling needed (already HD or smaller)"
+            )
+            logger.info(f"{filename}: {info.scaled_note}")
+ 
+            video_stream_index = streams["video"]["index"] if streams["video"] else None
+ 
+            success = False
+ 
+            # 1) Pure stream copy — only possible when no scaling is needed.
+            if not needs_scale:
+                success = await self._ffmpeg_convert(
+                    input_path, output_path, filename, strategy="copy",
+                    video_stream_index=video_stream_index,
+                    audio_indices=audio_indices,
+                    target_size=None,
+                )
+ 
+            # 2) Hardware re-encode (NVENC), scaling if required.
             if not success:
-                # Second attempt: Hardware re-encode (NVENC)
-                logger.info(f"Codec copy failed for {filename}, re-encoding with NVENC...")
+                logger.info(f"Codec copy unavailable/failed for {filename}, re-encoding with NVENC...")
                 info.progress = 0.0
-                success = await self._ffmpeg_convert(input_path, output_path, filename, strategy="nvenc")
-            
+                success = await self._ffmpeg_convert(
+                    input_path, output_path, filename, strategy="nvenc",
+                    video_stream_index=video_stream_index,
+                    audio_indices=audio_indices,
+                    target_size=target_size,
+                )
+ 
+            # 3) Software re-encode (CPU) fallback.
             if not success:
-                # Third attempt: Software re-encode (CPU) - Fallback if no Nvidia GPU is present
                 logger.info(f"NVENC failed for {filename}, re-encoding with CPU (libx264)...")
                 info.progress = 0.0
-                success = await self._ffmpeg_convert(input_path, output_path, filename, strategy="cpu")
-
+                success = await self._ffmpeg_convert(
+                    input_path, output_path, filename, strategy="cpu",
+                    video_stream_index=video_stream_index,
+                    audio_indices=audio_indices,
+                    target_size=target_size,
+                )
+ 
             if success:
                 info.status = ConversionStatus.DONE
                 info.progress = 1.0
                 # Move original file to 'original' subfolder
                 try:
-                    import shutil
                     original_folder = Path(input_path).parent / "original"
                     original_folder.mkdir(exist_ok=True)
                     original_path = original_folder / Path(input_path).name
@@ -200,18 +433,21 @@ class Converter:
                     info.filepath = str(original_path)
                 except Exception as e:
                     logger.warning(f"Could not move original file: {e}")
-
-                # Generate thumbnail for the new .ts file
+ 
+                # Generate thumbnail and update metadata for the new .ts file
                 thumb = generate_thumbnail(output_path)
                 if thumb:
                     info.thumbnail = thumb
-
+                info.metadata = get_video_metadata(output_path)
+                if Path(output_path).exists():
+                    info.size = Path(output_path).stat().st_size
+ 
                 logger.info(f"Conversion complete: {filename} → {info.ts_filename}")
             else:
                 info.status = ConversionStatus.ERROR
                 # Clean up partial output
                 Path(output_path).unlink(missing_ok=True)
-
+ 
         except Exception as e:
             info.status = ConversionStatus.ERROR
             info.error = str(e)
@@ -220,18 +456,41 @@ class Converter:
             self._conversion_tasks.pop(filename, None)
             self._active_processes.pop(filename, None)
             self.scan_folder(self.source_folder)
-
-    async def _ffmpeg_convert(self, input_path: str, output_path: str, filename: str, strategy: str) -> bool:
+ 
+    async def _ffmpeg_convert(
+        self,
+        input_path: str,
+        output_path: str,
+        filename: str,
+        strategy: str,
+        video_stream_index: Optional[int],
+        audio_indices: List[int],
+        target_size: Optional[tuple],
+    ) -> bool:
         """Run FFmpeg conversion and track progress."""
         info = self.files[filename]
-
+ 
         # Get duration for progress calculation
         duration = info.metadata.get("duration", 0)
-
+ 
         base_cmd = [get_ffmpeg_path(), "-y", "-hwaccel", "auto", "-i", input_path]
-        
+ 
+        # --- Stream mapping: explicit video + only the selected audio tracks.
+        # Subtitles are dropped simply by never mapping them.
+        map_args = []
+        if video_stream_index is not None:
+            map_args += ["-map", f"0:{video_stream_index}"]
+        else:
+            map_args += ["-map", "0:v:0"]  # best-effort fallback
+        for a_idx in audio_indices:
+            map_args += ["-map", f"0:{a_idx}"]
+ 
+        scale_args = []
+        if target_size:
+            scale_args = ["-vf", f"scale={target_size[0]}:{target_size[1]}"]
+ 
         if strategy == "copy":
-            cmd = base_cmd + [
+            cmd = base_cmd + map_args + [
                 "-c:v", "copy",
                 "-c:a", "copy",
                 "-bsf:v", "h264_mp4toannexb",
@@ -239,36 +498,36 @@ class Converter:
                 output_path,
             ]
         elif strategy == "nvenc":
-            cmd = base_cmd + [
+            cmd = base_cmd + map_args + scale_args + [
                 "-c:v", "h264_nvenc",
-                "-preset", "p6",           # Higher quality preset (slower/better than p4)
+                "-preset", "p6",           # Higher quality preset
                 "-tune", "hq",             # High-quality tuning profile
-                "-b:v", "6M",              # Explicit high video bitrate
-                "-maxrate", "8M",          # Prevent bitrate spikes for stream stability
-                "-bufsize", "16M",         # VBR buffer
-                "-g", "60",                # Force keyframe every 2 seconds (crucial for RTMP)
+                "-b:v", "2.8M",            # Optimal ~2.8 Mbps target video bitrate
+                "-maxrate", "3.2M",        # Prevent bitrate spikes for smooth RTMP/HLS
+                "-bufsize", "6.4M",        # VBR buffer (~2x maxrate)
+                "-g", "60",                # Keyframe every 2 seconds (crucial for streaming)
                 "-c:a", "aac",
-                "-b:a", "320k",            # Higher audio bitrate
-                "-ac", "2",                # Force stereo audio
+                "-b:a", "256k",            # High quality stereo audio
+                "-ac", "2",                # Force stereo
                 "-f", "mpegts",
                 output_path,
             ]
         else:
             # CPU Fallback (libx264)
-            cmd = base_cmd + [
+            cmd = base_cmd + map_args + scale_args + [
                 "-c:v", "libx264",
                 "-preset", "fast",
-                "-crf", "21",              # Constant Rate Factor for consistent high quality
-                "-maxrate", "8M",
-                "-bufsize", "16M",
+                "-b:v", "2.8M",            # Optimal ~2.8 Mbps target video bitrate
+                "-maxrate", "3.2M",
+                "-bufsize", "6.4M",
                 "-g", "60",
                 "-c:a", "aac",
-                "-b:a", "320k",
+                "-b:a", "256k",
                 "-ac", "2",
                 "-f", "mpegts",
                 output_path,
             ]
-
+ 
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -276,9 +535,9 @@ class Converter:
                 stderr=asyncio.subprocess.PIPE,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
-
+ 
             self._active_processes[filename] = process
-
+ 
             # Parse progress from stderr using chunks to fix the \r block issue
             stderr_data = []
             buffer = ""
@@ -286,13 +545,13 @@ class Converter:
                 chunk = await process.stderr.read(4096)
                 if not chunk:
                     break
-                
+ 
                 buffer += chunk.decode("utf-8", errors="replace")
-                
+ 
                 if '\r' in buffer or '\n' in buffer:
                     lines = buffer.replace('\r', '\n').split('\n')
                     buffer = lines.pop()  # Keep the last incomplete part
-                    
+ 
                     for line in lines:
                         if line.strip():
                             stderr_data.append(line)
@@ -301,24 +560,24 @@ class Converter:
                         if match and duration > 0:
                             current_time = int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
                             info.progress = min(current_time / duration, 0.99)
-
+ 
             await process.wait()
-
+ 
             if process.returncode == 0 and Path(output_path).exists():
                 return True
             else:
                 stderr_text = "".join(stderr_data)
                 info.error = stderr_text[-300:]
                 return False
-
+ 
         except Exception as e:
             info.error = str(e)
             return False
-
+ 
     def get_status(self) -> List[dict]:
         """Get conversion status for all files."""
         return [self._file_to_dict(info) for info in self.files.values()]
-
+ 
     def _file_to_dict(self, info: FileInfo) -> dict:
         """Convert FileInfo to a JSON-serializable dict."""
         return {
@@ -332,8 +591,10 @@ class Converter:
             "ts_filename": info.ts_filename,
             "metadata": info.metadata,
             "has_thumbnail": info.thumbnail is not None,
+            "audio_note": info.audio_note,
+            "scaled_note": info.scaled_note,
         }
-
-
+ 
+ 
 # Singleton converter instance
 converter = Converter()

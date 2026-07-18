@@ -19,3 +19,5 @@ streams/*
 
 # Config (optional, depends if you want to commit default config or not)
 # config.yml
+
+.codegraph/
