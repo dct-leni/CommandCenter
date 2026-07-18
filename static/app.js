@@ -1342,7 +1342,6 @@ function openCreateLiveStreamModal() {
     document.getElementById('livestream-name').value = '';
     document.getElementById('livestream-url').value = '';
     document.getElementById('livestream-port').value = '1913';
-    document.getElementById('livestream-codec').value = 'h264_nvenc';
     document.getElementById('livestream-autostart').checked = false;
     document.getElementById('livestream-save-btn').textContent = 'Create';
     document.getElementById('livestream-modal').style.display = 'flex';
@@ -1356,7 +1355,6 @@ function openEditLiveStreamModal(streamId) {
     document.getElementById('livestream-name').value = item.name || '';
     document.getElementById('livestream-url').value = item.url || '';
     document.getElementById('livestream-port').value = item.port || 1913;
-    document.getElementById('livestream-codec').value = item.codec || 'h264_nvenc';
     document.getElementById('livestream-autostart').checked = !!item.auto_start;
     document.getElementById('livestream-save-btn').textContent = 'Save';
     document.getElementById('livestream-modal').style.display = 'flex';
@@ -1371,7 +1369,7 @@ async function submitLiveStream() {
     const name = document.getElementById('livestream-name').value.trim();
     const url = document.getElementById('livestream-url').value.trim();
     const port = parseInt(document.getElementById('livestream-port').value, 10);
-    const codec = document.getElementById('livestream-codec').value;
+    const codec = 'h264_nvenc';  // Default requested hardware codec (backend will auto-resolve to best available GPU -> QSV -> CPU)
     const auto_start = document.getElementById('livestream-autostart').checked;
 
     if (!name || !url || isNaN(port)) {

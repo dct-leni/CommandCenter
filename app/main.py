@@ -759,6 +759,7 @@ def main():
     print()
     print(f"  FFmpeg:   {'✓ Ready' if binaries['ffmpeg'] else '✗ Missing — run setup_binaries.bat'}")
     print(f"  MediaMTX: {'✓ Ready' if binaries['mediamtx'] else '✗ Missing — run setup_binaries.bat'}")
+    print(f"  Encoder:  {binaries['best_encoder']} (Auto-detected)")
     print(f"  Web UI:   http://localhost:{cfg.server.port}")
     print()
 

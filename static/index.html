@@ -263,25 +263,12 @@
                     <input type="text" id="livestream-url" placeholder="e.g. http://127.0.0.1:1971/hdmi or rtmp://..."
                         style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
                 </div>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
-                    <div>
-                        <label
-                            style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Output
-                            HTTP Port</label>
-                        <input type="number" id="livestream-port" placeholder="1913" value="1913"
-                            style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
-                    </div>
-                    <div>
-                        <label
-                            style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Video
-                            Codec</label>
-                        <select id="livestream-codec"
-                            style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--bg-input); border: 1px solid var(--border); color: var(--text-primary); font-size: 13px;">
-                            <option value="h264_nvenc">h264_nvenc (NVIDIA GPU)</option>
-                            <option value="libx264">libx264 (CPU)</option>
-                            <option value="copy">copy (Direct Passthrough)</option>
-                        </select>
-                    </div>
+                <div>
+                    <label
+                        style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Output
+                        HTTP Port</label>
+                    <input type="number" id="livestream-port" placeholder="1913" value="1913"
+                        style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
                 </div>
                 <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
                     <input type="checkbox" id="livestream-autostart"

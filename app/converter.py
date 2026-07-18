@@ -398,21 +398,24 @@ class Converter:
                     audio_indices=audio_indices,
                     target_size=None,
                 )
- 
-            # 2) Hardware re-encode (NVENC), scaling if required.
+
+            # 2) Hardware re-encode, scaling if required.
             if not success:
-                logger.info(f"Codec copy unavailable/failed for {filename}, re-encoding with NVENC...")
-                info.progress = 0.0
-                success = await self._ffmpeg_convert(
-                    input_path, output_path, filename, strategy="nvenc",
-                    video_stream_index=video_stream_index,
-                    audio_indices=audio_indices,
-                    target_size=target_size,
-                )
- 
+                from app.ffmpeg_setup import get_best_encoder
+                best_encoder = get_best_encoder()
+                if best_encoder in ("h264_nvenc", "h264_qsv"):
+                    logger.info(f"Codec copy unavailable/failed for {filename}, re-encoding with hardware ({best_encoder})...")
+                    info.progress = 0.0
+                    success = await self._ffmpeg_convert(
+                        input_path, output_path, filename, strategy="hardware",
+                        video_stream_index=video_stream_index,
+                        audio_indices=audio_indices,
+                        target_size=target_size,
+                    )
+
             # 3) Software re-encode (CPU) fallback.
             if not success:
-                logger.info(f"NVENC failed for {filename}, re-encoding with CPU (libx264)...")
+                logger.info(f"Hardware encoding failed or unavailable for {filename}, re-encoding with CPU (libx264)...")
                 info.progress = 0.0
                 success = await self._ffmpeg_convert(
                     input_path, output_path, filename, strategy="cpu",
@@ -497,11 +500,27 @@ class Converter:
                 "-f", "mpegts",
                 output_path,
             ]
-        elif strategy == "nvenc":
-            cmd = base_cmd + map_args + scale_args + [
-                "-c:v", "h264_nvenc",
-                "-preset", "p6",           # Higher quality preset
-                "-tune", "hq",             # High-quality tuning profile
+        elif strategy == "hardware":
+            from app.ffmpeg_setup import get_best_encoder
+            best_encoder = get_best_encoder()
+            if best_encoder == "h264_nvenc":
+                hw_args = [
+                    "-c:v", "h264_nvenc",
+                    "-preset", "p6",
+                    "-tune", "hq",
+                ]
+            elif best_encoder == "h264_qsv":
+                hw_args = [
+                    "-c:v", "h264_qsv",
+                    "-preset", "veryfast",
+                ]
+            else:
+                hw_args = [
+                    "-c:v", "libx264",
+                    "-preset", "fast",
+                ]
+
+            cmd = base_cmd + map_args + scale_args + hw_args + [
                 "-b:v", "2.8M",            # Optimal ~2.8 Mbps target video bitrate
                 "-maxrate", "3.2M",        # Prevent bitrate spikes for smooth RTMP/HLS
                 "-bufsize", "6.4M",        # VBR buffer (~2x maxrate)

@@ -52,12 +52,15 @@ class LiveRelayStatus:
         return 0.0
 
     def to_dict(self) -> dict:
+        from app.ffmpeg_setup import get_best_encoder
+        best_encoder = get_best_encoder()
+        actual_codec = best_encoder if self.codec in ("h264_nvenc", "h264_qsv") else self.codec
         return {
             "id": self.id,
             "name": self.name,
             "url": self.url,
             "port": self.port,
-            "codec": self.codec,
+            "codec": actual_codec,
             "status": self.status,
             "error": self.error,
             "fps": round(self.fps, 1),
@@ -93,12 +96,16 @@ class LiveStreamManager:
                 thumb_path = THUMBNAILS_DIR / f"live_{sid}.jpg"
                 has_thumb = thumb_path.exists()
                 mtime = int(thumb_path.stat().st_mtime) if has_thumb else 0
+                from app.ffmpeg_setup import get_best_encoder
+                best_encoder = get_best_encoder()
+                req_codec = item.get("codec", "h264_nvenc")
+                actual_codec = best_encoder if req_codec in ("h264_nvenc", "h264_qsv") else req_codec
                 results.append({
                     "id": sid,
                     "name": item.get("name", "Unnamed Stream"),
                     "url": item.get("url", ""),
                     "port": item.get("port", 1913),
-                    "codec": item.get("codec", "h264_nvenc"),
+                    "codec": actual_codec,
                     "status": "stopped",
                     "error": None,
                     "fps": 0.0,
@@ -226,13 +233,36 @@ class LiveStreamManager:
         while relay.status in ("running", "listening"):
             try:
                 codec_to_use = relay.codec
-                if codec_to_use == "h264_nvenc" and not is_nvenc_available():
-                    if not warned_nvenc:
-                        logger.warning(f"NVENC not available for {relay.name}, falling back to libx264")
-                        warned_nvenc = True
-                    codec_to_use = "libx264"
+                from app.ffmpeg_setup import get_best_encoder
+                best_encoder = get_best_encoder()
+
+                # If the user selected hardware transcoding, resolve it to the best available encoder (NVENC -> QSV -> libx264)
+                if codec_to_use in ("h264_nvenc", "h264_qsv"):
+                    resolved_codec = best_encoder
+                else:
+                    resolved_codec = codec_to_use
+
+                if resolved_codec != codec_to_use and not warned_nvenc:
+                    logger.warning(f"Requested codec '{codec_to_use}' not available on this machine. Falling back to '{resolved_codec}' for {relay.name}")
+                    warned_nvenc = True
+
+                codec_to_use = resolved_codec
 
                 cmd = [get_ffmpeg_path()]
+
+                # Network buffering and protocol options
+                is_network_input = any(relay.url.startswith(proto) for proto in ("http://", "https://", "rtsp://", "rtmp://", "udp://"))
+                if is_network_input:
+                    cmd.extend([
+                        "-probesize", "10M",
+                        "-analyzeduration", "10M"
+                    ])
+
+                # RTSP/UDP specific buffer size option and RTSP UDP transport configuration
+                if relay.url.startswith("rtsp://") or relay.url.startswith("udp://"):
+                    cmd.extend(["-buffer_size", "10M"])
+                if relay.url.startswith("rtsp://"):
+                    cmd.extend(["-rtsp_transport", "udp"])
 
                 # Reconnect flags for HTTP input streams
                 if relay.url.startswith("http://") or relay.url.startswith("https://"):
@@ -241,7 +271,7 @@ class LiveStreamManager:
                         "-reconnect_streamed", "1",
                         "-reconnect_delay_max", "5",
                     ])
-                elif not (relay.url.startswith("rtsp://") or relay.url.startswith("rtmp://") or relay.url.startswith("udp://")):
+                elif not is_network_input:
                     # Local file input
                     cmd.append("-re")
 
@@ -249,16 +279,20 @@ class LiveStreamManager:
 
                 if codec_to_use == "h264_nvenc":
                     cmd.extend(["-c:v", "h264_nvenc", "-preset", "p2", "-tune", "ll"])
+                elif codec_to_use == "h264_qsv":
+                    cmd.extend(["-c:v", "h264_qsv", "-preset", "veryfast"])
                 elif codec_to_use == "libx264":
                     cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency"])
                 else:
                     cmd.extend(["-c:v", "copy"])
 
+                # Output parameters - we set send_buffer_size=10MB on the HTTP socket listener
+                # to buffer network traffic for smooth player playback
                 cmd.extend([
                     "-c:a", "copy",
                     "-f", "mpegts",
                     "-listen", "1",
-                    f"http://0.0.0.0:{relay.port}/"
+                    f"http://0.0.0.0:{relay.port}/?send_buffer_size=10485760"
                 ])
 
                 relay.status = "listening"
