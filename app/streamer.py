@@ -111,6 +111,7 @@ class Streamer:
         self._port_range_end: int = 1944
         self._current_folder_name: str = ""
         self._errors: List[str] = []
+        self.external_ip: str = "127.0.0.1"
 
     @property
     def port_range_start(self) -> int:
@@ -547,6 +548,9 @@ class Streamer:
         # Start scheduler loop
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
 
+        # Resolve external IP in background
+        asyncio.create_task(self._resolve_external_ip())
+
         return {"status": "started"}
 
     async def stop_streaming(self, is_shutdown: bool = False) -> dict:
@@ -592,6 +596,7 @@ class Streamer:
             "active_streams": streams,
             "port_range": f"{self.port_range_start}-{self.port_range_end}",
             "errors": self._errors[-10:],
+            "external_ip": self.external_ip,
         }
 
     # ---- Internal methods ----
@@ -772,11 +777,11 @@ class Streamer:
         if protocol == "hls":
             public_port = port
             internal_rtmp_port = port + 6000
-            stream_url = f"http://127.0.0.1:{public_port}/stream/index.m3u8"
+            stream_url = f"http://{self.external_ip}:{public_port}/stream/index.m3u8"
         else:
             public_port = port
             internal_rtmp_port = port
-            stream_url = f"rtmp://127.0.0.1:{public_port}/stream"
+            stream_url = f"rtmp://{self.external_ip}:{public_port}/stream"
 
         ingest_url = f"rtmp://127.0.0.1:{internal_rtmp_port}/stream"
 
@@ -1067,7 +1072,44 @@ paths:
             "file_count": len(folder.files),
             "files": folder.files,
             "is_active": folder.start_date <= date.today() <= folder.end_date,
+            "external_ip": self.external_ip,
         }
+
+    async def _resolve_external_ip(self):
+        """Asynchronously resolve external IP to avoid blocking."""
+        loop = asyncio.get_running_loop()
+        try:
+            ip = await loop.run_in_executor(None, self._fetch_ip_blocking)
+            if ip and ip != "127.0.0.1":
+                self.external_ip = ip
+                logger.info(f"Resolved external IP address: {self.external_ip}")
+                # Update any existing active streams
+                for stream in self.active_streams.values():
+                    if "127.0.0.1" in stream.stream_url:
+                        stream.stream_url = stream.stream_url.replace("127.0.0.1", self.external_ip)
+        except Exception as e:
+            logger.warning(f"Error resolving external IP: {e}")
+
+    def _fetch_ip_blocking(self) -> str:
+        import urllib.request
+        urls = [
+            "https://api4.ipify.org",
+            "http://ipv4.icanhazip.com",
+            "http://v4.ident.me"
+        ]
+        for url in urls:
+            try:
+                req = urllib.request.Request(
+                    url, 
+                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+                )
+                with urllib.request.urlopen(req, timeout=3) as response:
+                    ip = response.read().decode('utf-8').strip()
+                    if ip and ":" not in ip and "." in ip:
+                        return ip
+            except Exception as e:
+                logger.warning(f"Failed to fetch external IP from {url}: {e}")
+        return "127.0.0.1"
 
 
 # Singleton streamer instance

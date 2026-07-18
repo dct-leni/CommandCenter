@@ -33,6 +33,9 @@ logger = logging.getLogger("commandcenter")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Resolve external IP on app start
+    asyncio.create_task(streamer._resolve_external_ip())
+
     # Auto-resume check on boot
     cfg = load_config()
     if cfg.streamer.auto_resume and cfg.streamer.content_folder:

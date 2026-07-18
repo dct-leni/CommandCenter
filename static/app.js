@@ -500,13 +500,23 @@ function renderFolderFiles(folder) {
 
         // Stream URL link always visible (RTMP/HLS)
         const protocol = (state.config && state.config.streamer && state.config.streamer.protocol) ? state.config.streamer.protocol.toUpperCase() : 'RTMP';
+        const extIp = (state.streamStatus && state.streamStatus.external_ip && state.streamStatus.external_ip !== '127.0.0.1')
+            ? state.streamStatus.external_ip
+            : ((state.folderDetail && state.folderDetail.external_ip && state.folderDetail.external_ip !== '127.0.0.1')
+                ? state.folderDetail.external_ip
+                : (window.location.hostname && window.location.hostname !== '127.0.0.1' && window.location.hostname !== 'localhost'
+                    ? window.location.hostname
+                    : '127.0.0.1'));
         let displayUrl = '';
         if (liveStream && (liveStream.status === 'live' || liveStream.status === 'starting') && (liveStream.stream_url || liveStream.rtmp_url)) {
             displayUrl = liveStream.stream_url || liveStream.rtmp_url;
+            if (displayUrl.includes('127.0.0.1') || displayUrl.includes('localhost')) {
+                displayUrl = displayUrl.replace(/127\.0\.0\.1|localhost/g, extIp);
+            }
         } else if (protocol === 'HLS') {
-            displayUrl = `http://127.0.0.1:${port}/stream/index.m3u8`;
+            displayUrl = `http://${extIp}:${port}/stream/index.m3u8`;
         } else {
-            displayUrl = `rtmp://127.0.0.1:${port}/stream`;
+            displayUrl = `rtmp://${extIp}:${port}/stream`;
         }
         const urlHtml = `<div class="slot-url" onclick="copyToClipboard('${escapeAttr(displayUrl)}'); event.stopPropagation();" title="Click to copy playback link (${protocol})">
             <i class="fa-solid fa-link"></i> ${escapeHtml(displayUrl)} <span style="opacity:0.75; font-size:10px;">[${protocol}]</span>
