@@ -219,7 +219,6 @@ class LiveStreamManager:
                             break
                         
                         if relay.clients:
-                            drain_tasks = []
                             for ext_writer in list(relay.clients):
                                 if ext_writer.transport.is_closing():
                                     relay.clients.discard(ext_writer)
@@ -234,15 +233,24 @@ class LiveStreamManager:
                                     continue
                                 try:
                                     ext_writer.write(chunk)
-                                    drain_tasks.append(ext_writer.drain())
+                                    
+                                    # Drain client socket in an independent background task
+                                    async def drain_client(w=ext_writer):
+                                        try:
+                                            await w.drain()
+                                        except Exception:
+                                            relay.clients.discard(w)
+                                            try:
+                                                w.close()
+                                            except Exception:
+                                                pass
+                                    asyncio.create_task(drain_client())
                                 except Exception:
                                     relay.clients.discard(ext_writer)
                                     try:
                                         ext_writer.close()
                                     except Exception:
                                         pass
-                            if drain_tasks:
-                                await asyncio.gather(*drain_tasks, return_exceptions=True)
                 except Exception as e:
                     logger.error(f"Loopback error for {relay.name}: {e}")
                 finally:
@@ -426,17 +434,18 @@ class LiveStreamManager:
                 cmd.extend(["-i", relay.url])
 
                 if codec_to_use == "h264_nvenc":
-                    cmd.extend(["-c:v", "h264_nvenc", "-preset", "p2", "-tune", "ll"])
+                    cmd.extend(["-c:v", "h264_nvenc", "-preset", "p2", "-tune", "ll", "-g", "50", "-repeat-headers", "1"])
                 elif codec_to_use == "h264_qsv":
-                    cmd.extend(["-c:v", "h264_qsv", "-preset", "veryfast"])
+                    cmd.extend(["-c:v", "h264_qsv", "-preset", "veryfast", "-g", "50", "-repeat_headers", "1"])
                 elif codec_to_use == "libx264":
-                    cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency"])
+                    cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-g", "50", "-x264-params", "repeat-headers=1"])
                 else:
                     cmd.extend(["-c:v", "copy"])
 
                 # Output parameters - stream to Python's local loopback TCP port
                 cmd.extend([
                     "-c:a", "copy",
+                    "-bsf:v", "dump_extra",  # Repeat H.264/H.265 SPS/PPS headers before keyframes
                     "-f", "mpegts",
                     f"tcp://127.0.0.1:{relay.loopback_port}"
                 ])
