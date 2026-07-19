@@ -123,7 +123,7 @@ class Streamer:
         cfg = load_config()
         return cfg.streamer.port_range_end if cfg.streamer.port_range_end else self._port_range_end
 
-    def cleanup_playlists(self) -> None:
+    def cleanup_playlists(self, skip_rescan: bool = False) -> None:
         """Remove missing folders and out-of-range ports from streamer playlists in config.yml, returning unused files to converter."""
         cfg = load_config()
         playlists = dict(cfg.streamer.playlists)
@@ -177,8 +177,6 @@ class Streamer:
                             import shutil
                             shutil.move(str(source_file), str(target_file))
                             logger.info(f"Returned {fname} from out-of-range slot in {folder_name} to converter input folder")
-                            if converter.source_folder:
-                                converter.scan_folder(converter.source_folder)
                         except Exception as e:
                             logger.error(f"Failed to return {fname} to converter folder: {e}")
 
@@ -188,9 +186,38 @@ class Streamer:
             else:
                 playlists[folder_name] = cleaned_slots
 
+        # Check for lost/unassigned .ts files physically in all date-range folders
+        if content_dir.is_dir() and converter.source_folder:
+            for folder_name in valid_folders:
+                folder_path = content_dir / folder_name
+                # Get the set of filenames that are currently assigned to any slot in this folder
+                assigned_files = set()
+                folder_slots = playlists.get(folder_name, [])
+                if isinstance(folder_slots, list):
+                    for s in folder_slots:
+                        if isinstance(s, dict):
+                            for fname in s.get("files", []):
+                                assigned_files.add(fname)
+                
+                # Check files physically in the folder on disk
+                for f in folder_path.iterdir():
+                    if f.is_file() and f.suffix.lower() == ".ts":
+                        if f.name not in assigned_files:
+                            # This file is lost/unassigned! Move it back to converter.source_folder
+                            target_file = Path(converter.source_folder) / f.name
+                            try:
+                                import shutil
+                                shutil.move(str(f), str(target_file))
+                                logger.info(f"Moved lost video {f.name} from {folder_name} back to converter input folder")
+                                changed = True
+                            except Exception as e:
+                                logger.error(f"Failed to move lost video {f.name} from {folder_name} back to converter: {e}")
+
         if changed:
             update_config({"streamer": {"playlists": playlists}})
-            if self.content_folder:
+            if converter.source_folder:
+                converter.scan_folder(converter.source_folder)
+            if self.content_folder and not skip_rescan:
                 self.scan_content_folder(self.content_folder)
 
     def scan_content_folder(self, folder_path: str) -> List[dict]:
@@ -233,7 +260,7 @@ class Streamer:
             self.folders.append(folder_info)
             results.append(self._folder_to_dict(folder_info))
 
-        self.cleanup_playlists()
+        self.cleanup_playlists(skip_rescan=True)
         return results
 
     def get_folder_details(self, folder_name: str) -> Optional[dict]:

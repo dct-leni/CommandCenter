@@ -145,12 +145,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Wire up event handlers
     document.getElementById('converter-browse-btn').addEventListener('click', () => openFolderBrowser('converter'));
     document.getElementById('streamer-browse-btn').addEventListener('click', () => openFolderBrowser('streamer'));
-    document.getElementById('convert-all-btn').addEventListener('click', convertAll);
-    document.getElementById('stream-start-btn').addEventListener('click', startStreaming);
-    document.getElementById('stream-stop-btn').addEventListener('click', stopStreaming);
+    document.getElementById('convert-all-btn').addEventListener('click', () => {
+        const converting = state.converterFiles.filter(f => f.status === 'converting').length;
+        const queued = state.converterFiles.filter(f => f.status === 'queued').length;
+        if (converting > 0 || queued > 0) {
+            stopConversion();
+        } else {
+            convertAll();
+        }
+    });
+    document.getElementById('stream-start-btn').addEventListener('click', () => {
+        if (state.streamStatus && state.streamStatus.is_running) {
+            stopStreaming();
+        } else {
+            startStreaming();
+        }
+    });
     document.getElementById('modal-close-btn').addEventListener('click', closeFolderBrowser);
     document.getElementById('modal-select-btn').addEventListener('click', selectFolder);
-    document.getElementById('epg-generate-btn').addEventListener('click', generateEpg);
     document.getElementById('file-picker-close').addEventListener('click', () => {
         document.getElementById('file-picker-modal').style.display = 'none';
     });
@@ -245,7 +257,7 @@ function startPolling() {
     state.pollingInterval = setInterval(async () => {
         await pollConverterStatus();
         await pollStreamStatus();
-        
+
         pollCount++;
         if (pollCount % 5 === 0) {
             await checkSystemStatus();
@@ -322,6 +334,9 @@ function renderConverterFiles() {
                     <div class="progress-bar"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
                 `;
                 break;
+            case 'queued':
+                statusHtml = '<span class="status-badge queued">Queued</span>';
+                break;
             case 'error':
                 statusHtml = `<span class="status-badge error" title="${escapeHtml(file.error)}">Error</span>`;
                 break;
@@ -371,25 +386,42 @@ function updateConverterCounter() {
     const total = state.converterFiles.length;
     const done = state.converterFiles.filter(f => f.status === 'done').length;
     const converting = state.converterFiles.filter(f => f.status === 'converting').length;
+    const queued = state.converterFiles.filter(f => f.status === 'queued').length;
     const counter = document.getElementById('converter-counter');
 
     if (total === 0) {
         counter.textContent = 'No files';
-    } else if (converting > 0) {
-        counter.textContent = `${done}/${total} done · ${converting} converting`;
+    } else if (converting > 0 || queued > 0) {
+        let msg = `${done}/${total} done`;
+        if (converting > 0) msg += ` · ${converting} converting`;
+        if (queued > 0) msg += ` · ${queued} queued`;
+        counter.textContent = msg;
     } else {
         counter.textContent = `${done}/${total} done`;
     }
 
-    // Disable convert all if none pending
+    // Toggle Convert All / Stop Convert button states dynamically
+    const convertAllBtn = document.getElementById('convert-all-btn');
     const pending = state.converterFiles.filter(f => f.status === 'pending').length;
-    document.getElementById('convert-all-btn').disabled = pending === 0;
+
+    if (converting > 0 || queued > 0) {
+        convertAllBtn.textContent = 'Stop Convert';
+        convertAllBtn.className = 'btn btn-danger';
+        convertAllBtn.disabled = false;
+    } else {
+        convertAllBtn.textContent = 'Convert All';
+        convertAllBtn.className = 'btn btn-primary';
+        convertAllBtn.disabled = pending === 0;
+    }
 }
 
 async function convertFile(filename) {
     try {
         await api('POST', '/converter/convert', { filename });
         showToast(`Converting: ${filename}`, 'success');
+        if (state.config?.converter?.source_folder) {
+            await scanConverterFolder(state.config.converter.source_folder);
+        }
     } catch (e) {
         showToast(`Failed to start conversion: ${e.message}`, 'error');
     }
@@ -399,8 +431,24 @@ async function convertAll() {
     try {
         const data = await api('POST', '/converter/convert', {});
         showToast(`Started converting ${data.count} files`, 'success');
+        if (state.config?.converter?.source_folder) {
+            await scanConverterFolder(state.config.converter.source_folder);
+        }
     } catch (e) {
         showToast(`Failed to start conversion: ${e.message}`, 'error');
+    }
+}
+
+async function stopConversion() {
+    try {
+        showToast('Stopping conversion and clearing queue...', 'info');
+        await api('POST', '/converter/stop');
+        showToast('Conversions stopped successfully', 'success');
+        if (state.config?.converter?.source_folder) {
+            await scanConverterFolder(state.config.converter.source_folder);
+        }
+    } catch (e) {
+        showToast(`Failed to stop conversion: ${e.message}`, 'error');
     }
 }
 
@@ -425,7 +473,7 @@ async function setStreamerFoldersAndRefresh(folders) {
         }
         return folder;
     });
-    
+
     state.streamerFolders = await Promise.all(folderDetailsPromises);
     renderStreamerFolders();
 }
@@ -632,12 +680,7 @@ async function toggleFolder(name) {
                 state.streamerFolders[idx] = { ...state.streamerFolders[idx], ...detail };
             }
 
-            // Enable EPG button for this folder
-            const epgBtn = document.getElementById('epg-generate-btn');
-            if (epgBtn) {
-                epgBtn.disabled = false;
-                epgBtn.dataset.folder = name;
-            }
+
         } catch (e) {
             console.error('Failed to load folder details:', e);
         }
@@ -825,30 +868,7 @@ async function submitModifyFolder() {
     }
 }
 
-// ──────────────────────────────────────────────
-//  EPG Generation
-// ──────────────────────────────────────────────
 
-async function generateEpg() {
-    const btn = document.getElementById('epg-generate-btn');
-    const folderName = btn && btn.dataset.folder;
-    if (!folderName) {
-        showToast('Open a folder first to generate EPG', 'info');
-        return;
-    }
-
-    btn.disabled = true;
-    btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Generating...';
-    try {
-        const data = await api('POST', `/streamer/folder/${encodeURIComponent(folderName)}/epg`);
-        showToast(`EPG saved: ${data.filename}`, 'success');
-    } catch (e) {
-        showToast(`EPG failed: ${e.message}`, 'error');
-    } finally {
-        btn.disabled = false;
-        btn.innerHTML = '<span class="btn-icon"><i class="fa-solid fa-list-check"></i></span> Generate EPG';
-    }
-}
 
 
 
@@ -857,7 +877,6 @@ function updateStreamUI() {
 
     const badge = document.getElementById('stream-status-badge');
     const startBtn = document.getElementById('stream-start-btn');
-    const stopBtn = document.getElementById('stream-stop-btn');
     const errorsEl = document.getElementById('stream-errors');
 
     const isRunning = state.streamStatus.is_running;
@@ -870,13 +889,15 @@ function updateStreamUI() {
         const liveCount = state.streamStatus.active_streams.filter(s => s.status === 'live').length;
         badge.textContent = `Live · ${liveCount} streams`;
         badge.className = 'stream-status-badge live';
-        startBtn.disabled = true;
-        stopBtn.disabled = false;
+        startBtn.innerHTML = '<span class="btn-icon"><i class="fa-solid fa-stop"></i></span> Stop';
+        startBtn.className = 'btn btn-danger';
+        startBtn.disabled = false;
     } else {
         badge.textContent = 'Idle';
         badge.className = 'stream-status-badge';
+        startBtn.innerHTML = '<span class="btn-icon"><i class="fa-solid fa-play"></i></span> Start Streaming';
+        startBtn.className = 'btn btn-accent';
         startBtn.disabled = !state.streamerFolders.length;
-        stopBtn.disabled = true;
     }
 
     // Show errors
@@ -1299,9 +1320,9 @@ function renderLiveStreams() {
         const isRunning = item.status === 'running' || item.status === 'listening';
         let statusBadge = '';
         if (item.status === 'running') {
-            statusBadge = `<span class="livestream-status running"><i class="fa-solid fa-play"></i> Running (:${item.port})</span>`;
+            statusBadge = `<span class="livestream-status running"><i class="fa-solid fa-play"></i> Running</span>`;
         } else if (item.status === 'listening') {
-            statusBadge = `<span class="livestream-status listening"><i class="fa-solid fa-plug"></i> Listening (:${item.port})</span>`;
+            statusBadge = `<span class="livestream-status listening"><i class="fa-solid fa-spinner"></i> Listening</span>`;
         } else if (item.status === 'error') {
             statusBadge = `<span class="livestream-status error" style="max-width: 750px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-flex; align-items: center;" title="${escapeAttr(item.error || 'Error')}"><i class="fa-solid fa-triangle-exclamation"></i> Error: ${escapeAttr(item.error || 'Unknown Error')}</span>`;
         } else {
@@ -1352,7 +1373,6 @@ function openCreateLiveStreamModal() {
     document.getElementById('livestream-name').value = '';
     document.getElementById('livestream-url').value = '';
     document.getElementById('livestream-port').value = '1913';
-    document.getElementById('livestream-autostart').checked = false;
     document.getElementById('livestream-save-btn').textContent = 'Create';
     document.getElementById('livestream-modal').style.display = 'flex';
 }
@@ -1365,7 +1385,6 @@ function openEditLiveStreamModal(streamId) {
     document.getElementById('livestream-name').value = item.name || '';
     document.getElementById('livestream-url').value = item.url || '';
     document.getElementById('livestream-port').value = item.port || 1913;
-    document.getElementById('livestream-autostart').checked = !!item.auto_start;
     document.getElementById('livestream-save-btn').textContent = 'Save';
     document.getElementById('livestream-modal').style.display = 'flex';
 }
@@ -1379,8 +1398,6 @@ async function submitLiveStream() {
     const name = document.getElementById('livestream-name').value.trim();
     const url = document.getElementById('livestream-url').value.trim();
     const port = parseInt(document.getElementById('livestream-port').value, 10);
-    const codec = 'h264_nvenc';  // Default requested hardware codec (backend will auto-resolve to best available GPU -> QSV -> CPU)
-    const auto_start = document.getElementById('livestream-autostart').checked;
 
     if (!name || !url || isNaN(port)) {
         showToast('Please enter valid Name, URL, and Port', 'error');
@@ -1389,10 +1406,10 @@ async function submitLiveStream() {
 
     try {
         if (streamId) {
-            await api('PUT', `/streamer/live_stream/${streamId}`, { name, url, port, codec, auto_start });
+            await api('PUT', `/streamer/live_stream/${streamId}`, { name, url, port });
             showToast('Live stream updated', 'success');
         } else {
-            await api('POST', '/streamer/live_stream', { name, url, port, codec, auto_start });
+            await api('POST', '/streamer/live_stream', { name, url, port });
             showToast('Live stream created', 'success');
         }
         closeLiveStreamModal();

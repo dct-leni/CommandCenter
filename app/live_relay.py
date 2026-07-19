@@ -28,7 +28,6 @@ class LiveRelayStatus:
     name: str
     url: str
     port: int
-    codec: str
     status: str = "stopped"  # stopped, running, listening, error
     error: Optional[str] = None
     fps: float = 0.0
@@ -37,7 +36,7 @@ class LiveRelayStatus:
     restart_task: Optional[asyncio.Task] = field(default=None, repr=False)
     log_task: Optional[asyncio.Task] = field(default=None, repr=False)
     last_logs: List[str] = field(default_factory=list, repr=False)
-    clients: set = field(default_factory=set, repr=False)
+    clients: dict = field(default_factory=dict, repr=False)
     server: Optional[asyncio.Server] = field(default=None, repr=False)
     loopback_server: Optional[asyncio.Server] = field(default=None, repr=False)
     loopback_port: int = 0
@@ -59,7 +58,6 @@ class LiveRelayStatus:
     def to_dict(self) -> dict:
         from app.ffmpeg_setup import get_best_encoder
         best_encoder = get_best_encoder()
-        actual_codec = best_encoder if self.codec in ("h264_nvenc", "h264_qsv") else self.codec
         
         # UI status: show "running" if we have active clients connected, otherwise "listening"
         status_to_show = self.status
@@ -71,7 +69,7 @@ class LiveRelayStatus:
             "name": self.name,
             "url": self.url,
             "port": self.port,
-            "codec": actual_codec,
+            "codec": best_encoder,
             "status": status_to_show,
             "error": self.error,
             "fps": round(self.fps, 1),
@@ -101,8 +99,8 @@ class LiveStreamManager:
             if sid in self.active_relays:
                 relay = self.active_relays[sid]
                 # Only capture thumbnails when viewers are actively watching
-                if relay.status == "running" and relay.clients:
-                    self.trigger_thumbnail_generation(sid, relay.url)
+                if relay.status == "running":
+                    self.trigger_thumbnail_generation(sid, f"http://127.0.0.1:{relay.port}/")
                 results.append(relay.to_dict())
             else:
                 thumb_path = THUMBNAILS_DIR / f"live_{sid}.jpg"
@@ -110,14 +108,12 @@ class LiveStreamManager:
                 mtime = int(thumb_path.stat().st_mtime) if has_thumb else 0
                 from app.ffmpeg_setup import get_best_encoder
                 best_encoder = get_best_encoder()
-                req_codec = item.get("codec", "h264_nvenc")
-                actual_codec = best_encoder if req_codec in ("h264_nvenc", "h264_qsv") else req_codec
                 results.append({
                     "id": sid,
                     "name": item.get("name", "Unnamed Stream"),
                     "url": item.get("url", ""),
                     "port": item.get("port", 1913),
-                    "codec": actual_codec,
+                    "codec": best_encoder,
                     "status": "stopped",
                     "error": None,
                     "fps": 0.0,
@@ -144,10 +140,11 @@ class LiveStreamManager:
 
                 cmd = [
                     get_ffmpeg_path(),
+                    "-skip_frame", "nokey",
                     "-i", stream_url,
                     "-vframes", "1",
                     "-q:v", "6",
-                    "-vf", "scale=120:-1",
+                    "-update", "1",
                     "-y",
                     str(temp_path)
                 ]
@@ -155,17 +152,20 @@ class LiveStreamManager:
                 # Start process and wait with a short timeout
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 )
                 try:
-                    await asyncio.wait_for(proc.wait(), timeout=3.0)
-                    if temp_path.exists():
+                    await asyncio.wait_for(proc.wait(), timeout=15.0)
+                    if proc.returncode != 0:
+                        logger.warning(f"FFmpeg thumbnail generation failed (code {proc.returncode}) for live stream {stream_id}")
+                    elif temp_path.exists():
                         if thumb_path.exists():
                             thumb_path.unlink()
                         temp_path.rename(thumb_path)
                 except asyncio.TimeoutError:
+                    logger.warning(f"FFmpeg thumbnail generation timed out (15s) for live stream {stream_id}")
                     try:
                         proc.terminate()
                     except Exception:
@@ -203,7 +203,6 @@ class LiveStreamManager:
             name=item.get("name", "Live Stream"),
             url=item.get("url", ""),
             port=int(item.get("port", 1913)),
-            codec=item.get("codec", "h264_nvenc"),
             status="listening",
             error=None,
         )
@@ -212,6 +211,7 @@ class LiveStreamManager:
         # Start Loopback Server to receive binary data from FFmpeg
         try:
             async def handle_loopback(reader, writer):
+                relay.status = "running"
                 try:
                     while relay.status in ("running", "listening"):
                         chunk = await reader.read(65536)
@@ -219,38 +219,12 @@ class LiveStreamManager:
                             break
                         
                         if relay.clients:
-                            for ext_writer in list(relay.clients):
-                                if ext_writer.transport.is_closing():
-                                    relay.clients.discard(ext_writer)
-                                    continue
-                                if ext_writer.transport.get_write_buffer_size() > 52428800:
-                                    logger.warning(f"Closing stalled client connection on port {relay.port} (buffer backlog > 50MB)")
-                                    relay.clients.discard(ext_writer)
-                                    try:
-                                        ext_writer.close()
-                                    except Exception:
-                                        pass
-                                    continue
+                            for q in list(relay.clients.keys()):
                                 try:
-                                    ext_writer.write(chunk)
-                                    
-                                    # Drain client socket in an independent background task
-                                    async def drain_client(w=ext_writer):
-                                        try:
-                                            await w.drain()
-                                        except Exception:
-                                            relay.clients.discard(w)
-                                            try:
-                                                w.close()
-                                            except Exception:
-                                                pass
-                                    asyncio.create_task(drain_client())
-                                except Exception:
-                                    relay.clients.discard(ext_writer)
-                                    try:
-                                        ext_writer.close()
-                                    except Exception:
-                                        pass
+                                    q.put_nowait(chunk)
+                                except asyncio.QueueFull:
+                                    # Client is too slow, drop chunk to avoid memory build-up
+                                    pass
                 except Exception as e:
                     logger.error(f"Loopback error for {relay.name}: {e}")
                 finally:
@@ -296,7 +270,29 @@ class LiveStreamManager:
                     pass
                 return
 
-            relay.clients.add(writer)
+            # Bounded queue to prevent memory leaks if client blocks
+            queue = asyncio.Queue(maxsize=100)
+            relay.clients[queue] = writer
+
+            async def client_write_loop():
+                try:
+                    while True:
+                        chunk = await queue.get()
+                        writer.write(chunk)
+                        await writer.drain()
+                        queue.task_done()
+                except Exception:
+                    pass
+                finally:
+                    relay.clients.pop(queue, None)
+                    try:
+                        writer.close()
+                        await writer.wait_closed()
+                    except Exception:
+                        pass
+
+            # Start the background writing loop
+            write_task = asyncio.create_task(client_write_loop())
             
             try:
                 # Keep socket alive until client disconnects (read returns EOF)
@@ -304,9 +300,9 @@ class LiveStreamManager:
             except Exception:
                 pass
             finally:
-                relay.clients.discard(writer)
+                write_task.cancel()
                 try:
-                    writer.close()
+                    await write_task
                 except Exception:
                     pass
 
@@ -357,7 +353,7 @@ class LiveStreamManager:
             relay.loopback_server = None
 
         # Disconnect all connected clients
-        for writer in list(relay.clients):
+        for writer in list(relay.clients.values()):
             try:
                 writer.close()
             except Exception:
@@ -380,24 +376,24 @@ class LiveStreamManager:
 
     async def _auto_restart_loop(self, relay: LiveRelayStatus):
         """Loop keeping the FFmpeg listen process running while status is active."""
-        warned_nvenc = False
+        # Probe source codec once before starting the relay loop.
+        # If the source is already H.264 we can stream-copy.
+        # Any other codec (HEVC, MPEG-2, AV1 …) requires a re-encode.
+        from app.ffmpeg_setup import probe_source_codec, get_relay_params, get_best_encoder, get_relay_encoding_params
+        logger.info(f"Probing source codec for '{relay.name}' at {relay.url} …")
+        source_codec = await asyncio.get_event_loop().run_in_executor(
+            None, probe_source_codec, relay.url
+        )
+        if source_codec == "h264":
+            video_params = get_relay_params()   # stream copy — 0 GPU
+            logger.info(f"Source is H.264 — using stream copy for '{relay.name}'")
+        else:
+            encoder = get_best_encoder()
+            video_params = get_relay_encoding_params(encoder)
+            logger.info(f"Source codec '{source_codec}' — re-encoding with {encoder} for '{relay.name}'")
+
         while relay.status in ("running", "listening"):
             try:
-                codec_to_use = relay.codec
-                from app.ffmpeg_setup import get_best_encoder
-                best_encoder = get_best_encoder()
-
-                # Resolve requested codec to best available hardware/software choice
-                if codec_to_use in ("h264_nvenc", "h264_qsv"):
-                    resolved_codec = best_encoder
-                else:
-                    resolved_codec = codec_to_use
-
-                if resolved_codec != codec_to_use and not warned_nvenc:
-                    logger.warning(f"Requested codec '{codec_to_use}' not available on this machine. Falling back to '{resolved_codec}' for {relay.name}")
-                    warned_nvenc = True
-
-                codec_to_use = resolved_codec
 
                 cmd = [get_ffmpeg_path()]
 
@@ -433,14 +429,7 @@ class LiveStreamManager:
 
                 cmd.extend(["-i", relay.url])
 
-                if codec_to_use == "h264_nvenc":
-                    cmd.extend(["-c:v", "h264_nvenc", "-preset", "p2", "-tune", "ll", "-g", "50"])
-                elif codec_to_use == "h264_qsv":
-                    cmd.extend(["-c:v", "h264_qsv", "-preset", "veryfast", "-g", "50"])
-                elif codec_to_use == "libx264":
-                    cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-g", "50"])
-                else:
-                    cmd.extend(["-c:v", "copy"])
+                cmd.extend(video_params)
 
                 # Output parameters - stream to Python's local loopback TCP port
                 cmd.extend([

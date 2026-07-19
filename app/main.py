@@ -124,7 +124,6 @@ class LiveStreamCreateRequest(BaseModel):
     name: str
     url: str
     port: int
-    codec: str = "h264_nvenc"
     auto_start: bool = False
 
 
@@ -132,7 +131,6 @@ class LiveStreamUpdateRequest(BaseModel):
     name: Optional[str] = None
     url: Optional[str] = None
     port: Optional[int] = None
-    codec: Optional[str] = None
     auto_start: Optional[bool] = None
 
 
@@ -275,6 +273,15 @@ async def converter_convert(body: ConvertRequest):
     else:
         count = await converter.convert_all()
         return {"status": "started", "count": count}
+
+
+@app.post("/api/converter/stop")
+async def converter_stop():
+    """Stop any active conversions and clear the queue."""
+    success = await converter.stop_conversion()
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to stop conversion")
+    return {"status": "stopped"}
 
 
 @app.get("/api/converter/thumbnail/{filename}")
@@ -425,66 +432,29 @@ async def streamer_delete_folder(folder_name: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.put("/api/streamer/folder/{folder_name}/slot")
-async def streamer_update_slot(folder_name: str, body: SlotUpdate):
-    """Update the file list for a specific port slot in a folder."""
-    cfg = load_config()
-    for item in cfg.streamer.live_streams:
-        if item.get("port") == body.port:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Port {body.port} is currently assigned to live stream '{item.get('name', item.get('id'))}'. Livestream and folder stream ports cannot cross."
-            )
-
+def generate_epg_for_folder(folder_name: str) -> Optional[str]:
+    """Helper to generate EPG for a folder and return its output path."""
     folder = streamer._find_folder(folder_name)
     if not folder:
-        raise HTTPException(status_code=404, detail="Folder not found")
-    ok = streamer.update_slot(folder_name, body.port, body.files)
-    
-    # Restart the active stream dynamically to apply new order
-    if streamer.is_running and body.port in streamer.active_streams:
-        slots = streamer._load_slots_for_folder(folder)
-        updated_slot = next((s for s in slots if s.port == body.port), None)
-        if updated_slot:
-            logger.info(f"Restarting stream on port {body.port} due to slot update")
-            await streamer._stop_single_stream(body.port)
-            await streamer._start_slot_stream(updated_slot, folder)
+        logger.warning(f"Could not generate EPG: folder '{folder_name}' not found")
+        return None
 
-    return {"status": "ok", "folder": folder_name, "port": body.port, "files": body.files}
-
-
-@app.delete("/api/streamer/folder/{folder_name}/slot/file")
-async def streamer_remove_slot_file(folder_name: str, body: SlotRemoveFile):
-    """Remove a single file from a port slot."""
-    folder = streamer._find_folder(folder_name)
-    if not folder:
-        raise HTTPException(status_code=404, detail="Folder not found")
-    streamer.remove_file_from_slot(folder_name, body.port, body.filename)
-    
-    # Restart active stream dynamically or remove from active if no files left
-    if streamer.is_running and body.port in streamer.active_streams:
-        slots = streamer._load_slots_for_folder(folder)
-        updated_slot = next((s for s in slots if s.port == body.port), None)
-        if updated_slot:
-            logger.info(f"Restarting stream on port {body.port} due to file removal")
-            await streamer._stop_single_stream(body.port)
-            if updated_slot.files:
-                await streamer._start_slot_stream(updated_slot, folder)
-            else:
-                if body.port in streamer.active_streams:
-                    del streamer.active_streams[body.port]
-
-    return {"status": "ok"}
-
-
-@app.post("/api/streamer/folder/{folder_name}/epg")
-async def streamer_generate_epg(folder_name: str):
-    """Generate an EPG XML file for a folder based on its slot configuration."""
-    folder = streamer._find_folder(folder_name)
-    if not folder:
-        raise HTTPException(status_code=404, detail="Folder not found")
+    if not folder.is_active:
+        logger.info(f"Skipping EPG generation for non-active folder '{folder_name}'")
+        return None
 
     cfg = load_config()
+    
+    # Skip EPG generation if there are no videos in the folder
+    if not folder.files:
+        logger.info(f"Skipping EPG generation for folder '{folder_name}': no video files present")
+        try:
+            from pathlib import Path as _Path
+            epg_path = _Path(folder.path) / f"{cfg.streamer.channel_prefix.lower()}.xml"
+            epg_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return None
     lang = cfg.converter.languages[0] if cfg.converter.languages else "en"
     channel_prefix = cfg.streamer.channel_prefix
     timezone_str = cfg.streamer.epg_timezone
@@ -533,10 +503,78 @@ async def streamer_generate_epg(folder_name: str):
             timezone_str=timezone_str,
             port_range_start=cfg.streamer.port_range_start,
         )
-        return {"status": "ok", "path": output_path, "filename": _Path(output_path).name}
+        return output_path
     except Exception as e:
-        logger.error(f"EPG generation failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Failed to generate EPG for folder {folder_name}: {e}")
+        return None
+
+
+@app.put("/api/streamer/folder/{folder_name}/slot")
+async def streamer_update_slot(folder_name: str, body: SlotUpdate):
+    """Update the file list for a specific port slot in a folder."""
+    cfg = load_config()
+    for item in cfg.streamer.live_streams:
+        if item.get("port") == body.port:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Port {body.port} is currently assigned to live stream '{item.get('name', item.get('id'))}'. Livestream and folder stream ports cannot cross."
+            )
+
+    folder = streamer._find_folder(folder_name)
+    if not folder:
+        raise HTTPException(status_code=404, detail="Folder not found")
+    ok = streamer.update_slot(folder_name, body.port, body.files)
+    
+    # Auto-generate EPG on slot configuration changes
+    generate_epg_for_folder(folder_name)
+
+    # Restart the active stream dynamically to apply new order
+    if streamer.is_running and body.port in streamer.active_streams:
+        slots = streamer._load_slots_for_folder(folder)
+        updated_slot = next((s for s in slots if s.port == body.port), None)
+        if updated_slot:
+            logger.info(f"Restarting stream on port {body.port} due to slot update")
+            await streamer._stop_single_stream(body.port)
+            await streamer._start_slot_stream(updated_slot, folder)
+
+    return {"status": "ok", "folder": folder_name, "port": body.port, "files": body.files}
+
+
+@app.delete("/api/streamer/folder/{folder_name}/slot/file")
+async def streamer_remove_slot_file(folder_name: str, body: SlotRemoveFile):
+    """Remove a single file from a port slot."""
+    folder = streamer._find_folder(folder_name)
+    if not folder:
+        raise HTTPException(status_code=404, detail="Folder not found")
+    streamer.remove_file_from_slot(folder_name, body.port, body.filename)
+    
+    # Auto-generate EPG on file removal
+    generate_epg_for_folder(folder_name)
+
+    # Restart active stream dynamically or remove from active if no files left
+    if streamer.is_running and body.port in streamer.active_streams:
+        slots = streamer._load_slots_for_folder(folder)
+        updated_slot = next((s for s in slots if s.port == body.port), None)
+        if updated_slot:
+            logger.info(f"Restarting stream on port {body.port} due to file removal")
+            await streamer._stop_single_stream(body.port)
+            if updated_slot.files:
+                await streamer._start_slot_stream(updated_slot, folder)
+            else:
+                if body.port in streamer.active_streams:
+                    del streamer.active_streams[body.port]
+
+    return {"status": "ok"}
+
+
+@app.post("/api/streamer/folder/{folder_name}/epg")
+async def streamer_generate_epg(folder_name: str):
+    """Generate an EPG XML file for a folder based on its slot configuration."""
+    output_path = generate_epg_for_folder(folder_name)
+    if not output_path:
+        raise HTTPException(status_code=500, detail="EPG generation failed")
+    from pathlib import Path as _Path
+    return {"status": "ok", "path": output_path, "filename": _Path(output_path).name}
 
 
 @app.get("/api/streamer/folder/{folder_name}/epg")
@@ -640,7 +678,6 @@ async def create_live_stream(body: LiveStreamCreateRequest):
         "name": body.name,
         "url": body.url,
         "port": body.port,
-        "codec": body.codec,
         "auto_start": body.auto_start,
     }
     cfg.streamer.live_streams.append(new_item)
@@ -662,8 +699,6 @@ async def update_live_stream(stream_id: str, body: LiveStreamUpdateRequest):
                 item["url"] = body.url
             if body.port is not None:
                 item["port"] = body.port
-            if body.codec is not None:
-                item["codec"] = body.codec
             if body.auto_start is not None:
                 item["auto_start"] = body.auto_start
             update_config({"streamer": {"live_streams": cfg.streamer.live_streams}})

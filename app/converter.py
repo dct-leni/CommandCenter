@@ -39,6 +39,7 @@ MAX_HD_DIMENSION = 1920
  
 class ConversionStatus(str, Enum):
     PENDING = "pending"
+    QUEUED = "queued"
     CONVERTING = "converting"
     DONE = "done"
     ERROR = "error"
@@ -172,7 +173,8 @@ class Converter:
         self.files: Dict[str, FileInfo] = {}
         self.source_folder: str = ""
         self._active_processes: Dict[str, subprocess.Popen] = {}
-        self._conversion_tasks: Dict[str, asyncio.Task] = {}
+        self._queue: List[str] = []
+        self._queue_worker_task: Optional[asyncio.Task] = None
         # Every directory we've ever seen a thumbnail written into, so we can
         # still find + remove orphans even if every file in a folder vanished
         # in one go (in which case this scan has zero "valid" thumbnails to
@@ -324,38 +326,115 @@ class Converter:
         return self._cleanup_orphaned_thumbnails()
  
     async def convert_file(self, filename: str) -> bool:
-        """Start converting a single file to .ts format."""
+        """Add a file to the conversion queue."""
         if not is_ffmpeg_installed():
             logger.error("FFmpeg not installed")
             return False
- 
+
         if filename not in self.files:
             logger.error(f"File not found: {filename}")
             return False
- 
+
         info = self.files[filename]
-        if info.status == ConversionStatus.DONE:
+        if info.status in (ConversionStatus.DONE, ConversionStatus.CONVERTING):
             return True
-        if info.status == ConversionStatus.CONVERTING:
-            return True  # Already in progress
- 
-        info.status = ConversionStatus.CONVERTING
-        info.progress = 0.0
-        info.error = ""
- 
-        # Start conversion in background
-        task = asyncio.create_task(self._run_conversion(filename))
-        self._conversion_tasks[filename] = task
+
+        if filename not in self._queue:
+            self._queue.append(filename)
+            logger.info(f"Added {filename} to conversion queue. Queue length: {len(self._queue)}")
+
+        self._start_queue_worker()
         return True
- 
+
     async def convert_all(self) -> int:
-        """Start converting all pending files. Returns count of started conversions."""
+        """Add all pending files to the conversion queue. Returns count of added files."""
         count = 0
         for filename, info in self.files.items():
             if info.status == ConversionStatus.PENDING:
-                await self.convert_file(filename)
-                count += 1
+                if filename not in self._queue:
+                    self._queue.append(filename)
+                    count += 1
+        if count > 0:
+            logger.info(f"Added {count} files to conversion queue. Queue length: {len(self._queue)}")
+            self._start_queue_worker()
         return count
+
+    async def stop_conversion(self) -> bool:
+        """Stop all active conversions, clear the queue, and delete any incomplete output files."""
+        logger.info("Stopping all conversions...")
+
+        # 1. Clear the queue
+        self._queue.clear()
+
+        # 2. Cancel the queue worker task
+        if self._queue_worker_task and not self._queue_worker_task.done():
+            self._queue_worker_task.cancel()
+            self._queue_worker_task = None
+
+        # 3. Terminate all active processes
+        active_filenames = list(self._active_processes.keys())
+        for filename in active_filenames:
+            process = self._active_processes.get(filename)
+            if process:
+                try:
+                    process.terminate()
+                except Exception as e:
+                    logger.warning(f"Error terminating process for {filename}: {e}")
+
+        # Let the OS clean up processes
+        await asyncio.sleep(0.5)
+
+        # 4. Clean up files and reset statuses
+        for fname, info in self.files.items():
+            if info.status in (ConversionStatus.CONVERTING, ConversionStatus.QUEUED):
+                info.status = ConversionStatus.PENDING
+                info.progress = 0.0
+                info.error = ""
+                # Delete the incomplete .ts file
+                try:
+                    output_path = Path(info.filepath).parent / info.ts_filename
+                    if output_path.exists():
+                        output_path.unlink(missing_ok=True)
+                        logger.info(f"Deleted incomplete file: {output_path}")
+                except Exception as e:
+                    logger.warning(f"Could not delete incomplete file for {fname}: {e}")
+
+        # Rescan the directory to ensure state is clean
+        self.scan_folder(self.source_folder)
+        return True
+
+    def _start_queue_worker(self):
+        if self._queue_worker_task is None or self._queue_worker_task.done():
+            self._queue_worker_task = asyncio.create_task(self._process_queue())
+
+    async def _process_queue(self):
+        logger.info("Starting queue worker loop")
+        while self._queue:
+            filename = self._queue[0]
+            info = self.files.get(filename)
+            if not info:
+                self._queue.pop(0)
+                continue
+
+            if info.status == ConversionStatus.DONE:
+                self._queue.pop(0)
+                continue
+
+            info.status = ConversionStatus.CONVERTING
+            info.progress = 0.0
+            info.error = ""
+
+            try:
+                await self._run_conversion(filename)
+            except Exception as e:
+                logger.error(f"Error running conversion for {filename}: {e}")
+                info.status = ConversionStatus.ERROR
+                info.error = str(e)
+            finally:
+                if self._queue and self._queue[0] == filename:
+                    self._queue.pop(0)
+
+        logger.info("Queue worker loop finished (queue empty)")
  
     async def _run_conversion(self, filename: str):
         """Run the actual FFmpeg conversion process."""
@@ -387,35 +466,23 @@ class Converter:
             logger.info(f"{filename}: {info.scaled_note}")
  
             video_stream_index = streams["video"]["index"] if streams["video"] else None
- 
             success = False
  
-            # 1) Pure stream copy — only possible when no scaling is needed.
-            if not needs_scale:
+            # Try hardware encoding if supported
+            from app.ffmpeg_setup import get_best_encoder
+            best_encoder = get_best_encoder()
+            if best_encoder in ("h264_nvenc", "h264_qsv"):
+                logger.info(f"Re-encoding with hardware ({best_encoder}) for {filename}...")
                 success = await self._ffmpeg_convert(
-                    input_path, output_path, filename, strategy="copy",
+                    input_path, output_path, filename, strategy="hardware",
                     video_stream_index=video_stream_index,
                     audio_indices=audio_indices,
-                    target_size=None,
+                    target_size=target_size,
                 )
-
-            # 2) Hardware re-encode, scaling if required.
+ 
+            # CPU fallback
             if not success:
-                from app.ffmpeg_setup import get_best_encoder
-                best_encoder = get_best_encoder()
-                if best_encoder in ("h264_nvenc", "h264_qsv"):
-                    logger.info(f"Codec copy unavailable/failed for {filename}, re-encoding with hardware ({best_encoder})...")
-                    info.progress = 0.0
-                    success = await self._ffmpeg_convert(
-                        input_path, output_path, filename, strategy="hardware",
-                        video_stream_index=video_stream_index,
-                        audio_indices=audio_indices,
-                        target_size=target_size,
-                    )
-
-            # 3) Software re-encode (CPU) fallback.
-            if not success:
-                logger.info(f"Hardware encoding failed or unavailable for {filename}, re-encoding with CPU (libx264)...")
+                logger.info(f"Re-encoding with CPU (libx264) for {filename}...")
                 info.progress = 0.0
                 success = await self._ffmpeg_convert(
                     input_path, output_path, filename, strategy="cpu",
@@ -456,7 +523,6 @@ class Converter:
             info.error = str(e)
             logger.error(f"Conversion failed for {filename}: {e}")
         finally:
-            self._conversion_tasks.pop(filename, None)
             self._active_processes.pop(filename, None)
             self.scan_folder(self.source_folder)
  
@@ -492,57 +558,27 @@ class Converter:
         if target_size:
             scale_args = ["-vf", f"scale={target_size[0]}:{target_size[1]}"]
  
-        if strategy == "copy":
-            cmd = base_cmd + map_args + [
-                "-c:v", "copy",
-                "-c:a", "copy",
-                "-bsf:v", "h264_mp4toannexb",
-                "-f", "mpegts",
-                output_path,
-            ]
-        elif strategy == "hardware":
-            from app.ffmpeg_setup import get_best_encoder
+        if strategy == "hardware":
+            from app.ffmpeg_setup import get_best_encoder, get_encoding_params
             best_encoder = get_best_encoder()
-            if best_encoder == "h264_nvenc":
-                hw_args = [
-                    "-c:v", "h264_nvenc",
-                    "-preset", "p6",
-                    "-tune", "hq",
-                ]
-            elif best_encoder == "h264_qsv":
-                hw_args = [
-                    "-c:v", "h264_qsv",
-                    "-preset", "veryfast",
-                ]
-            else:
-                hw_args = [
-                    "-c:v", "libx264",
-                    "-preset", "fast",
-                ]
-
+            hw_args = get_encoding_params(best_encoder)
             cmd = base_cmd + map_args + scale_args + hw_args + [
-                "-b:v", "2.8M",            # Optimal ~2.8 Mbps target video bitrate
-                "-maxrate", "3.2M",        # Prevent bitrate spikes for smooth RTMP/HLS
-                "-bufsize", "6.4M",        # VBR buffer (~2x maxrate)
-                "-g", "60",                # Keyframe every 2 seconds (crucial for streaming)
                 "-c:a", "aac",
                 "-b:a", "256k",            # High quality stereo audio
                 "-ac", "2",                # Force stereo
+                "-bsf:v", "dump_extra",    # Repeat SPS/PPS headers before keyframes
                 "-f", "mpegts",
                 output_path,
             ]
         else:
             # CPU Fallback (libx264)
-            cmd = base_cmd + map_args + scale_args + [
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-b:v", "2.8M",            # Optimal ~2.8 Mbps target video bitrate
-                "-maxrate", "3.2M",
-                "-bufsize", "6.4M",
-                "-g", "60",
+            from app.ffmpeg_setup import get_encoding_params
+            cpu_args = get_encoding_params("libx264")
+            cmd = base_cmd + map_args + scale_args + cpu_args + [
                 "-c:a", "aac",
                 "-b:a", "256k",
                 "-ac", "2",
+                "-bsf:v", "dump_extra",    # Repeat SPS/PPS headers before keyframes
                 "-f", "mpegts",
                 output_path,
             ]

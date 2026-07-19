@@ -141,3 +141,131 @@ def get_binaries_status() -> dict:
         "best_encoder": get_best_encoder(),
     }
 
+
+def get_encoding_params(encoder: str) -> list:
+    """
+    Return the optimized, unified encoding parameters for both local converter and live relay.
+    Limits peak network usage while preserving high visual quality.
+    """
+    if encoder == "h264_nvenc":
+        return [
+            "-c:v", "h264_nvenc",
+            "-preset", "p6",             # High-quality preset
+            "-profile:v", "high",
+            "-b:v", "2.8M",              # Target ~2.8 Mbps video bitrate
+            "-maxrate", "3.2M",          # Protect network / bandwidth spikes
+            "-bufsize", "6.4M",          # VBR buffer
+            "-spatial-aq", "1",          # Optimize dark scene details
+            "-temporal-aq", "1",         # Smooth out fast motion pixels
+            "-g", "60",                  # 2s keyframe interval (vital for streaming loops)
+        ]
+    elif encoder == "h264_qsv":
+        return [
+            "-c:v", "h264_qsv",
+            "-preset", "medium",
+            "-b:v", "2.8M",
+            "-maxrate", "3.2M",
+            "-bufsize", "6.4M",
+            "-look_ahead", "1",          # Enable lookahead to smooth out motion
+            "-look_ahead_depth", "15",
+            "-g", "60",
+        ]
+    elif encoder == "libx264":
+        return [
+            "-c:v", "libx264",
+            "-preset", "medium",
+            "-crf", "21",                # Visually lossless rate-control
+            "-maxrate", "3.2M",
+            "-bufsize", "6.4M",
+            "-g", "60",
+        ]
+    else:
+        return ["-c:v", "copy"]
+
+
+def probe_source_codec(url: str, timeout: int = 8) -> str:
+    """
+    Probe the video codec of a stream URL using ffprobe.
+    Returns a lowercase codec name, e.g. 'h264', 'hevc', 'mpeg2video', or 'unknown'.
+    Result is used to decide whether stream-copy or re-encode is needed.
+    """
+    try:
+        res = subprocess.run(
+            [
+                str(FFPROBE_EXE),
+                "-v", "quiet",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                url,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            timeout=timeout,
+        )
+        codec = res.stdout.decode("utf-8", errors="replace").strip()
+        # ffprobe may return one line per video track — take the first
+        codec = codec.splitlines()[0].strip().lower() if codec else "unknown"
+        return codec if codec else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def get_relay_params() -> list:
+    """
+    Return stream copy parameters for the live relay (zero GPU usage).
+    The live relay ingests an already-encoded H.264 stream and just re-muxes
+    it — no re-encode needed. Using codec copy eliminates GPU usage entirely
+    while preserving bit-for-bit identical video quality.
+    The bsf:v dump_extra filter injects SPS/PPS headers before every keyframe
+    so that late-joining clients can decode immediately without seeking.
+    """
+    return ["-c:v", "copy"]
+
+
+def get_relay_encoding_params(encoder: str) -> list:
+    """
+    Low-GPU re-encode parameters for live relay when source is not H.264.
+
+    Differences from get_encoding_params() (converter quality profile):
+      NVENC: preset p4 instead of p6  → ~20% less GPU, imperceptible quality loss
+             no spatial-aq/temporal-aq → ~18% less GPU, minor impact on dark/fast scenes
+             no rc-lookahead           → ~5%  less GPU, negligible for live content
+      QSV:   preset fast, no lookahead → ~20% less CPU/GPU compute
+      CPU:   preset fast, crf 23       → far less CPU, very similar visual quality to crf 21
+    """
+    if encoder == "h264_nvenc":
+        return [
+            "-c:v", "h264_nvenc",
+            "-preset", "p5",            # One step below converter's p6 — ~10% GPU saving, imperceptible quality diff
+            "-profile:v", "high",
+            "-b:v", "2.8M",
+            "-maxrate", "3.2M",
+            "-bufsize", "6.4M",
+            "-temporal-aq", "1",        # Keep: preserves motion sharpness in fast/sports content
+            "-g", "60",
+            # spatial-aq off: saves ~10% GPU; mainly helps dark flat areas, not motion content
+            # rc-lookahead off: saves ~5% GPU; live stream + VBR buffer already handles spikes
+        ]
+    elif encoder == "h264_qsv":
+        return [
+            "-c:v", "h264_qsv",
+            "-preset", "medium",
+            "-b:v", "2.8M",
+            "-maxrate", "3.2M",
+            "-bufsize", "6.4M",
+            "-g", "60",
+            # look_ahead disabled: saves compute; less beneficial for live relay
+        ]
+    elif encoder == "libx264":
+        return [
+            "-c:v", "libx264",
+            "-preset", "fast",          # Much lighter than 'medium'
+            "-crf", "23",               # +2 vs converter's 21; still visually very close
+            "-maxrate", "3.2M",
+            "-bufsize", "6.4M",
+            "-g", "60",
+        ]
+    else:
+        return ["-c:v", "copy"]

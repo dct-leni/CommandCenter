@@ -62,7 +62,7 @@
                         <i class="fa-regular fa-folder-open"></i>
                     </button>
                 </div>
-                <div class="action-row">
+                <div class="action-row" style="gap: 8px;">
                     <button class="btn btn-primary" id="convert-all-btn" disabled>
                         Convert All
                     </button>
@@ -120,13 +120,6 @@
 
                     <button class="btn btn-accent" id="stream-start-btn" disabled>
                         <span class="btn-icon"><i class="fa-solid fa-play"></i></span> Start Streaming
-                    </button>
-                    <button class="btn btn-danger" id="stream-stop-btn" disabled>
-                        <span class="btn-icon"><i class="fa-solid fa-stop"></i></span> Stop
-                    </button>
-                    <button class="btn btn-secondary" id="epg-generate-btn" disabled
-                        title="Generate EPG XML for the selected folder">
-                        <span class="btn-icon"><i class="fa-solid fa-list-check"></i></span> Generate EPG
                     </button>
                     <div class="stream-status-badge" id="stream-status-badge">
                         Idle
@@ -273,13 +266,6 @@
                         HTTP Port</label>
                     <input type="number" id="livestream-port" placeholder="1913" value="1913"
                         style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
-                </div>
-                <div style="display: flex; align-items: center; gap: 8px; margin-top: 4px;">
-                    <input type="checkbox" id="livestream-autostart"
-                        style="width: 16px; height: 16px; cursor: pointer;">
-                    <label for="livestream-autostart"
-                        style="font-size: 13px; color: var(--text-primary); cursor: pointer;">Auto-start stream on
-                        server boot</label>
                 </div>
             </div>
             <div class="modal-footer"

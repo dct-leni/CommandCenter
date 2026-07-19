@@ -28,7 +28,6 @@ class LiveStreamItem:
     name: str
     url: str
     port: int
-    codec: str = "h264_nvenc"
     auto_start: bool = False
 
 

@@ -440,6 +440,12 @@ body {
     border: 1px solid var(--border);
 }
 
+.status-badge.queued { 
+    color: var(--text-muted); 
+    background: var(--bg-input); 
+    border: 1px dashed var(--border-light);
+}
+
 .status-badge.converting { 
     color: var(--amber); 
     background: var(--amber-glow); 
