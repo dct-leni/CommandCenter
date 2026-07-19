@@ -1320,9 +1320,9 @@ function renderLiveStreams() {
         const isRunning = item.status === 'running' || item.status === 'listening';
         let statusBadge = '';
         if (item.status === 'running') {
-            statusBadge = `<span class="livestream-status running"><i class="fa-solid fa-play"></i> Running</span>`;
+            statusBadge = `<span class="livestream-status running"><i class="fa-solid fa-play"></i> Watching</span>`;
         } else if (item.status === 'listening') {
-            statusBadge = `<span class="livestream-status listening"><i class="fa-solid fa-spinner"></i> Listening</span>`;
+            statusBadge = `<span class="livestream-status listening"><i class="fa-solid fa-spinner"></i> Sleeping</span>`;
         } else if (item.status === 'error') {
             statusBadge = `<span class="livestream-status error" style="max-width: 750px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-flex; align-items: center;" title="${escapeAttr(item.error || 'Error')}"><i class="fa-solid fa-triangle-exclamation"></i> Error: ${escapeAttr(item.error || 'Unknown Error')}</span>`;
         } else {

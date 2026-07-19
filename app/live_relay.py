@@ -446,6 +446,7 @@ class LiveStreamManager:
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
+                    limit=1024 * 1024,  # 1 MB — prevents LimitOverrunError on long FFmpeg lines
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 )
                 relay.process = process
@@ -493,7 +494,13 @@ class LiveStreamManager:
         bitrate_pattern = re.compile(r"bitrate=\s*([\w\./]+)")
         try:
             while True:
-                line = await stderr.readline()
+                try:
+                    line = await stderr.readline()
+                except asyncio.LimitOverrunError:
+                    # FFmpeg wrote a line longer than the StreamReader buffer.
+                    # Drain and discard the oversized chunk, then continue.
+                    await stderr.read(1024 * 1024)
+                    continue
                 if not line:
                     break
                 line_str = line.decode("utf-8", errors="replace").strip()
