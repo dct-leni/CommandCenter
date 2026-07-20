@@ -11,7 +11,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, File, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -282,6 +282,55 @@ async def converter_stop():
     if not success:
         raise HTTPException(status_code=500, detail="Failed to stop conversion")
     return {"status": "stopped"}
+
+
+@app.post("/api/converter/upload")
+async def converter_upload(files: List[UploadFile] = File(...)):
+    """
+    Receive video files from the browser (drag & drop) and save them into
+    the configured converter source_folder.
+    Works for both local and remote server instances — the browser streams
+    the file over HTTP regardless of where the server runs.
+    """
+    folder = converter.source_folder
+    if not folder or not Path(folder).is_dir():
+        raise HTTPException(
+            status_code=400,
+            detail="No input folder selected. Please choose a source folder first."
+        )
+
+    from app.converter import VIDEO_EXTENSIONS
+    saved = []
+    skipped = []
+
+    for upload in files:
+        ext = Path(upload.filename).suffix.lower()
+        if ext not in VIDEO_EXTENSIONS:
+            skipped.append(upload.filename)
+            continue
+
+        dest = Path(folder) / upload.filename
+        # Stream in 1 MB chunks to keep memory usage flat for large files
+        try:
+            with open(dest, "wb") as f:
+                while True:
+                    chunk = await upload.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+            saved.append(upload.filename)
+        except Exception as e:
+            logger.error(f"Failed to save uploaded file '{upload.filename}': {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to save '{upload.filename}': {e}")
+
+    # Rescan so uploaded files appear immediately
+    files_list = converter.scan_folder(folder)
+    return {
+        "saved": saved,
+        "skipped": skipped,
+        "files": files_list,
+        "count": len(files_list),
+    }
 
 
 @app.get("/api/converter/thumbnail/{filename}")

@@ -48,7 +48,15 @@
     <!-- Main Content -->
     <main class="app-main">
         <!-- LEFT PANEL: Converter (40%) -->
-        <section class="panel panel-converter" id="panel-converter">
+        <section class="panel panel-converter" id="panel-converter" style="position:relative;">
+            <!-- Drop zone overlay — covers the whole panel during an active file drag -->
+            <div class="drop-zone-overlay" id="converter-drop-overlay">
+                <div class="drop-zone-inner">
+                    <i class="fa-solid fa-cloud-arrow-up"></i>
+                    <span>Drop video files here</span>
+                </div>
+            </div>
+
             <div class="panel-header">
                 <h2>Converter</h2>
                 <span class="panel-subtitle">// TRANSCODE MODULE</span>
@@ -75,6 +83,7 @@
                 <div class="empty-state">
                     <div class="empty-icon"><i class="fa-regular fa-folder-open"></i></div>
                     <p>Select a folder to scan for video files</p>
+                    <p class="drop-hint"><i class="fa-solid fa-circle-arrow-down"></i> or drag & drop video files here</p>
                 </div>
             </div>
         </section>

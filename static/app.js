@@ -186,6 +186,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Start polling
     startPolling();
 
+    // Enable drag & drop file upload on the converter panel
+    initConverterDropZone();
+
     // If config has saved folders, auto-scan
     await rescanFolders();
 
@@ -1092,6 +1095,135 @@ async function selectFolder() {
         document.getElementById('streamer-folder').value = path;
         await scanStreamerFolder(path);
     }
+}
+
+// ──────────────────────────────────────────────
+//  Converter Drag & Drop Upload
+// ──────────────────────────────────────────────
+
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg', '.ts']);
+
+function initConverterDropZone() {
+    const panel   = document.getElementById('panel-converter');
+    const overlay = document.getElementById('converter-drop-overlay');
+    if (!panel || !overlay) return;
+
+    // ── Step 1: Stop the BROWSER from opening dragged files globally ──────
+    // Without this, dropping anywhere on the page navigates to the file.
+    document.addEventListener('dragover', (e) => e.preventDefault());
+    document.addEventListener('drop',     (e) => e.preventDefault());
+
+    // ── Step 2: Show/hide overlay when dragging over the converter panel ──
+    let dragDepth = 0;
+
+    panel.addEventListener('dragenter', (e) => {
+        e.preventDefault();
+        // Only respond to actual file drags, not element drags (e.g. slot cards)
+        if (!e.dataTransfer.types.includes('Files')) return;
+        dragDepth++;
+        overlay.classList.add('active');
+    });
+
+    panel.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        if (e.dataTransfer.types.includes('Files')) {
+            e.dataTransfer.dropEffect = 'copy';
+        }
+    });
+
+    panel.addEventListener('dragleave', (e) => {
+        if (!e.dataTransfer.types.includes('Files')) return;
+        dragDepth--;
+        if (dragDepth <= 0) {
+            dragDepth = 0;
+            overlay.classList.remove('active');
+        }
+    });
+
+    panel.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        dragDepth = 0;
+        overlay.classList.remove('active');
+
+        if (!e.dataTransfer.types.includes('Files')) return;
+
+        const folderInput = document.getElementById('converter-folder');
+        if (!folderInput || !folderInput.value.trim()) {
+            showToast('Please select an input folder first before dropping files.', 'error');
+            return;
+        }
+
+        const allFiles = Array.from(e.dataTransfer.files);
+        const videoFiles = allFiles.filter(f => {
+            const ext = '.' + f.name.split('.').pop().toLowerCase();
+            return VIDEO_EXTENSIONS.has(ext);
+        });
+        const ignoredCount = allFiles.length - videoFiles.length;
+
+        if (videoFiles.length === 0) {
+            showToast('No supported video files found in the dropped items.', 'error');
+            return;
+        }
+        if (ignoredCount > 0) {
+            showToast(`${ignoredCount} non-video file(s) ignored.`, 'info');
+        }
+
+        await uploadFilesToConverter(videoFiles);
+    });
+}
+
+async function uploadFilesToConverter(files) {
+    const progressToast = showUploadToast(`Uploading ${files.length} file(s)…`);
+
+    const formData = new FormData();
+    for (const f of files) {
+        formData.append('files', f);
+    }
+
+    try {
+        const res = await fetch('/api/converter/upload', {
+            method: 'POST',
+            body: formData,
+        });
+
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({ detail: res.statusText }));
+            throw new Error(err.detail || res.statusText);
+        }
+
+        const data = await res.json();
+        progressToast.remove();
+
+        const saved = data.saved?.length ?? 0;
+        const skipped = data.skipped?.length ?? 0;
+
+        if (saved > 0) {
+            showToast(`✓ ${saved} file(s) uploaded successfully.`, 'success');
+        }
+        if (skipped > 0) {
+            showToast(`${skipped} file(s) skipped (unsupported format).`, 'info');
+        }
+
+        // Update the UI with the returned file list directly
+        if (data.files) {
+            state.converterFiles = data.files;
+            renderConverterFiles();
+            updateConverterCounter();
+        }
+
+    } catch (e) {
+        progressToast.remove();
+        showToast(`Upload failed: ${e.message}`, 'error');
+    }
+}
+
+function showUploadToast(message) {
+    const container = document.getElementById('toast-container');
+    const toast = document.createElement('div');
+    toast.className = 'toast upload';
+    toast.innerHTML = `<i class="fa-solid fa-spinner fa-spin" style="margin-right:8px;"></i>${message}`;
+    container.appendChild(toast);
+    return toast; // caller removes it manually on completion
 }
 
 // ──────────────────────────────────────────────
