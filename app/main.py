@@ -5,6 +5,8 @@ Serves the Web UI and provides REST API for converter and streamer.
 
 import logging
 import os
+import signal
+import atexit
 import asyncio
 from dataclasses import asdict
 from pathlib import Path
@@ -845,6 +847,31 @@ async def browse_filesystem(path: str = Query("")):
 #  Entry point
 # ──────────────────────────────────────────────
 
+def _kill_all_children():
+    """
+    Kill the entire process tree of this Python process (FFmpeg, MediaMTX, etc.).
+    Uses Windows-native `taskkill /F /T` for recursive termination.
+    Called by both the console-close handler and atexit so no orphans survive.
+    """
+    if os.name == "nt":
+        import subprocess as _sp
+        try:
+            _sp.run(
+                ["taskkill", "/F", "/T", "/PID", str(os.getpid())],
+                stdout=_sp.DEVNULL,
+                stderr=_sp.DEVNULL,
+                creationflags=_sp.CREATE_NO_WINDOW,
+            )
+        except Exception:
+            pass
+    else:
+        import subprocess as _sp
+        try:
+            _sp.run(["kill", "-TERM", f"-{os.getpid()}"], stderr=_sp.DEVNULL)
+        except Exception:
+            pass
+
+
 def main():
     cfg = load_config()
     binaries = get_binaries_status()
@@ -860,6 +887,44 @@ def main():
     print(f"  Encoder:  {binaries['best_encoder']} (Auto-detected)")
     print(f"  Web UI:   http://localhost:{cfg.server.port}")
     print()
+
+    # ── Windows console-close handler ─────────────────────────────────────
+    # When the user clicks X on the console window (or logs off / shuts down),
+    # Windows sends CTRL_CLOSE_EVENT. Uvicorn only handles SIGINT (Ctrl+C), so
+    # the window-close leaves FFmpeg / MediaMTX orphaned.
+    # We register a handler that kills the full process tree immediately.
+    if os.name == "nt":
+        import ctypes
+        import ctypes.wintypes
+        import subprocess as _sp
+
+        CTRL_CLOSE_EVENT    = 2
+        CTRL_LOGOFF_EVENT   = 5
+        CTRL_SHUTDOWN_EVENT = 6
+
+        @ctypes.WINFUNCTYPE(ctypes.wintypes.BOOL, ctypes.wintypes.DWORD)
+        def _ctrl_handler(ctrl_type):
+            if ctrl_type in (CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT):
+                logger.info("Console close/logoff event — killing process tree")
+                try:
+                    _sp.run(
+                        ["taskkill", "/F", "/T", "/PID", str(os.getpid())],
+                        stdout=_sp.DEVNULL,
+                        stderr=_sp.DEVNULL,
+                        creationflags=_sp.CREATE_NO_WINDOW,
+                    )
+                except Exception:
+                    pass
+                return True  # suppress Windows' own delayed hard-kill
+            return False  # let Ctrl+C / Ctrl+Break reach uvicorn normally
+
+        ctypes.windll.kernel32.SetConsoleCtrlHandler(_ctrl_handler, True)
+        logger.info("Registered Windows console-close handler")
+
+    # ── atexit fallback ───────────────────────────────────────────────────
+    # Runs on any clean Python exit (SIGINT → uvicorn shutdown).
+    # Catches any surviving child processes lifespan teardown may have missed.
+    atexit.register(_kill_all_children)
 
     uvicorn.run(
         app,
