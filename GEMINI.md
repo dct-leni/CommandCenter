@@ -94,7 +94,8 @@ To prevent breaking the application, any AI or developer modifying this codebase
 * **Why**: Writing to the configuration file on every page load/rescan triggers Uvicorn's `--reload` file watcher, restarting the server and killing active relays.
 
 ### 6. HLS Stream Demuxing (.m3u8)
-* **Rule**: When parsing or relaying HLS stream URLs, always detect `.m3u8` in the URL and add `-allowed_extensions ALL` to both the `ffmpeg` and `ffprobe` commands.
-* **Why**: FFmpeg's HLS demuxer will block or fail to resolve sub-playlists/media segment paths if they are not explicitly allowed. Additionally, do not use `-reconnect_streamed` with HLS, as it conflicts with the demuxer's chunk-retrieval loop.
+* **Rule**: When parsing or relaying HLS stream URLs, always detect `.m3u8` in the URL and add `-allowed_extensions ALL`, `-allowed_segment_extensions ALL`, and `-extension_picky 0` to both the `ffmpeg` and `ffprobe` commands.
+* **Why**: FFmpeg's HLS demuxer will block or fail to resolve sub-playlists/media segment paths if they are not explicitly allowed. Additionally, non-standard segment URLs (e.g. without file extensions in IPTV redirects) are blocked by default unless `-allowed_segment_extensions ALL` and `-extension_picky 0` are passed. Finally, do not use `-reconnect_streamed` with HLS, as it conflicts with the demuxer's chunk-retrieval loop.
+
 
 

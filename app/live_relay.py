@@ -417,13 +417,14 @@ class LiveStreamManager:
                 if is_hls:
                     # HLS-specific input flags:
                     # -allowed_extensions ALL  — allow FFmpeg to follow m3u8 playlists
-                    #                            and fetch .ts/.aac/.mp4 segments
-                    # -hls_segment_timeout     — how long to wait for each segment
+                    # -allowed_segment_extensions ALL — allow segments with non-standard/no extensions
+                    # -extension_picky 0       — disable strict extension/format matching for security bypass
                     # -timeout                 — applies to each individual HTTP request
                     # Do NOT use -reconnect_streamed here — it conflicts with HLS demuxer
                     cmd.extend([
                         "-allowed_extensions", "ALL",
-                        "-hls_segment_timeout", "10",
+                        "-allowed_segment_extensions", "ALL",
+                        "-extension_picky", "0",
                         "-timeout", "10000000",
                     ])
                 elif relay.url.startswith("http://") or relay.url.startswith("https://"):

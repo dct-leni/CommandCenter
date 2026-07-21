@@ -198,7 +198,11 @@ def probe_source_codec(url: str, timeout: int = 8) -> str:
             "-of", "default=noprint_wrappers=1:nokey=1",
         ]
         if ".m3u8" in url.lower():
-            cmd.extend(["-allowed_extensions", "ALL"])
+            cmd.extend([
+                "-allowed_extensions", "ALL",
+                "-allowed_segment_extensions", "ALL",
+                "-extension_picky", "0",
+            ])
         cmd.append(url)
 
         res = subprocess.run(
