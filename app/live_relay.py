@@ -397,6 +397,9 @@ class LiveStreamManager:
 
                 cmd = [get_ffmpeg_path()]
 
+                # Detect HLS — URL ends with .m3u8 or contains /m3u8
+                is_hls = ".m3u8" in relay.url.lower()
+
                 # Network buffering and protocol options
                 is_network_input = any(relay.url.startswith(proto) for proto in ("http://", "https://", "rtsp://", "rtmp://", "udp://"))
                 if is_network_input:
@@ -411,8 +414,20 @@ class LiveStreamManager:
                 if relay.url.startswith("rtsp://"):
                     cmd.extend(["-rtsp_transport", "udp"])
 
-                # Reconnect flags and timeouts for HTTP input streams
-                if relay.url.startswith("http://") or relay.url.startswith("https://"):
+                if is_hls:
+                    # HLS-specific input flags:
+                    # -allowed_extensions ALL  — allow FFmpeg to follow m3u8 playlists
+                    #                            and fetch .ts/.aac/.mp4 segments
+                    # -hls_segment_timeout     — how long to wait for each segment
+                    # -timeout                 — applies to each individual HTTP request
+                    # Do NOT use -reconnect_streamed here — it conflicts with HLS demuxer
+                    cmd.extend([
+                        "-allowed_extensions", "ALL",
+                        "-hls_segment_timeout", "10",
+                        "-timeout", "10000000",
+                    ])
+                elif relay.url.startswith("http://") or relay.url.startswith("https://"):
+                    # Plain HTTP MPEG-TS stream
                     cmd.extend([
                         "-reconnect", "1",
                         "-reconnect_streamed", "1",

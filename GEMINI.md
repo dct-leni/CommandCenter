@@ -56,6 +56,7 @@ For example, open VLC and enter the network URL:
 
 ### 5. Live HTTP Stream Relay & Encoding (+ New Stream)
 - **Live Stream Creation:** Click **`+ New Stream`** right next to `+ New Folder` inside the Streamer panel to add a live external stream relay. The dialog has been simplified to only ask for Name, URL, and Port. The manual auto-start checkbox is removed because stream auto-resume state is handled implicitly (it will resume streaming on boot if it was playing before the server shutdown, and remain stopped if it was stopped). Codec selection is fully automatic based on startup hardware detection.
+- **Support for RTMP, RTSP, plain HTTP, and HLS (.m3u8):** The application handles standard streaming protocols as well as HTTP Live Streaming (HLS) playlists. For HLS sources, it automatically injects `-allowed_extensions ALL` and playlist/segment timeouts to allow FFmpeg and ffprobe to download playlist segments.
 - **Hardware Acceleration (NVENC / QSV / CPU):** The app automatically probes the host system once on startup to detect the best available encoding acceleration: NVIDIA GPU (`h264_nvenc`), Intel QuickSync (`h264_qsv`), or CPU (`libx264`). This auto-detected codec is used globally for both the Converter and the Live Relays.
 - **Multi-Client HTTP Broadcasting:** Instead of letting FFmpeg listen directly (which only accepts one viewer and stops on disconnect), the backend launches a lightweight **Python TCP Server** on your chosen output port (`http://0.0.0.0:1913/`). This server accepts **unlimited concurrent viewers** simultaneously and streams clean MPEG-TS (`video/mp2t`) by copying and distributing FFmpeg's transcoded stdout chunks in real-time.
 - **Continuous Ingestion (No Disconnect Lag):** FFmpeg runs continuously in the background to transcode the source feed. Because the stream never terminates or restarts when viewers connect or disconnect, there is zero start delay, zero port reuse conflicts (`TIME_WAIT` socket errors), and player reconnects are instant. When a user clicks **Start** on a stream, its `auto_start` value is dynamically set to `True` in `config.yaml` to auto-resume on server boot. When **Stop** is clicked, it's set to `False` to prevent auto-start. Transcoding is optimized for high-motion sports using the **exact same** quality-oriented settings as the converter (target **2.8 Mbps**, max 3.2 Mbps, 6.4 Mbps VBR buffer) with **Spatial/Temporal Adaptive Quantization** (NVENC) or **Lookahead Rate Control** (QSV) enabled. This guarantees optimal crystal-clear visual quality while keeping network/bandwidth utilization safely bounded.
@@ -91,4 +92,9 @@ To prevent breaking the application, any AI or developer modifying this codebase
 ### 5. Idempotent Config Saving
 * **Rule**: Always compare the old configuration data with the new data before writing to `config.yml`.
 * **Why**: Writing to the configuration file on every page load/rescan triggers Uvicorn's `--reload` file watcher, restarting the server and killing active relays.
+
+### 6. HLS Stream Demuxing (.m3u8)
+* **Rule**: When parsing or relaying HLS stream URLs, always detect `.m3u8` in the URL and add `-allowed_extensions ALL` to both the `ffmpeg` and `ffprobe` commands.
+* **Why**: FFmpeg's HLS demuxer will block or fail to resolve sub-playlists/media segment paths if they are not explicitly allowed. Additionally, do not use `-reconnect_streamed` with HLS, as it conflicts with the demuxer's chunk-retrieval loop.
+
 

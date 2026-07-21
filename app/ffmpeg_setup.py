@@ -190,15 +190,19 @@ def probe_source_codec(url: str, timeout: int = 8) -> str:
     Result is used to decide whether stream-copy or re-encode is needed.
     """
     try:
+        cmd = [
+            str(FFPROBE_EXE),
+            "-v", "quiet",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=codec_name",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+        ]
+        if ".m3u8" in url.lower():
+            cmd.extend(["-allowed_extensions", "ALL"])
+        cmd.append(url)
+
         res = subprocess.run(
-            [
-                str(FFPROBE_EXE),
-                "-v", "quiet",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=codec_name",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                url,
-            ],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
