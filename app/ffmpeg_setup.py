@@ -222,7 +222,7 @@ def probe_source_codec(url: str, timeout: int = 8, proxy_url: Optional[str] = No
     try:
         cmd = [
             str(FFPROBE_EXE),
-            "-v", "quiet",
+            "-v", "error",
         ]
 
         if proxy_url:
@@ -231,17 +231,31 @@ def probe_source_codec(url: str, timeout: int = 8, proxy_url: Optional[str] = No
             else:
                 cmd.extend(["-http_proxy", proxy_url])
 
+        is_network_input = any(url.lower().startswith(proto) for proto in ("http://", "https://", "rtsp://", "rtmp://", "udp://"))
+        if is_network_input:
+            cmd.extend([
+                "-probesize", "5M",
+                "-analyzeduration", "5M",
+            ])
+
+        if url.lower().startswith("http://") or url.lower().startswith("https://"):
+            cmd.extend([
+                "-timeout", f"{int(timeout * 1000000)}",
+            ])
+
         cmd.extend([
             "-select_streams", "v:0",
             "-show_entries", "stream=codec_name",
             "-of", "default=noprint_wrappers=1:nokey=1",
         ])
+
         if ".m3u8" in url.lower():
             cmd.extend([
                 "-allowed_extensions", "ALL",
                 "-allowed_segment_extensions", "ALL",
                 "-extension_picky", "0",
             ])
+
         cmd.append(url)
 
         env = os.environ.copy()
@@ -254,14 +268,20 @@ def probe_source_codec(url: str, timeout: int = 8, proxy_url: Optional[str] = No
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            timeout=timeout,
+            timeout=timeout + 2,
             env=env,
         )
+
+        if res.returncode != 0:
+            err_msg = res.stderr.decode("utf-8", errors="replace").strip()
+            logger.warning(f"ffprobe returned code {res.returncode} for {url}: {err_msg}")
+
         codec = res.stdout.decode("utf-8", errors="replace").strip()
         # ffprobe may return one line per video track — take the first
         codec = codec.splitlines()[0].strip().lower() if codec else "unknown"
         return codec if codec else "unknown"
-    except Exception:
+    except Exception as e:
+        logger.warning(f"ffprobe execution error for {url}: {e}")
         return "unknown"
 
 
