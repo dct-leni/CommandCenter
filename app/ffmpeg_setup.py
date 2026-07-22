@@ -4,6 +4,7 @@ Binaries are expected in bin/ folder — run setup_binaries.bat once to download
 """
 
 import logging
+import os
 from pathlib import Path
 import subprocess
 
@@ -232,13 +233,15 @@ def probe_source_codec(url: str, timeout: int = 8, proxy_url: Optional[str] = No
                 cmd.extend(["-http_proxy", proxy_url])
 
         is_network_input = any(url.lower().startswith(proto) for proto in ("http://", "https://", "rtsp://", "rtmp://", "udp://"))
+        is_hls = ".m3u8" in url.lower()
+
         if is_network_input:
             cmd.extend([
                 "-probesize", "5M",
                 "-analyzeduration", "5M",
             ])
 
-        if url.lower().startswith("http://") or url.lower().startswith("https://"):
+        if (url.lower().startswith("http://") or url.lower().startswith("https://")) and not is_hls:
             cmd.extend([
                 "-timeout", f"{int(timeout * 1000000)}",
             ])
