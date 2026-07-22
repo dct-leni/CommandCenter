@@ -1479,15 +1479,33 @@ let _vpnState = {
     livestream: { content: '', name: '' },
 };
 
-function onVpnModeChange(scope) {
+function onVpnModeChange(scope, isUserChange = false) {
     const modeEl = document.getElementById(`${scope}-vpn-mode`);
     if (!modeEl) return;
     const mode = modeEl.value;
     const fileBox = document.getElementById(`${scope}-vpn-file-box`);
     const proxyBox = document.getElementById(`${scope}-proxy-box`);
+    const labelEl = document.getElementById(`${scope}-vpn-file-label`);
 
-    if (fileBox) fileBox.style.display = (mode === 'wireguard') ? 'block' : 'none';
+    if (fileBox) fileBox.style.display = (mode === 'wireguard' || mode === 'openvpn') ? 'block' : 'none';
     if (proxyBox) proxyBox.style.display = (mode === 'proxy') ? 'block' : 'none';
+    if (labelEl) {
+        labelEl.textContent = (mode === 'openvpn') ? 'OpenVPN Profile (.ovpn)' : 'WireGuard Profile (.conf)';
+    }
+
+    if (isUserChange) {
+        _vpnState[scope].content = '';
+        _vpnState[scope].name = '';
+        const nameEl = document.getElementById(`${scope}-vpn-file-name`);
+        if (nameEl) nameEl.textContent = 'No file selected';
+        const fileInput = document.getElementById(`${scope}-vpn-file-input`);
+        if (fileInput) fileInput.value = '';
+
+        if (mode !== 'proxy') {
+            const proxyInput = document.getElementById(`${scope}-proxy-url`);
+            if (proxyInput) proxyInput.value = '';
+        }
+    }
 }
 
 function onVpnFileSelected(event, scope) {
@@ -1524,8 +1542,9 @@ function closeGlobalVpnModal() {
 }
 
 function validateVpnSettings(mode, profileContent, proxyUrl) {
-    if (mode === 'wireguard' && (!profileContent || !profileContent.trim())) {
-        showToast('Please select a WireGuard profile (.conf) file before saving.', 'error');
+    if ((mode === 'wireguard' || mode === 'openvpn') && (!profileContent || !profileContent.trim())) {
+        const label = (mode === 'openvpn') ? 'OpenVPN profile (.ovpn)' : 'WireGuard profile (.conf)';
+        showToast(`Please select a valid ${label} file before saving.`, 'error');
         return false;
     }
     if (mode === 'proxy' && (!proxyUrl || !proxyUrl.trim())) {
@@ -1537,9 +1556,17 @@ function validateVpnSettings(mode, profileContent, proxyUrl) {
 
 async function submitGlobalVpn() {
     const mode = document.getElementById('global-vpn-mode').value;
-    const proxy_url = document.getElementById('global-proxy-url').value.trim();
-    const profile_name = _vpnState.global.name;
-    const profile_content = _vpnState.global.content;
+    let proxy_url = document.getElementById('global-proxy-url').value.trim();
+    let profile_name = _vpnState.global.name;
+    let profile_content = _vpnState.global.content;
+
+    if (mode !== 'wireguard' && mode !== 'openvpn') {
+        profile_name = '';
+        profile_content = '';
+    }
+    if (mode !== 'proxy') {
+        proxy_url = '';
+    }
 
     if (!validateVpnSettings(mode, profile_content, proxy_url)) {
         return;
@@ -1595,6 +1622,8 @@ function renderLiveStreams() {
         const vmode = item.vpn_mode || 'global';
         if (vmode === 'wireguard') {
             vpnBadge = `<span style="font-size: 11px; background: rgba(147, 51, 234, 0.15); color: #c084fc; border: 1px solid rgba(147, 51, 234, 0.3); padding: 2px 7px; border-radius: 4px; font-family: 'JetBrains Mono', monospace;"><i class="fa-solid fa-shield-halved"></i> WireGuard</span>`;
+        } else if (vmode === 'openvpn') {
+            vpnBadge = `<span style="font-size: 11px; background: rgba(234, 88, 12, 0.15); color: #fb923c; border: 1px solid rgba(234, 88, 12, 0.3); padding: 2px 7px; border-radius: 4px; font-family: 'JetBrains Mono', monospace;"><i class="fa-solid fa-lock"></i> OpenVPN</span>`;
         } else if (vmode === 'proxy') {
             vpnBadge = `<span style="font-size: 11px; background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); padding: 2px 7px; border-radius: 4px; font-family: 'JetBrains Mono', monospace;"><i class="fa-solid fa-network-wired"></i> Proxy</span>`;
         } else if (vmode === 'none') {
@@ -1650,6 +1679,7 @@ function openCreateLiveStreamModal() {
     document.getElementById('livestream-port').value = '1913';
     document.getElementById('livestream-vpn-mode').value = 'none';
     document.getElementById('livestream-proxy-url').value = '';
+    document.getElementById('livestream-headers').value = '';
     _vpnState.livestream = { content: '', name: '' };
     document.getElementById('livestream-vpn-file-name').textContent = 'No file selected';
     onVpnModeChange('livestream');
@@ -1667,6 +1697,7 @@ function openEditLiveStreamModal(streamId) {
     document.getElementById('livestream-port').value = item.port || 1913;
     document.getElementById('livestream-vpn-mode').value = item.vpn_mode || 'none';
     document.getElementById('livestream-proxy-url').value = item.proxy_url || '';
+    document.getElementById('livestream-headers').value = item.headers || '';
     _vpnState.livestream = { content: item.vpn_profile_content || '', name: item.vpn_profile_name || '' };
     document.getElementById('livestream-vpn-file-name').textContent = item.vpn_profile_name || 'No file selected';
     onVpnModeChange('livestream');
@@ -1684,9 +1715,18 @@ async function submitLiveStream() {
     const url = document.getElementById('livestream-url').value.trim();
     const port = parseInt(document.getElementById('livestream-port').value, 10);
     const vpn_mode = document.getElementById('livestream-vpn-mode').value;
-    const proxy_url = document.getElementById('livestream-proxy-url').value.trim();
-    const vpn_profile_name = _vpnState.livestream.name;
-    const vpn_profile_content = _vpnState.livestream.content;
+    let proxy_url = document.getElementById('livestream-proxy-url').value.trim();
+    const headers = document.getElementById('livestream-headers').value.trim();
+    let vpn_profile_name = _vpnState.livestream.name;
+    let vpn_profile_content = _vpnState.livestream.content;
+
+    if (vpn_mode !== 'wireguard' && vpn_mode !== 'openvpn') {
+        vpn_profile_name = '';
+        vpn_profile_content = '';
+    }
+    if (vpn_mode !== 'proxy') {
+        proxy_url = '';
+    }
 
     if (!name || !url || isNaN(port)) {
         showToast('Please enter valid Name, URL, and Port', 'error');
@@ -1699,7 +1739,7 @@ async function submitLiveStream() {
 
     try {
         const payload = {
-            name, url, port, vpn_mode, proxy_url, vpn_profile_name, vpn_profile_content
+            name, url, port, vpn_mode, proxy_url, vpn_profile_name, vpn_profile_content, headers
         };
         if (streamId) {
             await api('PUT', `/streamer/live_stream/${streamId}`, payload);

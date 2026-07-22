@@ -101,6 +101,7 @@ class LiveStreamManager:
             vpn_profile_name = item.get("vpn_profile_name", "")
             vpn_profile_content = item.get("vpn_profile_content", "")
             proxy_url = item.get("proxy_url", "")
+            headers = item.get("headers", "")
 
             if sid in self.active_relays:
                 relay = self.active_relays[sid]
@@ -132,6 +133,7 @@ class LiveStreamManager:
             d["vpn_profile_name"] = vpn_profile_name
             d["vpn_profile_content"] = vpn_profile_content
             d["proxy_url"] = proxy_url
+            d["headers"] = headers
             results.append(d)
         return results
 
@@ -394,11 +396,11 @@ class LiveStreamManager:
         cfg = load_config()
         stream_item = next((x for x in cfg.streamer.live_streams if x.get("id") == relay.id), {})
         proxy_url = vpn_manager.start_vpn_for_stream(relay.id, stream_item)
-
-        from app.ffmpeg_setup import probe_source_codec, get_relay_params, get_best_encoder, get_relay_encoding_params
+        headers = stream_item.get("headers", "")
+        from app.ffmpeg_setup import probe_source_codec, get_relay_params, get_best_encoder, get_relay_encoding_params, format_ffmpeg_headers
         logger.info(f"Probing source codec for '{relay.name}' at {relay.url} (proxy: {proxy_url or 'none'}) …")
         source_codec = await asyncio.get_event_loop().run_in_executor(
-            None, probe_source_codec, relay.url, 8, proxy_url
+            None, probe_source_codec, relay.url, 8, proxy_url, headers
         )
         if source_codec == "h264":
             video_params = get_relay_params()   # stream copy — 0 GPU
@@ -419,6 +421,10 @@ class LiveStreamManager:
                     else:
                         cmd.extend(["-http_proxy", proxy_url])
 
+                formatted_headers = format_ffmpeg_headers(headers, relay.url)
+                if formatted_headers and (relay.url.startswith("http://") or relay.url.startswith("https://")):
+                    cmd.extend(["-headers", formatted_headers])
+
                 # Detect HLS — URL ends with .m3u8 or contains /m3u8
                 is_hls = ".m3u8" in relay.url.lower()
 
@@ -437,12 +443,6 @@ class LiveStreamManager:
                     cmd.extend(["-rtsp_transport", "udp"])
 
                 if is_hls:
-                    # HLS-specific input flags:
-                    # -allowed_extensions ALL  — allow FFmpeg to follow m3u8 playlists
-                    # -allowed_segment_extensions ALL — allow segments with non-standard/no extensions
-                    # -extension_picky 0       — disable strict extension/format matching for security bypass
-                    # -timeout                 — applies to each individual HTTP request
-                    # Do NOT use -reconnect_streamed here — it conflicts with HLS demuxer
                     cmd.extend([
                         "-allowed_extensions", "ALL",
                         "-allowed_segment_extensions", "ALL",
@@ -463,7 +463,7 @@ class LiveStreamManager:
                     cmd.extend(["-rw_timeout", "5000000"])
                 elif not is_network_input:
                     # Local file input
-                    cmd.append("-re")
+                    cmd.extend(["-re", "-stream_loop", "-1"])
 
                 cmd.extend(["-i", relay.url])
 

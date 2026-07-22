@@ -214,7 +214,46 @@ def get_encoding_params(encoder: str, source_bitrate: Optional[int] = None) -> l
         return ["-c:v", "copy"]
 
 
-def probe_source_codec(url: str, timeout: int = 8, proxy_url: Optional[str] = None) -> str:
+def format_ffmpeg_headers(headers_str: Optional[str], url: str) -> str:
+    """Format custom headers or auto-generate User-Agent/Referer/Origin for FFmpeg/ffprobe."""
+    lines = []
+    has_ua = False
+    has_ref = False
+    has_origin = False
+
+    if headers_str:
+        for line in headers_str.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            lines.append(line)
+            lower = line.lower()
+            if lower.startswith("user-agent:"):
+                has_ua = True
+            elif lower.startswith("referer:"):
+                has_ref = True
+            elif lower.startswith("origin:"):
+                has_origin = True
+
+    if not has_ua:
+        lines.append("User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36")
+
+    if (url.startswith("http://") or url.startswith("https://")) and (not has_ref or not has_origin):
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            base_url = f"{parsed.scheme}://{parsed.netloc}/"
+            if not has_ref:
+                lines.append(f"Referer: {base_url}")
+            if not has_origin:
+                lines.append(f"Origin: {parsed.scheme}://{parsed.netloc}")
+        except Exception:
+            pass
+
+    return "\r\n".join(lines) + "\r\n"
+
+
+def probe_source_codec(url: str, timeout: int = 8, proxy_url: Optional[str] = None, headers: Optional[str] = None) -> str:
     """
     Probe the video codec of a stream URL using ffprobe.
     Returns a lowercase codec name, e.g. 'h264', 'hevc', 'mpeg2video', or 'unknown'.
@@ -231,6 +270,10 @@ def probe_source_codec(url: str, timeout: int = 8, proxy_url: Optional[str] = No
                 cmd.extend(["-socks_proxy", proxy_url])
             else:
                 cmd.extend(["-http_proxy", proxy_url])
+
+        formatted_headers = format_ffmpeg_headers(headers, url)
+        if formatted_headers and (url.lower().startswith("http://") or url.lower().startswith("https://")):
+            cmd.extend(["-headers", formatted_headers])
 
         is_network_input = any(url.lower().startswith(proto) for proto in ("http://", "https://", "rtsp://", "rtmp://", "udp://"))
         is_hls = ".m3u8" in url.lower()
@@ -252,7 +295,7 @@ def probe_source_codec(url: str, timeout: int = 8, proxy_url: Optional[str] = No
             "-of", "default=noprint_wrappers=1:nokey=1",
         ])
 
-        if ".m3u8" in url.lower():
+        if is_hls:
             cmd.extend([
                 "-allowed_extensions", "ALL",
                 "-allowed_segment_extensions", "ALL",

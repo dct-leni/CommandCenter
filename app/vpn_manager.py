@@ -168,9 +168,58 @@ class VPNManager:
                 return None
 
         if mode == "openvpn":
-            # For custom OpenVPN or direct proxy profiles
+            content = eff.get("profile_content", "").strip()
             proxy_url = eff.get("proxy_url", "").strip()
-            if proxy_url:
+
+            if content:
+                proxy_port = self._allocate_port()
+                temp_ovpn = TEMP_VPN_DIR / f"ovpn_{stream_id}_{proxy_port}.ovpn"
+                temp_ovpn.write_text(content, encoding="utf-8")
+
+                openvpn_bin = BIN_DIR / ("openvpn.exe" if os.name == "nt" else "openvpn")
+                if not openvpn_bin.exists():
+                    possible_paths = [
+                        Path("C:/Program Files/OpenVPN/bin/openvpn.exe"),
+                        Path("C:/Program Files (x86)/OpenVPN/bin/openvpn.exe"),
+                        Path("C:/Program Files/OpenVPN Connect/openvpn.exe"),
+                        Path("C:/Program Files/OpenVPN Connect/ovpncli.exe"),
+                        Path.home() / "AppData/Local/Programs/OpenVPN/bin/openvpn.exe",
+                    ]
+                    for p in possible_paths:
+                        if p.exists():
+                            openvpn_bin = p
+                            break
+                    if not openvpn_bin.exists():
+                        in_path = shutil.which("openvpn") or shutil.which("openvpn.exe")
+                        if in_path:
+                            openvpn_bin = Path(in_path)
+
+                if not openvpn_bin.exists():
+                    logger.warning("openvpn.exe binary not found in bin/ or system OpenVPN install directory. Using direct/proxy mode.")
+                    temp_ovpn.unlink(missing_ok=True)
+                    if proxy_url:
+                        vpn_proc = VPNProcess(stream_id=stream_id, mode="openvpn", proxy_url=proxy_url)
+                        self._active_vpns[stream_id] = vpn_proc
+                        return proxy_url
+                    return None
+
+                try:
+                    cmd = [str(openvpn_bin), "--config", str(temp_ovpn), "--route-nopull"]
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                    )
+                    vpn_proc = VPNProcess(stream_id=stream_id, mode="openvpn", proxy_url=proxy_url, process=proc, temp_file=temp_ovpn)
+                    self._active_vpns[stream_id] = vpn_proc
+                    logger.info(f"Started OpenVPN process for stream '{stream_id}' using configuration {temp_ovpn.name}")
+                    return proxy_url if proxy_url else None
+                except Exception as e:
+                    logger.error(f"Failed to launch openvpn for stream {stream_id}: {e}")
+                    temp_ovpn.unlink(missing_ok=True)
+                    return None
+            elif proxy_url:
                 vpn_proc = VPNProcess(stream_id=stream_id, mode="openvpn", proxy_url=proxy_url)
                 self._active_vpns[stream_id] = vpn_proc
                 return proxy_url

@@ -131,6 +131,7 @@ class LiveStreamCreateRequest(BaseModel):
     vpn_profile_name: Optional[str] = None
     vpn_profile_content: Optional[str] = None
     proxy_url: Optional[str] = None
+    headers: Optional[str] = None
 
 
 class LiveStreamUpdateRequest(BaseModel):
@@ -142,6 +143,7 @@ class LiveStreamUpdateRequest(BaseModel):
     vpn_profile_name: Optional[str] = None
     vpn_profile_content: Optional[str] = None
     proxy_url: Optional[str] = None
+    headers: Optional[str] = None
 
 
 class GlobalVPNUpdateRequest(BaseModel):
@@ -733,16 +735,27 @@ async def live_stream_thumbnail(stream_id: str):
 
 
 def validate_vpn_payload(mode: str, profile_content: str, proxy_url: str):
-    if mode == "wireguard" and not (profile_content and profile_content.strip()):
+    if mode in ("wireguard", "openvpn") and not (profile_content and profile_content.strip()):
+        label = "OpenVPN (.ovpn)" if mode == "openvpn" else "WireGuard (.conf)"
         raise HTTPException(
             status_code=400,
-            detail="WireGuard mode requires a valid .conf profile file."
+            detail=f"{label} mode requires a valid profile file."
         )
     if mode == "proxy" and not (proxy_url and proxy_url.strip()):
         raise HTTPException(
             status_code=400,
             detail="Proxy mode requires a valid Proxy URL (e.g. socks5://127.0.0.1:1080)."
         )
+
+
+def sanitize_vpn_data(mode: str, name: str, content: str, proxy: str):
+    """Ensure that profile name/content and proxy URL are cleared when mode changes to a mode that doesn't use them."""
+    if mode not in ("wireguard", "openvpn"):
+        name = ""
+        content = ""
+    if mode != "proxy":
+        proxy = ""
+    return name, content, proxy
 
 
 @app.get("/api/vpn/global")
@@ -755,12 +768,18 @@ async def get_global_vpn():
 @app.put("/api/vpn/global")
 async def update_global_vpn(body: GlobalVPNUpdateRequest):
     """Update global VPN configuration."""
-    validate_vpn_payload(body.mode, body.profile_content or "", body.proxy_url or "")
+    p_name, p_content, p_proxy = sanitize_vpn_data(
+        body.mode,
+        body.profile_name or "",
+        body.profile_content or "",
+        body.proxy_url or ""
+    )
+    validate_vpn_payload(body.mode, p_content, p_proxy)
     new_vpn = {
         "mode": body.mode,
-        "profile_name": body.profile_name or "",
-        "profile_content": body.profile_content or "",
-        "proxy_url": body.proxy_url or "",
+        "profile_name": p_name,
+        "profile_content": p_content,
+        "proxy_url": p_proxy,
     }
     update_config({"streamer": {"global_vpn": new_vpn}})
     return {"status": "success", "global_vpn": new_vpn}
@@ -772,7 +791,13 @@ async def create_live_stream(body: LiveStreamCreateRequest):
     import uuid
     cfg = load_config()
     check_port_conflict(body.port, cfg)
-    validate_vpn_payload(body.vpn_mode, body.vpn_profile_content or "", body.proxy_url or "")
+    p_name, p_content, p_proxy = sanitize_vpn_data(
+        body.vpn_mode,
+        body.vpn_profile_name or "",
+        body.vpn_profile_content or "",
+        body.proxy_url or ""
+    )
+    validate_vpn_payload(body.vpn_mode, p_content, p_proxy)
     stream_id = f"live_{uuid.uuid4().hex[:8]}"
     new_item = {
         "id": stream_id,
@@ -781,9 +806,10 @@ async def create_live_stream(body: LiveStreamCreateRequest):
         "port": body.port,
         "auto_start": body.auto_start,
         "vpn_mode": body.vpn_mode,
-        "vpn_profile_name": body.vpn_profile_name or "",
-        "vpn_profile_content": body.vpn_profile_content or "",
-        "proxy_url": body.proxy_url or "",
+        "vpn_profile_name": p_name,
+        "vpn_profile_content": p_content,
+        "proxy_url": p_proxy,
+        "headers": body.headers or "",
     }
     cfg.streamer.live_streams.append(new_item)
     update_config({"streamer": {"live_streams": cfg.streamer.live_streams}})
@@ -799,9 +825,12 @@ async def update_live_stream(stream_id: str, body: LiveStreamUpdateRequest):
     for item in cfg.streamer.live_streams:
         if item.get("id") == stream_id:
             target_mode = body.vpn_mode if body.vpn_mode is not None else item.get("vpn_mode", "none")
+            target_name = body.vpn_profile_name if body.vpn_profile_name is not None else item.get("vpn_profile_name", "")
             target_content = body.vpn_profile_content if body.vpn_profile_content is not None else item.get("vpn_profile_content", "")
             target_proxy = body.proxy_url if body.proxy_url is not None else item.get("proxy_url", "")
-            validate_vpn_payload(target_mode, target_content, target_proxy)
+
+            p_name, p_content, p_proxy = sanitize_vpn_data(target_mode, target_name, target_content, target_proxy)
+            validate_vpn_payload(target_mode, p_content, p_proxy)
 
             if body.name is not None:
                 item["name"] = body.name
@@ -811,14 +840,14 @@ async def update_live_stream(stream_id: str, body: LiveStreamUpdateRequest):
                 item["port"] = body.port
             if body.auto_start is not None:
                 item["auto_start"] = body.auto_start
-            if body.vpn_mode is not None:
-                item["vpn_mode"] = body.vpn_mode
-            if body.vpn_profile_name is not None:
-                item["vpn_profile_name"] = body.vpn_profile_name
-            if body.vpn_profile_content is not None:
-                item["vpn_profile_content"] = body.vpn_profile_content
-            if body.proxy_url is not None:
-                item["proxy_url"] = body.proxy_url
+
+            item["vpn_mode"] = target_mode
+            item["vpn_profile_name"] = p_name
+            item["vpn_profile_content"] = p_content
+            item["proxy_url"] = p_proxy
+
+            if body.headers is not None:
+                item["headers"] = body.headers
             update_config({"streamer": {"live_streams": cfg.streamer.live_streams}})
             return {"status": "success", "live_stream": item}
     raise HTTPException(status_code=404, detail="Live stream not found")

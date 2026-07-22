@@ -4,12 +4,12 @@ echo   CommandCenter - Setup Prerequisites
 echo ============================================
 echo.
 echo This script installs Python 3.14 (if missing) and downloads
-echo portable binaries to the bin\ folder.
+echo portable binaries (FFmpeg, MediaMTX, WireGuard, OpenVPN) to bin\.
 echo Run this ONCE before using the app.
 echo.
 
 REM ---- Python 3.10+ ----
-echo [0/2] Checking for Python 3.10 or newer...
+echo [0/4] Checking for Python 3.10 or newer...
 python -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" 2>nul
 if %ERRORLEVEL% equ 0 (
     echo [OK] Python 3.10 or newer is already installed.
@@ -42,7 +42,7 @@ if exist "%BIN_DIR%\ffmpeg.exe" if exist "%BIN_DIR%\ffprobe.exe" (
 if exist "%BIN_DIR%\ffmpeg.exe" (
     echo [INFO] FFmpeg found but FFprobe is missing. Re-downloading to get ffprobe.exe...
 ) else (
-    echo [1/2] Downloading FFmpeg...
+    echo [1/4] Downloading FFmpeg...
 )
 
 powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '%FFMPEG_URL%' -OutFile '%FFMPEG_ZIP%' -UseBasicParsing }"
@@ -74,14 +74,14 @@ REM ---- MediaMTX ----
 if exist "%BIN_DIR%\mediamtx.exe" (
     echo [OK] MediaMTX already exists, skipping.
 ) else (
-    echo [2/2] Downloading MediaMTX...
+    echo [2/4] Downloading MediaMTX...
 
     REM Download MediaMTX v1.19.2 release directly
     powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://github.com/bluenviron/mediamtx/releases/download/v1.19.2/mediamtx_v1.19.2_windows_amd64.zip' -OutFile '%BIN_DIR%\mediamtx.zip' -UseBasicParsing }"
 
     if not exist "%BIN_DIR%\mediamtx.zip" (
         echo [ERROR] Failed to download MediaMTX. Check your internet connection.
-        goto :done
+        goto :wireguard
     )
 
     echo         Extracting MediaMTX...
@@ -94,6 +94,45 @@ if exist "%BIN_DIR%\mediamtx.exe" (
     ) else (
         echo [ERROR] MediaMTX extraction failed.
     )
+)
+
+:wireguard
+REM ---- WireGuard Proxy ----
+if exist "%BIN_DIR%\wireproxy.exe" (
+    echo [OK] WireGuard proxy wireproxy.exe already exists in bin\, skipping.
+) else (
+    echo [3/4] Downloading WireGuard proxy wireproxy...
+    powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://github.com/windtf/wireproxy/releases/download/v1.1.3/wireproxy_windows_amd64.tar.gz' -OutFile '%BIN_DIR%\wireproxy.tar.gz' -UseBasicParsing; tar -xzf '%BIN_DIR%\wireproxy.tar.gz' -C '%BIN_DIR%'; Remove-Item '%BIN_DIR%\wireproxy.tar.gz' -ErrorAction SilentlyContinue }"
+
+    if exist "%BIN_DIR%\wireproxy.exe" (
+        echo [OK] WireGuard proxy wireproxy.exe installed successfully in bin\.
+    ) else (
+        echo [WARNING] Failed to download wireproxy.exe.
+    )
+)
+
+:openvpn
+REM ---- OpenVPN via Winget ----
+if exist "%BIN_DIR%\openvpn.exe" (
+    echo [OK] OpenVPN openvpn.exe already exists in bin\, skipping.
+    goto :done
+)
+if exist "C:\Program Files\OpenVPN\bin\openvpn.exe" (
+    echo [OK] OpenVPN found in C:\Program Files\OpenVPN\bin\.
+    goto :done
+)
+where openvpn >nul 2>nul
+if %ERRORLEVEL% equ 0 (
+    echo [OK] OpenVPN is installed on system PATH.
+    goto :done
+)
+
+echo [4/4] Installing latest OpenVPN via winget...
+winget install -e --id OpenVPNTechnologies.OpenVPN --accept-package-agreements --accept-source-agreements
+if %ERRORLEVEL% equ 0 (
+    echo [OK] OpenVPN installed successfully via winget.
+) else (
+    echo [WARNING] OpenVPN winget installation failed or was skipped.
 )
 
 :done

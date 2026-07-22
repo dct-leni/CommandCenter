@@ -278,24 +278,29 @@
                 </div>
                 <div style="border-top: 1px solid var(--border); padding-top: 12px; margin-top: 4px;">
                     <label style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">VPN / Proxy Ingestion</label>
-                    <select id="livestream-vpn-mode" onchange="onVpnModeChange('livestream')" style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 13px;">
+                    <select id="livestream-vpn-mode" onchange="onVpnModeChange('livestream', true)" style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 13px;">
                         <option value="none">Direct Connection (Default - No VPN)</option>
                         <option value="global">Use Global VPN Config</option>
                         <option value="wireguard">WireGuard Profile (.conf)</option>
+                        <option value="openvpn">OpenVPN Profile (.ovpn)</option>
                         <option value="proxy">Custom Proxy (SOCKS5 / HTTP)</option>
                     </select>
                 </div>
                 <div id="livestream-vpn-file-box" style="display: none;">
-                    <label style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">WireGuard Profile (.conf)</label>
+                    <label id="livestream-vpn-file-label" style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">VPN Profile (.conf / .ovpn)</label>
                     <div style="display: flex; gap: 8px; align-items: center;">
                         <button class="btn btn-secondary" onclick="document.getElementById('livestream-vpn-file-input').click()" style="font-size: 12px;">Browse Profile…</button>
                         <span id="livestream-vpn-file-name" style="font-size: 12px; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace;">No file selected</span>
-                        <input type="file" id="livestream-vpn-file-input" accept=".conf,.txt" style="display: none;" onchange="onVpnFileSelected(event, 'livestream')">
+                        <input type="file" id="livestream-vpn-file-input" accept=".conf,.ovpn,.txt" style="display: none;" onchange="onVpnFileSelected(event, 'livestream')">
                     </div>
                 </div>
                 <div id="livestream-proxy-box" style="display: none;">
                     <label style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Proxy URL</label>
                     <input type="text" id="livestream-proxy-url" placeholder="socks5://127.0.0.1:1080 or http://proxy:8080" style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
+                </div>
+                <div>
+                    <label style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Custom HTTP Headers (Optional)</label>
+                    <textarea id="livestream-headers" placeholder="Referer: https://www.exxen.com/&#10;User-Agent: Mozilla/5.0..." rows="2" style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 12px; resize: vertical;"></textarea>
                 </div>
             </div>
             <div class="modal-footer" style="padding: 12px 16px; display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--border);">
@@ -318,18 +323,19 @@
                 </p>
                 <div>
                     <label style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Global VPN Mode</label>
-                    <select id="global-vpn-mode" onchange="onVpnModeChange('global')" style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 13px;">
+                    <select id="global-vpn-mode" onchange="onVpnModeChange('global', true)" style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 13px;">
                         <option value="none">Direct Connection (No VPN)</option>
                         <option value="wireguard">WireGuard Profile (.conf)</option>
+                        <option value="openvpn">OpenVPN Profile (.ovpn)</option>
                         <option value="proxy">Custom Proxy (SOCKS5 / HTTP)</option>
                     </select>
                 </div>
                 <div id="global-vpn-file-box" style="display: none;">
-                    <label style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">WireGuard Profile (.conf)</label>
+                    <label id="global-vpn-file-label" style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">VPN Profile (.conf / .ovpn)</label>
                     <div style="display: flex; gap: 8px; align-items: center;">
                         <button class="btn btn-secondary" onclick="document.getElementById('global-vpn-file-input').click()" style="font-size: 12px;">Browse Profile…</button>
                         <span id="global-vpn-file-name" style="font-size: 12px; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace;">No file selected</span>
-                        <input type="file" id="global-vpn-file-input" accept=".conf,.txt" style="display: none;" onchange="onVpnFileSelected(event, 'global')">
+                        <input type="file" id="global-vpn-file-input" accept=".conf,.ovpn,.txt" style="display: none;" onchange="onVpnFileSelected(event, 'global')">
                     </div>
                 </div>
                 <div id="global-proxy-box" style="display: none;">
