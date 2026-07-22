@@ -563,15 +563,22 @@ class Converter:
         if target_size:
             scale_args = ["-vf", f"scale={target_size[0]}:{target_size[1]}"]
  
-        source_bitrate = info.metadata.get("bitrate", 0) if info.metadata else 0
+        meta = info.metadata or {}
+        video_bitrate = meta.get("video_bitrate", 0) or meta.get("bitrate", 0)
+        audio_bitrate = meta.get("audio_bitrate", 0)
+
+        # Match audio bitrate if original is < 256k
+        audio_b_str = "256k"
+        if audio_bitrate and 0 < audio_bitrate < 256000:
+            audio_b_str = f"{max(96, int(audio_bitrate / 1000))}k"
 
         if strategy == "hardware":
             from app.ffmpeg_setup import get_best_encoder, get_encoding_params
             best_encoder = get_best_encoder()
-            hw_args = get_encoding_params(best_encoder, source_bitrate=source_bitrate)
+            hw_args = get_encoding_params(best_encoder, source_bitrate=video_bitrate)
             cmd = base_cmd + map_args + scale_args + hw_args + [
                 "-c:a", "aac",
-                "-b:a", "256k",            # High quality stereo audio
+                "-b:a", audio_b_str,
                 "-ac", "2",                # Force stereo
                 "-bsf:v", "dump_extra",    # Repeat SPS/PPS headers before keyframes
                 "-f", "mpegts",
@@ -580,10 +587,10 @@ class Converter:
         else:
             # CPU Fallback (libx264)
             from app.ffmpeg_setup import get_encoding_params
-            cpu_args = get_encoding_params("libx264", source_bitrate=source_bitrate)
+            cpu_args = get_encoding_params("libx264", source_bitrate=video_bitrate)
             cmd = base_cmd + map_args + scale_args + cpu_args + [
                 "-c:a", "aac",
-                "-b:a", "256k",
+                "-b:a", audio_b_str,
                 "-ac", "2",
                 "-bsf:v", "dump_extra",    # Repeat SPS/PPS headers before keyframes
                 "-f", "mpegts",

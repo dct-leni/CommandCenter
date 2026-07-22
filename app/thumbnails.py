@@ -181,11 +181,20 @@ def get_video_metadata(video_path: str) -> dict:
             data = json.loads(result.stdout)
             fmt = data.get("format", {})
             video_stream = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), {})
+            audio_stream = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), {})
+
+            total_bitrate = int(fmt.get("bit_rate", 0))
+            a_bitrate = int(audio_stream.get("bit_rate", 0)) or 128000
+            v_bitrate = int(video_stream.get("bit_rate", 0))
+            if not v_bitrate and total_bitrate:
+                v_bitrate = max(0, total_bitrate - a_bitrate)
 
             meta = {
                 "duration": float(fmt.get("duration", 0)),
                 "size": int(fmt.get("size", 0)),
-                "bitrate": int(fmt.get("bit_rate", 0)),
+                "bitrate": total_bitrate,
+                "video_bitrate": v_bitrate,
+                "audio_bitrate": a_bitrate,
                 "codec": video_stream.get("codec_name", "unknown"),
                 "width": int(video_stream.get("width", 0)),
                 "height": int(video_stream.get("height", 0)),

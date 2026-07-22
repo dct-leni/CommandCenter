@@ -79,7 +79,7 @@ To prevent breaking the application, any AI or developer modifying this codebase
 
 ### 3. Encoder Settings & Adaptive Bitrate Capping
 * **Rule**: Define all video transcoding parameters in a single, central place (`app/ffmpeg_setup.py` -> `get_encoding_params`).
-* **Adaptive Bitrate Capping**: If `source_bitrate < 2.8 Mbps`, `get_encoding_params()` caps target bitrate to `125% * source_bitrate` (min 500k floor) to prevent small/SD input files from inflating in size. High-bitrate/HD files remain capped at `2.8 Mbps` target.
+* **Adaptive Bitrate Capping**: If `source_bitrate < 2.8 Mbps`, `get_encoding_params()` matches `source_bitrate` 1:1 (min 300k floor) to keep converted file sizes identical to the original input. High-bitrate/HD files remain capped at `2.8 Mbps` target.
 * **Tuning Details**:
   * **NVENC**: Preset `p6`, spatial-aq, temporal-aq, GOP `60`.
   * **QSV**: Preset `medium`, lookahead enabled, GOP `60`.

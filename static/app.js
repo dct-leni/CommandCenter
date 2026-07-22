@@ -18,6 +18,7 @@ const state = {
     expandedFolders: new Set(),
     pollingInterval: null,
     liveStreams: [],
+    draggedSlotFile: null,
 };
 
 // ──────────────────────────────────────────────
@@ -98,12 +99,22 @@ async function updateConfigSetting(updates, rescan = false) {
 
 function formatMetaBadge(meta) {
     if (!meta || meta.error) return '';
+
+    let bitrateStr = '';
+    if (meta.video_bitrate || meta.audio_bitrate) {
+        const vBit = meta.video_bitrate ? `V: ${formatBitrate(meta.video_bitrate)}` : '';
+        const aBit = meta.audio_bitrate ? `A: ${formatBitrate(meta.audio_bitrate)}` : '';
+        bitrateStr = [vBit, aBit].filter(Boolean).join(' · ');
+    } else if (meta.bitrate) {
+        bitrateStr = formatBitrate(meta.bitrate);
+    }
+
     const parts = [
         meta.duration ? formatDuration(meta.duration) : '',
         meta.width && meta.height ? `${meta.width}×${meta.height}` : '',
         meta.codec && meta.codec !== 'unknown' ? meta.codec.toUpperCase() : '',
         meta.fps ? `${Math.round(meta.fps)}fps` : '',
-        formatBitrate(meta.bitrate)
+        bitrateStr
     ].filter(Boolean);
     return parts.join(' · ');
 }
@@ -636,7 +647,7 @@ function renderFolderFiles(folder) {
             const thumbHtml = getThumbHtml(thumbSrc, detail.has_thumbnail, 'slot-file-thumb');
 
             return `
-                <div class="slot-file-entry ${isCurrent ? 'is-playing' : ''}" draggable="true" ondragstart="handleDragStart(event, '${escapeAttr(fname)}')">
+                <div class="slot-file-entry ${isCurrent ? 'is-playing' : ''}" draggable="true" ondragstart="handleSlotFileDragStart(event, '${escapeAttr(folder.name)}', ${port}, '${escapeAttr(fname)}')" ondragend="handleSlotFileDragEnd(event)">
                     ${thumbHtml}
                     <div class="slot-file-info">
                         <span class="slot-file-name" title="${escapeHtml(fname)}">${escapeHtml(fname)}</span>
@@ -782,7 +793,7 @@ async function addFileToSlot(folderName, port, filename) {
 }
 
 async function removeFileFromSlot(event, folderName, port, filename) {
-    event.stopPropagation();
+    if (event && event.stopPropagation) event.stopPropagation();
     showLoadingOverlay('Removing Video from Slot...', `Moving '${filename}' back to converter input if unused...`);
     try {
         await api('DELETE', `/streamer/folder/${encodeURIComponent(folderName)}/slot/file`, { port, filename });
@@ -1118,21 +1129,26 @@ function initConverterDropZone() {
 
     panel.addEventListener('dragenter', (e) => {
         e.preventDefault();
-        // Only respond to actual file drags, not element drags (e.g. slot cards)
-        if (!e.dataTransfer.types.includes('Files')) return;
         dragDepth++;
+        const inner = overlay.querySelector('.drop-zone-inner');
+        if (state.draggedSlotFile) {
+            if (inner) inner.innerHTML = '<i class="fa-solid fa-rotate-left"></i><span>Drop to return video to Input folder</span>';
+        } else {
+            if (inner) inner.innerHTML = '<i class="fa-solid fa-cloud-arrow-up"></i><span>Drop video files here</span>';
+        }
         overlay.classList.add('active');
     });
 
     panel.addEventListener('dragover', (e) => {
         e.preventDefault();
-        if (e.dataTransfer.types.includes('Files')) {
+        if (state.draggedSlotFile) {
+            e.dataTransfer.dropEffect = 'move';
+        } else {
             e.dataTransfer.dropEffect = 'copy';
         }
     });
 
     panel.addEventListener('dragleave', (e) => {
-        if (!e.dataTransfer.types.includes('Files')) return;
         dragDepth--;
         if (dragDepth <= 0) {
             dragDepth = 0;
@@ -1144,6 +1160,14 @@ function initConverterDropZone() {
         e.preventDefault();
         dragDepth = 0;
         overlay.classList.remove('active');
+
+        // Check if a streamer slot file was dropped back onto converter panel
+        if (state.draggedSlotFile) {
+            const slotItem = { ...state.draggedSlotFile };
+            state.draggedSlotFile = null;
+            await removeFileFromSlot(null, slotItem.folder, slotItem.port, slotItem.filename);
+            return;
+        }
 
         if (!e.dataTransfer.types.includes('Files')) return;
 
@@ -1296,6 +1320,16 @@ function handleDragStart(e, filename) {
     e.dataTransfer.effectAllowed = 'move';
 }
 
+function handleSlotFileDragStart(e, folderName, port, filename) {
+    state.draggedSlotFile = { folder: folderName, port: port, filename: filename };
+    e.dataTransfer.setData('text/plain', filename);
+    e.dataTransfer.effectAllowed = 'move';
+}
+
+function handleSlotFileDragEnd(e) {
+    setTimeout(() => { state.draggedSlotFile = null; }, 100);
+}
+
 function handleDragOver(e) {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
@@ -1421,7 +1455,8 @@ window.copyToClipboard = copyToClipboard;
 window.openAddFileModal = openAddFileModal;
 window.addFileToSlot = addFileToSlot;
 window.removeFileFromSlot = removeFileFromSlot;
-window.generateEpg = generateEpg;
+window.handleSlotFileDragStart = handleSlotFileDragStart;
+window.handleSlotFileDragEnd = handleSlotFileDragEnd;
 window.deleteFolder = deleteFolder;
 window.moveFileInSlot = moveFileInSlot;
 

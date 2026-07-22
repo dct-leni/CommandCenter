@@ -162,10 +162,11 @@ def get_encoding_params(encoder: str, source_bitrate: Optional[int] = None) -> l
     buf_b_bps    = 6_400_000   # 6.4 Mbps default
 
     if source_bitrate and 0 < source_bitrate < target_b_bps:
-        # Cap target bitrate at 125% of source bitrate (min 500k to prevent ultra-low compression artifacts)
-        target_b_bps = max(500_000, int(source_bitrate * 1.25))
-        max_b_bps    = int(target_b_bps * 1.2)
+        # Match source bitrate 1:1 to preserve original file size without padding useless data
+        target_b_bps = max(300_000, source_bitrate)
+        max_b_bps    = int(target_b_bps * 1.1)
         buf_b_bps    = max_b_bps * 2
+
 
     def _format_rate(rate_bps: int) -> str:
         if rate_bps % 1_000_000 == 0:
