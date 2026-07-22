@@ -387,7 +387,7 @@ async def converter_move(body: MoveFileRequest):
     
     import shutil
     try:
-        shutil.move(str(source_path), str(target_path))
+        await asyncio.to_thread(shutil.move, str(source_path), str(target_path))
         # Update converter state
         converter.scan_folder(converter.source_folder)
         # Update streamer state

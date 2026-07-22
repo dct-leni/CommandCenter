@@ -13,18 +13,27 @@ BIN_DIR = Path(__file__).parent.parent / "bin"
 FFMPEG_EXE = BIN_DIR / "ffmpeg.exe"
 FFPROBE_EXE = BIN_DIR / "ffprobe.exe"
 MEDIAMTX_EXE = BIN_DIR / "mediamtx.exe"
-
+_FFMPEG_INSTALLED = None
+_MEDIAMTX_INSTALLED = None
 _NVENC_AVAILABLE = None
+
 
 
 def is_ffmpeg_installed() -> bool:
     """Check if portable FFmpeg is available in bin/."""
-    return FFMPEG_EXE.exists() and FFPROBE_EXE.exists()
+    global _FFMPEG_INSTALLED
+    if _FFMPEG_INSTALLED is None:
+        _FFMPEG_INSTALLED = FFMPEG_EXE.exists() and FFPROBE_EXE.exists()
+    return _FFMPEG_INSTALLED
 
 
 def is_mediamtx_installed() -> bool:
     """Check if portable MediaMTX is available in bin/."""
-    return MEDIAMTX_EXE.exists()
+    global _MEDIAMTX_INSTALLED
+    if _MEDIAMTX_INSTALLED is None:
+        _MEDIAMTX_INSTALLED = MEDIAMTX_EXE.exists()
+    return _MEDIAMTX_INSTALLED
+
 
 
 def is_nvenc_available() -> bool:
@@ -142,30 +151,50 @@ def get_binaries_status() -> dict:
     }
 
 
-def get_encoding_params(encoder: str) -> list:
+def get_encoding_params(encoder: str, source_bitrate: Optional[int] = None) -> list:
     """
-    Return the optimized, unified encoding parameters for both local converter and live relay.
-    Limits peak network usage while preserving high visual quality.
+    Return the optimized encoding parameters for local converter.
+    If source_bitrate is provided and lower than 2.8 Mbps, cap target & max bitrate
+    proportionally to prevent low-bitrate input files from inflating in size.
     """
+    target_b_bps = 2_800_000   # 2.8 Mbps default
+    max_b_bps    = 3_200_000   # 3.2 Mbps default
+    buf_b_bps    = 6_400_000   # 6.4 Mbps default
+
+    if source_bitrate and 0 < source_bitrate < target_b_bps:
+        # Cap target bitrate at 125% of source bitrate (min 500k to prevent ultra-low compression artifacts)
+        target_b_bps = max(500_000, int(source_bitrate * 1.25))
+        max_b_bps    = int(target_b_bps * 1.2)
+        buf_b_bps    = max_b_bps * 2
+
+    def _format_rate(rate_bps: int) -> str:
+        if rate_bps % 1_000_000 == 0:
+            return f"{rate_bps // 1_000_000}M"
+        return f"{int(rate_bps / 1000)}k"
+
+    target_b_str = _format_rate(target_b_bps)
+    max_b_str    = _format_rate(max_b_bps)
+    buf_b_str    = _format_rate(buf_b_bps)
+
     if encoder == "h264_nvenc":
         return [
             "-c:v", "h264_nvenc",
             "-preset", "p6",             # High-quality preset
             "-profile:v", "high",
-            "-b:v", "2.8M",              # Target ~2.8 Mbps video bitrate
-            "-maxrate", "3.2M",          # Protect network / bandwidth spikes
-            "-bufsize", "6.4M",          # VBR buffer
+            "-b:v", target_b_str,
+            "-maxrate", max_b_str,
+            "-bufsize", buf_b_str,
             "-spatial-aq", "1",          # Optimize dark scene details
             "-temporal-aq", "1",         # Smooth out fast motion pixels
-            "-g", "60",                  # 2s keyframe interval (vital for streaming loops)
+            "-g", "60",                  # 2s keyframe interval
         ]
     elif encoder == "h264_qsv":
         return [
             "-c:v", "h264_qsv",
             "-preset", "medium",
-            "-b:v", "2.8M",
-            "-maxrate", "3.2M",
-            "-bufsize", "6.4M",
+            "-b:v", target_b_str,
+            "-maxrate", max_b_str,
+            "-bufsize", buf_b_str,
             "-look_ahead", "1",          # Enable lookahead to smooth out motion
             "-look_ahead_depth", "15",
             "-g", "60",
@@ -174,9 +203,9 @@ def get_encoding_params(encoder: str) -> list:
         return [
             "-c:v", "libx264",
             "-preset", "medium",
-            "-crf", "21",                # Visually lossless rate-control
-            "-maxrate", "3.2M",
-            "-bufsize", "6.4M",
+            "-b:v", target_b_str,
+            "-maxrate", max_b_str,
+            "-bufsize", buf_b_str,
             "-g", "60",
         ]
     else:

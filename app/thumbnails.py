@@ -58,9 +58,10 @@ def get_thumbnail_path(video_path: str) -> Path:
     return THUMBNAILS_DIR / f"{cache_key}.jpg"
 
 
-def generate_thumbnail(video_path: str, force: bool = False) -> Optional[str]:
+def generate_thumbnail(video_path: str, force: bool = False, seek_seconds: float = 15.0) -> Optional[str]:
     """
     Generate a thumbnail from a video file.
+    Uses fast container keyframe seeking (-ss before -i) at 15s to avoid black intros.
     Returns the path to the thumbnail image, or None on failure.
     """
     if not is_ffmpeg_installed():
@@ -74,10 +75,11 @@ def generate_thumbnail(video_path: str, force: bool = False) -> Optional[str]:
         return str(thumb_path)
 
     try:
+        # Placing -ss BEFORE -i enables container keyframe fast-seeking (instant ~15ms)
         cmd = [
             get_ffmpeg_path(),
+            "-ss", str(seek_seconds),
             "-i", video_path,
-            "-ss", "00:01:30",       # Seek to 3 seconds
             "-vframes", "1",          # Extract 1 frame
             "-q:v", "6",              # JPEG quality (2=best, 31=worst)
             "-vf", "scale=320:-1",    # Scale to 320px width, keep aspect ratio
@@ -91,22 +93,22 @@ def generate_thumbnail(video_path: str, force: bool = False) -> Optional[str]:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=30,
+            timeout=15,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
 
         if thumb_path.exists():
             return str(thumb_path)
         else:
-            # If seek failed (short video), try from start
-            cmd[cmd.index("00:01:30")] = "00:00:00"
+            # If seek failed (e.g. video shorter than 15s), try fast-seek at 1 second
+            cmd[1] = "1.0"
             subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=30,
+                timeout=15,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
             if thumb_path.exists():
@@ -121,6 +123,20 @@ def generate_thumbnail(video_path: str, force: bool = False) -> Optional[str]:
     except Exception as e:
         logger.error(f"Thumbnail generation error for {video_path}: {e}")
         return None
+
+
+import asyncio
+
+
+async def async_generate_thumbnail(video_path: str, force: bool = False, seek_seconds: float = 15.0) -> Optional[str]:
+    """Asynchronous thread-pool wrapper for generate_thumbnail."""
+    return await asyncio.to_thread(generate_thumbnail, video_path, force=force, seek_seconds=seek_seconds)
+
+
+async def async_get_video_metadata(video_path: str) -> dict:
+    """Asynchronous thread-pool wrapper for get_video_metadata."""
+    return await asyncio.to_thread(get_video_metadata, video_path)
+
 
 
 def get_video_metadata(video_path: str) -> dict:

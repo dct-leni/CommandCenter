@@ -77,13 +77,14 @@ To prevent breaking the application, any AI or developer modifying this codebase
 * **Why**: FFmpeg's listener blocks on single connections and terminates as soon as the client disconnects, preventing multiple concurrent clients.
 * **Solution**: Spin up the Python TCP server (broadcaster) on the public port, route the transcode output to a loopback socket, and distribute chunks to all clients from Python.
 
-### 3. Encoder Settings & Quality Unification
+### 3. Encoder Settings & Adaptive Bitrate Capping
 * **Rule**: Define all video transcoding parameters in a single, central place (`app/ffmpeg_setup.py` -> `get_encoding_params`).
-* **Why**: To keep local conversion and live stream relay quality identical while limiting peak bitrates to prevent network congestion.
+* **Adaptive Bitrate Capping**: If `source_bitrate < 2.8 Mbps`, `get_encoding_params()` caps target bitrate to `125% * source_bitrate` (min 500k floor) to prevent small/SD input files from inflating in size. High-bitrate/HD files remain capped at `2.8 Mbps` target.
 * **Tuning Details**:
-  * **NVENC**: Preset `p6`, spatial-aq, temporal-aq, maxrate `3.2M`, bufsize `6.4M`, GOP `60`.
-  * **QSV**: Preset `medium`, lookahead enabled, maxrate `3.2M`, bufsize `6.4M`, GOP `60`.
-  * **CPU**: Preset `medium`, CRF `21`, maxrate `3.2M`, bufsize `6.4M`, GOP `60`.
+  * **NVENC**: Preset `p6`, spatial-aq, temporal-aq, GOP `60`.
+  * **QSV**: Preset `medium`, lookahead enabled, GOP `60`.
+  * **CPU**: Preset `medium`, GOP `60`.
+
 
 ### 4. Codec Auto-Detection
 * **Rule**: Do not hardcode or allow users to manually configure encoding codecs in settings or UI.
@@ -96,6 +97,12 @@ To prevent breaking the application, any AI or developer modifying this codebase
 ### 6. HLS Stream Demuxing (.m3u8)
 * **Rule**: When parsing or relaying HLS stream URLs, always detect `.m3u8` in the URL and add `-allowed_extensions ALL`, `-allowed_segment_extensions ALL`, and `-extension_picky 0` to both the `ffmpeg` and `ffprobe` commands.
 * **Why**: FFmpeg's HLS demuxer will block or fail to resolve sub-playlists/media segment paths if they are not explicitly allowed. Additionally, non-standard segment URLs (e.g. without file extensions in IPTV redirects) are blocked by default unless `-allowed_segment_extensions ALL` and `-extension_picky 0` are passed. Finally, do not use `-reconnect_streamed` with HLS, as it conflicts with the demuxer's chunk-retrieval loop.
+
+### 7. Keyframe Fast-Seeking for Thumbnails
+* **Rule**: Always place `-ss <seconds>` BEFORE `-i video_path` when extracting thumbnails. Default seek offset is set to 15s (`-ss 15.0`) to avoid black intro screens.
+* **Why**: Placing `-ss` before `-i` forces FFmpeg to perform container-level keyframe fast-seeking (~15ms execution time), whereas placing `-ss` after `-i` decodes all frames sequentially from timestamp 0:00 (up to 2000ms execution time).
+
+
 
 
 

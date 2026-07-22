@@ -197,6 +197,7 @@ class Converter:
         old_files = self.files.copy()
         self.files.clear()
         results = []
+        pending_assets = []  # List of (FileInfo, probe_target_path)
  
         for f in sorted(folder.iterdir()):
             if not f.is_file():
@@ -219,16 +220,9 @@ class Converter:
                         progress=1.0,
                         ts_filename=f.name,
                     )
-                # Generate thumbnail for .ts files too if missing
-                if not info.thumbnail:
-                    thumb = generate_thumbnail(str(f))
-                    if thumb:
-                        info.thumbnail = thumb
-                # Fetch metadata if missing
-                if not info.metadata or not info.metadata.get("duration"):
-                    info.metadata = get_video_metadata(str(f))
                 self.files[f.name] = info
-                results.append(self._file_to_dict(info))
+                if not info.thumbnail or not info.metadata or not info.metadata.get("duration"):
+                    pending_assets.append((info, str(f)))
                 continue
  
             # Check for convertible video files
@@ -237,7 +231,6 @@ class Converter:
                 if f.name in old_files and old_files[f.name].status in (ConversionStatus.CONVERTING, ConversionStatus.ERROR):
                     info = old_files[f.name]
                     self.files[f.name] = info
-                    results.append(self._file_to_dict(info))
                     continue
  
                 ts_name = f.stem + ".ts"
@@ -267,20 +260,32 @@ class Converter:
                         ts_filename=ts_name,
                     )
  
-                # Generate thumbnail if missing
+                self.files[f.name] = info
+                probe_target = str(ts_path if status == ConversionStatus.DONE else f)
+                if not info.thumbnail or not info.metadata or not info.metadata.get("duration"):
+                    pending_assets.append((info, probe_target))
+ 
+        # Concurrently process missing thumbnails & metadata across worker threads
+        if pending_assets:
+            from concurrent.futures import ThreadPoolExecutor
+            def _load_asset(info: FileInfo, target_path: str):
                 if not info.thumbnail:
-                    probe_target = str(ts_path if status == ConversionStatus.DONE else f)
-                    thumb = generate_thumbnail(probe_target)
+                    thumb = generate_thumbnail(target_path)
                     if thumb:
                         info.thumbnail = thumb
- 
-                # Get metadata if missing
                 if not info.metadata or not info.metadata.get("duration"):
-                    probe_target = str(ts_path if status == ConversionStatus.DONE else f)
-                    info.metadata = get_video_metadata(probe_target)
+                    info.metadata = get_video_metadata(target_path)
  
-                self.files[f.name] = info
-                results.append(self._file_to_dict(info))
+            with ThreadPoolExecutor(max_workers=min(8, len(pending_assets))) as executor:
+                futures = [executor.submit(_load_asset, info, tp) for info, tp in pending_assets]
+                for fut in futures:
+                    try:
+                        fut.result()
+                    except Exception as e:
+                        logger.error(f"Error processing video assets: {e}")
+ 
+        for info in self.files.values():
+            results.append(self._file_to_dict(info))
  
         removed = self._cleanup_orphaned_thumbnails()
         if removed:
@@ -558,10 +563,12 @@ class Converter:
         if target_size:
             scale_args = ["-vf", f"scale={target_size[0]}:{target_size[1]}"]
  
+        source_bitrate = info.metadata.get("bitrate", 0) if info.metadata else 0
+
         if strategy == "hardware":
             from app.ffmpeg_setup import get_best_encoder, get_encoding_params
             best_encoder = get_best_encoder()
-            hw_args = get_encoding_params(best_encoder)
+            hw_args = get_encoding_params(best_encoder, source_bitrate=source_bitrate)
             cmd = base_cmd + map_args + scale_args + hw_args + [
                 "-c:a", "aac",
                 "-b:a", "256k",            # High quality stereo audio
@@ -573,7 +580,7 @@ class Converter:
         else:
             # CPU Fallback (libx264)
             from app.ffmpeg_setup import get_encoding_params
-            cpu_args = get_encoding_params("libx264")
+            cpu_args = get_encoding_params("libx264", source_bitrate=source_bitrate)
             cmd = base_cmd + map_args + scale_args + cpu_args + [
                 "-c:a", "aac",
                 "-b:a", "256k",
