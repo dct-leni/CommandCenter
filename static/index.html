@@ -42,6 +42,9 @@
                     <span class="status-label" id="codec-status-label" style="font-family: 'JetBrains Mono', monospace; font-size: 11.5px;">Codec: detecting...</span>
                 </div>
             </div>
+            <button class="btn btn-secondary" onclick="openGlobalVpnModal()" style="font-size: 12px; padding: 5px 10px; margin-left: 12px; display: flex; align-items: center; gap: 6px;">
+                <i class="fa-solid fa-shield-halved" style="color: var(--accent);"></i> VPN Settings
+            </button>
         </div>
     </header>
 
@@ -270,17 +273,73 @@
                         style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
                 </div>
                 <div>
-                    <label
-                        style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Output
-                        HTTP Port</label>
-                    <input type="number" id="livestream-port" placeholder="1913" value="1913"
-                        style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
+                    <label style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Output HTTP Port</label>
+                    <input type="number" id="livestream-port" placeholder="1913" value="1913" style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
+                </div>
+                <div style="border-top: 1px solid var(--border); padding-top: 12px; margin-top: 4px;">
+                    <label style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">VPN / Proxy Ingestion</label>
+                    <select id="livestream-vpn-mode" onchange="onVpnModeChange('livestream')" style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 13px;">
+                        <option value="none">Direct Connection (Default - No VPN)</option>
+                        <option value="global">Use Global VPN Config</option>
+                        <option value="wireguard">WireGuard Profile (.conf)</option>
+                        <option value="proxy">Custom Proxy (SOCKS5 / HTTP)</option>
+                    </select>
+                </div>
+                <div id="livestream-vpn-file-box" style="display: none;">
+                    <label style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">WireGuard Profile (.conf)</label>
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <button class="btn btn-secondary" onclick="document.getElementById('livestream-vpn-file-input').click()" style="font-size: 12px;">Browse Profile…</button>
+                        <span id="livestream-vpn-file-name" style="font-size: 12px; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace;">No file selected</span>
+                        <input type="file" id="livestream-vpn-file-input" accept=".conf,.txt" style="display: none;" onchange="onVpnFileSelected(event, 'livestream')">
+                    </div>
+                </div>
+                <div id="livestream-proxy-box" style="display: none;">
+                    <label style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Proxy URL</label>
+                    <input type="text" id="livestream-proxy-url" placeholder="socks5://127.0.0.1:1080 or http://proxy:8080" style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
                 </div>
             </div>
-            <div class="modal-footer"
-                style="padding: 12px 16px; display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--border);">
+            <div class="modal-footer" style="padding: 12px 16px; display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--border);">
                 <button class="btn btn-secondary" onclick="closeLiveStreamModal()">Cancel</button>
                 <button class="btn btn-primary" id="livestream-save-btn" onclick="submitLiveStream()">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Global VPN Configuration Modal -->
+    <div class="modal-overlay" id="global-vpn-modal" style="display: none;">
+        <div class="modal" style="max-width: 480px;">
+            <div class="modal-header">
+                <h3>Global Live Relay VPN / Proxy Settings</h3>
+                <button class="modal-close" onclick="closeGlobalVpnModal()">×</button>
+            </div>
+            <div class="modal-body" style="display: flex; flex-direction: column; gap: 14px; padding: 16px;">
+                <p style="font-size: 12.5px; color: var(--text-secondary); margin: 0; line-height: 1.4;">
+                    Configure default VPN proxy routing for Live Relays. Only incoming stream data from restricted IPTV servers will route through the VPN tunnel. Local playback remains fast on your host network.
+                </p>
+                <div>
+                    <label style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Global VPN Mode</label>
+                    <select id="global-vpn-mode" onchange="onVpnModeChange('global')" style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 13px;">
+                        <option value="none">Direct Connection (No VPN)</option>
+                        <option value="wireguard">WireGuard Profile (.conf)</option>
+                        <option value="proxy">Custom Proxy (SOCKS5 / HTTP)</option>
+                    </select>
+                </div>
+                <div id="global-vpn-file-box" style="display: none;">
+                    <label style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">WireGuard Profile (.conf)</label>
+                    <div style="display: flex; gap: 8px; align-items: center;">
+                        <button class="btn btn-secondary" onclick="document.getElementById('global-vpn-file-input').click()" style="font-size: 12px;">Browse Profile…</button>
+                        <span id="global-vpn-file-name" style="font-size: 12px; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace;">No file selected</span>
+                        <input type="file" id="global-vpn-file-input" accept=".conf,.txt" style="display: none;" onchange="onVpnFileSelected(event, 'global')">
+                    </div>
+                </div>
+                <div id="global-proxy-box" style="display: none;">
+                    <label style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Proxy URL</label>
+                    <input type="text" id="global-proxy-url" placeholder="socks5://127.0.0.1:1080 or http://proxy:8080" style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
+                </div>
+            </div>
+            <div class="modal-footer" style="padding: 12px 16px; display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--border);">
+                <button class="btn btn-secondary" onclick="closeGlobalVpnModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="submitGlobalVpn()">Save Settings</button>
             </div>
         </div>
     </div>

@@ -127,6 +127,10 @@ class LiveStreamCreateRequest(BaseModel):
     url: str
     port: int
     auto_start: bool = False
+    vpn_mode: str = "global"  # global, none, wireguard, openvpn, proxy
+    vpn_profile_name: Optional[str] = None
+    vpn_profile_content: Optional[str] = None
+    proxy_url: Optional[str] = None
 
 
 class LiveStreamUpdateRequest(BaseModel):
@@ -134,6 +138,17 @@ class LiveStreamUpdateRequest(BaseModel):
     url: Optional[str] = None
     port: Optional[int] = None
     auto_start: Optional[bool] = None
+    vpn_mode: Optional[str] = None
+    vpn_profile_name: Optional[str] = None
+    vpn_profile_content: Optional[str] = None
+    proxy_url: Optional[str] = None
+
+
+class GlobalVPNUpdateRequest(BaseModel):
+    mode: str = "none"
+    profile_name: Optional[str] = None
+    profile_content: Optional[str] = None
+    proxy_url: Optional[str] = None
 
 
 # ──────────────────────────────────────────────
@@ -717,12 +732,47 @@ async def live_stream_thumbnail(stream_id: str):
     raise HTTPException(status_code=404, detail="Thumbnail not found")
 
 
+def validate_vpn_payload(mode: str, profile_content: str, proxy_url: str):
+    if mode == "wireguard" and not (profile_content and profile_content.strip()):
+        raise HTTPException(
+            status_code=400,
+            detail="WireGuard mode requires a valid .conf profile file."
+        )
+    if mode == "proxy" and not (proxy_url and proxy_url.strip()):
+        raise HTTPException(
+            status_code=400,
+            detail="Proxy mode requires a valid Proxy URL (e.g. socks5://127.0.0.1:1080)."
+        )
+
+
+@app.get("/api/vpn/global")
+async def get_global_vpn():
+    """Get global VPN configuration."""
+    cfg = load_config()
+    return getattr(cfg.streamer, "global_vpn", {}) or {}
+
+
+@app.put("/api/vpn/global")
+async def update_global_vpn(body: GlobalVPNUpdateRequest):
+    """Update global VPN configuration."""
+    validate_vpn_payload(body.mode, body.profile_content or "", body.proxy_url or "")
+    new_vpn = {
+        "mode": body.mode,
+        "profile_name": body.profile_name or "",
+        "profile_content": body.profile_content or "",
+        "proxy_url": body.proxy_url or "",
+    }
+    update_config({"streamer": {"global_vpn": new_vpn}})
+    return {"status": "success", "global_vpn": new_vpn}
+
+
 @app.post("/api/streamer/live_stream")
 async def create_live_stream(body: LiveStreamCreateRequest):
     """Create a new live relay stream."""
     import uuid
     cfg = load_config()
     check_port_conflict(body.port, cfg)
+    validate_vpn_payload(body.vpn_mode, body.vpn_profile_content or "", body.proxy_url or "")
     stream_id = f"live_{uuid.uuid4().hex[:8]}"
     new_item = {
         "id": stream_id,
@@ -730,6 +780,10 @@ async def create_live_stream(body: LiveStreamCreateRequest):
         "url": body.url,
         "port": body.port,
         "auto_start": body.auto_start,
+        "vpn_mode": body.vpn_mode,
+        "vpn_profile_name": body.vpn_profile_name or "",
+        "vpn_profile_content": body.vpn_profile_content or "",
+        "proxy_url": body.proxy_url or "",
     }
     cfg.streamer.live_streams.append(new_item)
     update_config({"streamer": {"live_streams": cfg.streamer.live_streams}})
@@ -744,6 +798,11 @@ async def update_live_stream(stream_id: str, body: LiveStreamUpdateRequest):
         check_port_conflict(body.port, cfg, ignore_live_stream_id=stream_id)
     for item in cfg.streamer.live_streams:
         if item.get("id") == stream_id:
+            target_mode = body.vpn_mode if body.vpn_mode is not None else item.get("vpn_mode", "none")
+            target_content = body.vpn_profile_content if body.vpn_profile_content is not None else item.get("vpn_profile_content", "")
+            target_proxy = body.proxy_url if body.proxy_url is not None else item.get("proxy_url", "")
+            validate_vpn_payload(target_mode, target_content, target_proxy)
+
             if body.name is not None:
                 item["name"] = body.name
             if body.url is not None:
@@ -752,6 +811,14 @@ async def update_live_stream(stream_id: str, body: LiveStreamUpdateRequest):
                 item["port"] = body.port
             if body.auto_start is not None:
                 item["auto_start"] = body.auto_start
+            if body.vpn_mode is not None:
+                item["vpn_mode"] = body.vpn_mode
+            if body.vpn_profile_name is not None:
+                item["vpn_profile_name"] = body.vpn_profile_name
+            if body.vpn_profile_content is not None:
+                item["vpn_profile_content"] = body.vpn_profile_content
+            if body.proxy_url is not None:
+                item["proxy_url"] = body.proxy_url
             update_config({"streamer": {"live_streams": cfg.streamer.live_streams}})
             return {"status": "success", "live_stream": item}
     raise HTTPException(status_code=404, detail="Live stream not found")
@@ -849,10 +916,15 @@ async def browse_filesystem(path: str = Query("")):
 
 def _kill_all_children():
     """
-    Kill the entire process tree of this Python process (FFmpeg, MediaMTX, etc.).
+    Kill the entire process tree of this Python process (FFmpeg, MediaMTX, VPN proxies, etc.).
     Uses Windows-native `taskkill /F /T` for recursive termination.
     Called by both the console-close handler and atexit so no orphans survive.
     """
+    try:
+        from app.vpn_manager import vpn_manager
+        vpn_manager.stop_all()
+    except Exception:
+        pass
     if os.name == "nt":
         import subprocess as _sp
         try:

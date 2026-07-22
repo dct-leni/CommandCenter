@@ -213,7 +213,7 @@ def get_encoding_params(encoder: str, source_bitrate: Optional[int] = None) -> l
         return ["-c:v", "copy"]
 
 
-def probe_source_codec(url: str, timeout: int = 8) -> str:
+def probe_source_codec(url: str, timeout: int = 8, proxy_url: Optional[str] = None) -> str:
     """
     Probe the video codec of a stream URL using ffprobe.
     Returns a lowercase codec name, e.g. 'h264', 'hevc', 'mpeg2video', or 'unknown'.
@@ -223,10 +223,19 @@ def probe_source_codec(url: str, timeout: int = 8) -> str:
         cmd = [
             str(FFPROBE_EXE),
             "-v", "quiet",
+        ]
+
+        if proxy_url:
+            if proxy_url.startswith("socks5://") or proxy_url.startswith("socks4://"):
+                cmd.extend(["-socks_proxy", proxy_url])
+            else:
+                cmd.extend(["-http_proxy", proxy_url])
+
+        cmd.extend([
             "-select_streams", "v:0",
             "-show_entries", "stream=codec_name",
             "-of", "default=noprint_wrappers=1:nokey=1",
-        ]
+        ])
         if ".m3u8" in url.lower():
             cmd.extend([
                 "-allowed_extensions", "ALL",
@@ -235,12 +244,18 @@ def probe_source_codec(url: str, timeout: int = 8) -> str:
             ])
         cmd.append(url)
 
+        env = os.environ.copy()
+        if proxy_url:
+            env["http_proxy"] = proxy_url
+            env["https_proxy"] = proxy_url
+
         res = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             timeout=timeout,
+            env=env,
         )
         codec = res.stdout.decode("utf-8", errors="replace").strip()
         # ffprobe may return one line per video track — take the first

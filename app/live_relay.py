@@ -96,19 +96,25 @@ class LiveStreamManager:
             sid = item.get("id")
             if not sid:
                 continue
+
+            vpn_mode = item.get("vpn_mode", "none")
+            vpn_profile_name = item.get("vpn_profile_name", "")
+            vpn_profile_content = item.get("vpn_profile_content", "")
+            proxy_url = item.get("proxy_url", "")
+
             if sid in self.active_relays:
                 relay = self.active_relays[sid]
                 # Only capture thumbnails when viewers are actively watching
                 if relay.status == "running":
                     self.trigger_thumbnail_generation(sid, f"http://127.0.0.1:{relay.port}/")
-                results.append(relay.to_dict())
+                d = relay.to_dict()
             else:
                 thumb_path = THUMBNAILS_DIR / f"live_{sid}.jpg"
                 has_thumb = thumb_path.exists()
                 mtime = int(thumb_path.stat().st_mtime) if has_thumb else 0
                 from app.ffmpeg_setup import get_best_encoder
                 best_encoder = get_best_encoder()
-                results.append({
+                d = {
                     "id": sid,
                     "name": item.get("name", "Unnamed Stream"),
                     "url": item.get("url", ""),
@@ -120,7 +126,13 @@ class LiveStreamManager:
                     "bitrate": "0kbits/s",
                     "has_thumbnail": has_thumb,
                     "thumbnail_url": f"/api/streamer/live_stream/{sid}/thumbnail?v={mtime}",
-                })
+                }
+
+            d["vpn_mode"] = vpn_mode
+            d["vpn_profile_name"] = vpn_profile_name
+            d["vpn_profile_content"] = vpn_profile_content
+            d["proxy_url"] = proxy_url
+            results.append(d)
         return results
 
     def trigger_thumbnail_generation(self, stream_id: str, stream_url: str):
@@ -371,18 +383,22 @@ class LiveStreamManager:
                 logger.error(f"Error terminating relay process {stream_id}: {e}")
 
         relay.process = None
+        from app.vpn_manager import vpn_manager
+        vpn_manager.stop_vpn_for_stream(stream_id)
         logger.info(f"Stopped live relay '{relay.name}'")
         return relay.to_dict()
 
     async def _auto_restart_loop(self, relay: LiveRelayStatus):
         """Loop keeping the FFmpeg listen process running while status is active."""
-        # Probe source codec once before starting the relay loop.
-        # If the source is already H.264 we can stream-copy.
-        # Any other codec (HEVC, MPEG-2, AV1 …) requires a re-encode.
+        from app.vpn_manager import vpn_manager
+        cfg = load_config()
+        stream_item = next((x for x in cfg.streamer.live_streams if x.get("id") == relay.id), {})
+        proxy_url = vpn_manager.start_vpn_for_stream(relay.id, stream_item)
+
         from app.ffmpeg_setup import probe_source_codec, get_relay_params, get_best_encoder, get_relay_encoding_params
-        logger.info(f"Probing source codec for '{relay.name}' at {relay.url} …")
+        logger.info(f"Probing source codec for '{relay.name}' at {relay.url} (proxy: {proxy_url or 'none'}) …")
         source_codec = await asyncio.get_event_loop().run_in_executor(
-            None, probe_source_codec, relay.url
+            None, probe_source_codec, relay.url, 8, proxy_url
         )
         if source_codec == "h264":
             video_params = get_relay_params()   # stream copy — 0 GPU
@@ -396,6 +412,12 @@ class LiveStreamManager:
             try:
 
                 cmd = [get_ffmpeg_path()]
+
+                if proxy_url:
+                    if proxy_url.startswith("socks5://") or proxy_url.startswith("socks4://"):
+                        cmd.extend(["-socks_proxy", proxy_url])
+                    else:
+                        cmd.extend(["-http_proxy", proxy_url])
 
                 # Detect HLS — URL ends with .m3u8 or contains /m3u8
                 is_hls = ".m3u8" in relay.url.lower()
@@ -458,12 +480,18 @@ class LiveStreamManager:
                 relay.status = "listening"
                 relay.error = None
 
+                env = os.environ.copy()
+                if proxy_url:
+                    env["http_proxy"] = proxy_url
+                    env["https_proxy"] = proxy_url
+
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     limit=1024 * 1024,  # 1 MB — prevents LimitOverrunError on long FFmpeg lines
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                    env=env,
                 )
                 relay.process = process
 

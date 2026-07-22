@@ -43,6 +43,12 @@ class StreamerConfig:
     epg_timezone: str = "+0300"         # XMLTV timezone offset string
     playlists: dict = field(default_factory=dict)  # folder_name → [{port, files}]
     live_streams: List[dict] = field(default_factory=list)  # List of LiveStreamItem dicts
+    global_vpn: dict = field(default_factory=lambda: {
+        "mode": "none",
+        "profile_name": "",
+        "profile_content": "",
+        "proxy_url": "",
+    })
 
 
 

@@ -1474,6 +1474,101 @@ async function fetchLiveStreams() {
     }
 }
 
+let _vpnState = {
+    global: { content: '', name: '' },
+    livestream: { content: '', name: '' },
+};
+
+function onVpnModeChange(scope) {
+    const modeEl = document.getElementById(`${scope}-vpn-mode`);
+    if (!modeEl) return;
+    const mode = modeEl.value;
+    const fileBox = document.getElementById(`${scope}-vpn-file-box`);
+    const proxyBox = document.getElementById(`${scope}-proxy-box`);
+
+    if (fileBox) fileBox.style.display = (mode === 'wireguard') ? 'block' : 'none';
+    if (proxyBox) proxyBox.style.display = (mode === 'proxy') ? 'block' : 'none';
+}
+
+function onVpnFileSelected(event, scope) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        _vpnState[scope].content = e.target.result;
+        _vpnState[scope].name = file.name;
+        const nameEl = document.getElementById(`${scope}-vpn-file-name`);
+        if (nameEl) nameEl.textContent = file.name;
+    };
+    reader.readAsText(file);
+}
+
+async function openGlobalVpnModal() {
+    try {
+        const data = await api('GET', '/vpn/global');
+        document.getElementById('global-vpn-mode').value = data.mode || 'none';
+        document.getElementById('global-proxy-url').value = data.proxy_url || '';
+        _vpnState.global.content = data.profile_content || '';
+        _vpnState.global.name = data.profile_name || '';
+        document.getElementById('global-vpn-file-name').textContent = data.profile_name || 'No file selected';
+        onVpnModeChange('global');
+        document.getElementById('global-vpn-modal').style.display = 'flex';
+    } catch (e) {
+        showToast(`Failed to load global VPN settings: ${e.message}`, 'error');
+    }
+}
+
+function closeGlobalVpnModal() {
+    document.getElementById('global-vpn-modal').style.display = 'none';
+}
+
+function validateVpnSettings(mode, profileContent, proxyUrl) {
+    if (mode === 'wireguard' && (!profileContent || !profileContent.trim())) {
+        showToast('Please select a WireGuard profile (.conf) file before saving.', 'error');
+        return false;
+    }
+    if (mode === 'proxy' && (!proxyUrl || !proxyUrl.trim())) {
+        showToast('Please enter a valid Proxy URL (e.g. socks5://127.0.0.1:1080) before saving.', 'error');
+        return false;
+    }
+    return true;
+}
+
+async function submitGlobalVpn() {
+    const mode = document.getElementById('global-vpn-mode').value;
+    const proxy_url = document.getElementById('global-proxy-url').value.trim();
+    const profile_name = _vpnState.global.name;
+    const profile_content = _vpnState.global.content;
+
+    if (!validateVpnSettings(mode, profile_content, proxy_url)) {
+        return;
+    }
+
+    try {
+        await api('PUT', '/vpn/global', {
+            mode,
+            proxy_url,
+            profile_name,
+            profile_content,
+        });
+        showToast('Global VPN settings saved', 'success');
+        closeGlobalVpnModal();
+        await fetchLiveStreams();
+    } catch (e) {
+        showToast(`Error saving global VPN settings: ${e.message}`, 'error');
+    }
+}
+
+function fetchLiveStreams() {
+    api('GET', '/streamer/live_streams')
+        .then(data => {
+            state.liveStreams = data.live_streams || [];
+            renderLiveStreams();
+        })
+        .catch(e => console.error('Failed to fetch live streams:', e));
+}
+
 function renderLiveStreams() {
     const container = document.getElementById('live-streams-list');
     if (!container) return;
@@ -1496,6 +1591,18 @@ function renderLiveStreams() {
             statusBadge = `<span class="livestream-status stopped"><i class="fa-solid fa-stop"></i> Stopped</span>`;
         }
 
+        let vpnBadge = '';
+        const vmode = item.vpn_mode || 'global';
+        if (vmode === 'wireguard') {
+            vpnBadge = `<span style="font-size: 11px; background: rgba(147, 51, 234, 0.15); color: #c084fc; border: 1px solid rgba(147, 51, 234, 0.3); padding: 2px 7px; border-radius: 4px; font-family: 'JetBrains Mono', monospace;"><i class="fa-solid fa-shield-halved"></i> WireGuard</span>`;
+        } else if (vmode === 'proxy') {
+            vpnBadge = `<span style="font-size: 11px; background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); padding: 2px 7px; border-radius: 4px; font-family: 'JetBrains Mono', monospace;"><i class="fa-solid fa-network-wired"></i> Proxy</span>`;
+        } else if (vmode === 'none') {
+            vpnBadge = `<span style="font-size: 11px; background: rgba(255, 255, 255, 0.05); color: var(--text-muted); padding: 2px 7px; border-radius: 4px; font-family: 'JetBrains Mono', monospace;">Direct</span>`;
+        } else {
+            vpnBadge = `<span style="font-size: 11px; background: rgba(0, 240, 255, 0.1); color: var(--accent); border: 1px dashed rgba(0, 240, 255, 0.3); padding: 2px 7px; border-radius: 4px; font-family: 'JetBrains Mono', monospace;"><i class="fa-solid fa-shield-cat"></i> Global VPN</span>`;
+        }
+
         const thumbSrc = item.thumbnail_url || `/api/streamer/live_stream/${item.id}/thumbnail?v=0`;
         const thumbHtml = getThumbHtml(thumbSrc, item.has_thumbnail, 'livestream-thumb', 'fa-tower-broadcast');
 
@@ -1505,6 +1612,7 @@ function renderLiveStreams() {
                     ${thumbHtml}
                     <span class="folder-card-title" style="margin-left: 5px;">${escapeAttr(item.name)}</span>
                     ${statusBadge}
+                    ${vpnBadge}
                     <span class="folder-date-range" style="font-family: 'JetBrains Mono', monospace; font-size: 12px; margin-left: auto;">Port: ${item.port}</span>
                     <span class="folder-file-count" style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 20px;" title="${escapeAttr(item.url)}">${escapeAttr(item.url)}</span>
                     
@@ -1540,6 +1648,11 @@ function openCreateLiveStreamModal() {
     document.getElementById('livestream-name').value = '';
     document.getElementById('livestream-url').value = '';
     document.getElementById('livestream-port').value = '1913';
+    document.getElementById('livestream-vpn-mode').value = 'none';
+    document.getElementById('livestream-proxy-url').value = '';
+    _vpnState.livestream = { content: '', name: '' };
+    document.getElementById('livestream-vpn-file-name').textContent = 'No file selected';
+    onVpnModeChange('livestream');
     document.getElementById('livestream-save-btn').textContent = 'Create';
     document.getElementById('livestream-modal').style.display = 'flex';
 }
@@ -1552,6 +1665,11 @@ function openEditLiveStreamModal(streamId) {
     document.getElementById('livestream-name').value = item.name || '';
     document.getElementById('livestream-url').value = item.url || '';
     document.getElementById('livestream-port').value = item.port || 1913;
+    document.getElementById('livestream-vpn-mode').value = item.vpn_mode || 'none';
+    document.getElementById('livestream-proxy-url').value = item.proxy_url || '';
+    _vpnState.livestream = { content: item.vpn_profile_content || '', name: item.vpn_profile_name || '' };
+    document.getElementById('livestream-vpn-file-name').textContent = item.vpn_profile_name || 'No file selected';
+    onVpnModeChange('livestream');
     document.getElementById('livestream-save-btn').textContent = 'Save';
     document.getElementById('livestream-modal').style.display = 'flex';
 }
@@ -1565,18 +1683,29 @@ async function submitLiveStream() {
     const name = document.getElementById('livestream-name').value.trim();
     const url = document.getElementById('livestream-url').value.trim();
     const port = parseInt(document.getElementById('livestream-port').value, 10);
+    const vpn_mode = document.getElementById('livestream-vpn-mode').value;
+    const proxy_url = document.getElementById('livestream-proxy-url').value.trim();
+    const vpn_profile_name = _vpnState.livestream.name;
+    const vpn_profile_content = _vpnState.livestream.content;
 
     if (!name || !url || isNaN(port)) {
         showToast('Please enter valid Name, URL, and Port', 'error');
         return;
     }
 
+    if (!validateVpnSettings(vpn_mode, vpn_profile_content, proxy_url)) {
+        return;
+    }
+
     try {
+        const payload = {
+            name, url, port, vpn_mode, proxy_url, vpn_profile_name, vpn_profile_content
+        };
         if (streamId) {
-            await api('PUT', `/streamer/live_stream/${streamId}`, { name, url, port });
+            await api('PUT', `/streamer/live_stream/${streamId}`, payload);
             showToast('Live stream updated', 'success');
         } else {
-            await api('POST', '/streamer/live_stream', { name, url, port });
+            await api('POST', '/streamer/live_stream', payload);
             showToast('Live stream created', 'success');
         }
         closeLiveStreamModal();
@@ -1618,6 +1747,11 @@ async function deleteLiveStream(streamId) {
     }
 }
 
+window.onVpnModeChange = onVpnModeChange;
+window.onVpnFileSelected = onVpnFileSelected;
+window.openGlobalVpnModal = openGlobalVpnModal;
+window.closeGlobalVpnModal = closeGlobalVpnModal;
+window.submitGlobalVpn = submitGlobalVpn;
 window.openCreateLiveStreamModal = openCreateLiveStreamModal;
 window.openEditLiveStreamModal = openEditLiveStreamModal;
 window.closeLiveStreamModal = closeLiveStreamModal;
