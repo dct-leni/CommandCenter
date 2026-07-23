@@ -97,14 +97,18 @@ class LiveStreamManager:
             if not sid:
                 continue
 
-            vpn_mode = item.get("vpn_mode", "none")
-            vpn_profile_name = item.get("vpn_profile_name", "")
-            vpn_profile_content = item.get("vpn_profile_content", "")
-            proxy_url = item.get("proxy_url", "")
-            headers = item.get("headers", "")
+            use_vpn = item.get("use_vpn")
+            if use_vpn is None:
+                use_vpn = item.get("vpn_mode", "none") != "none"
+
+            global_vpn = getattr(cfg.streamer, "global_vpn", {}) or {}
+            global_vpn_mode = global_vpn.get("mode", "none")
 
             if sid in self.active_relays:
                 relay = self.active_relays[sid]
+                relay.name = item.get("name", relay.name)
+                relay.url = item.get("url", relay.url)
+                relay.port = item.get("port", relay.port)
                 # Only capture thumbnails when viewers are actively watching
                 if relay.status == "running":
                     self.trigger_thumbnail_generation(sid, f"http://127.0.0.1:{relay.port}/")
@@ -129,12 +133,15 @@ class LiveStreamManager:
                     "thumbnail_url": f"/api/streamer/live_stream/{sid}/thumbnail?v={mtime}",
                 }
 
-            d["vpn_mode"] = vpn_mode
-            d["vpn_profile_name"] = vpn_profile_name
-            d["vpn_profile_content"] = vpn_profile_content
-            d["proxy_url"] = proxy_url
-            d["stream_type"] = item.get("stream_type", "http")
-            d["web_url"] = item.get("web_url", "")
+            url_str = item.get("url", "").lower()
+            stype = item.get("stream_type", "http")
+            if stype != "web":
+                if item.get("web_url") or any(kw in url_str for kw in ("wtfismyip", "exxen", "netflix", "youtube.com/watch")):
+                    stype = "web"
+
+            d["use_vpn"] = bool(use_vpn)
+            d["global_vpn_mode"] = global_vpn_mode
+            d["stream_type"] = stype
             results.append(d)
         return results
 
@@ -210,7 +217,8 @@ class LiveStreamManager:
         if not item:
             raise ValueError(f"Live stream {stream_id} not found in configuration")
 
-        is_web = item.get("stream_type") == "web" or bool(item.get("web_url"))
+        url_str = item.get("url", "").lower()
+        is_web = item.get("stream_type") == "web" or bool(item.get("web_url")) or any(kw in url_str for kw in ("wtfismyip", "exxen", "netflix", "youtube.com/watch"))
         current_relay = self.active_relays.get(stream_id)
 
         # Stage 1 for Web Streams: If browser isn't opened yet (or status is stopped), open default browser first!
@@ -414,7 +422,7 @@ class LiveStreamManager:
             raise ValueError(f"Stream {stream_id} not found")
 
         from app.vpn_manager import vpn_manager
-        proxy_url = vpn_manager.start_vpn_for_stream(stream_id, stream_item)
+        proxy_url = vpn_manager.get_proxy_url_for_stream(stream_item)
         if proxy_url:
             await asyncio.sleep(0.5)  # Wait 500ms for SOCKS5 local bridge socket readiness
 
@@ -447,7 +455,7 @@ class LiveStreamManager:
         from app.vpn_manager import vpn_manager
         cfg = load_config()
         stream_item = next((x for x in cfg.streamer.live_streams if x.get("id") == relay.id), {})
-        proxy_url = vpn_manager.start_vpn_for_stream(relay.id, stream_item)
+        proxy_url = vpn_manager.get_proxy_url_for_stream(stream_item)
         is_web = stream_item.get("stream_type") == "web"
         from app.ffmpeg_setup import probe_source_codec, get_relay_params, get_best_encoder, get_relay_encoding_params, format_ffmpeg_headers
         if is_web:

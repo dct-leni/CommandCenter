@@ -37,11 +37,13 @@
                     <span class="status-dot" id="mediamtx-dot"></span>
                     <span class="status-label">MediaMTX</span>
                 </div>
-                <div class="status-indicator"
-                    style="margin-left: 10px; border-left: 1px solid var(--border); padding-left: 12px; gap: 4px;">
-                    <i class="fa-solid fa-microchip" style="color: var(--accent); font-size: 11px;"></i>
-                    <span class="status-label" id="codec-status-label"
-                        style="font-family: 'JetBrains Mono', monospace; font-size: 11.5px;">Codec: detecting...</span>
+                <div class="status-indicator divider-left" id="vpn-status-indicator" onclick="openGlobalVpnModal()" title="Click to configure Global VPN" style="cursor: pointer;">
+                    <span class="status-dot" id="vpn-dot"></span>
+                    <span class="status-label" id="vpn-status-label">VPN: Off</span>
+                </div>
+                <div class="status-indicator divider-left">
+                    <i class="fa-solid fa-microchip status-icon"></i>
+                    <span class="status-label" id="codec-status-label">Codec: detecting...</span>
                 </div>
             </div>
         </div>
@@ -300,47 +302,13 @@
                         style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
                 </div>
                 <div style="border-top: 1px solid var(--border); padding-top: 12px; margin-top: 4px;">
-                    <label
-                        style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">VPN
-                        / Proxy Ingestion</label>
-                    <select id="livestream-vpn-mode" onchange="onVpnModeChange('livestream', true)"
-                        style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 13px;">
-                        <option value="none">Direct Connection (Default - No VPN)</option>
-                        <option value="global">Use Global VPN Config</option>
-                        <option value="wireguard">WireGuard Profile (.conf)</option>
-                        <option value="proxy">Custom Proxy (SOCKS5 / HTTP)</option>
-                    </select>
-                </div>
-                <div id="livestream-vpn-file-box" style="display: none;">
-                    <label id="livestream-vpn-file-label"
-                        style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">WireGuard
-                        Profile (.conf)</label>
-                    <div style="display: flex; gap: 8px; align-items: center;">
-                        <button class="btn btn-secondary"
-                            onclick="document.getElementById('livestream-vpn-file-input').click()"
-                            style="font-size: 12px;">Browse Profile…</button>
-                        <span id="livestream-vpn-file-name"
-                            style="font-size: 12px; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace;">No
-                            file selected</span>
-                        <input type="file" id="livestream-vpn-file-input" accept=".conf,.txt"
-                            style="display: none;" onchange="onVpnFileSelected(event, 'livestream')">
-                    </div>
-                </div>
-                <div id="livestream-proxy-box" style="display: none;">
-                    <div style="margin-bottom: 8px;">
-                        <label style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Proxy Server / URL</label>
-                        <input type="text" id="livestream-proxy-url" placeholder="e.g. nl.free.zoogvpn.com:1080 or socks5://127.0.0.1:1080" style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
-                    </div>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-                        <div>
-                            <label style="font-size: 11.5px; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 4px;">Username (Optional)</label>
-                            <input type="text" id="livestream-proxy-username" placeholder="user@domain.com" style="width: 100%; padding: 7px 9px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 12.5px;">
-                        </div>
-                        <div>
-                            <label style="font-size: 11.5px; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 4px;">Password (Optional)</label>
-                            <input type="password" id="livestream-proxy-password" placeholder="••••••••" style="width: 100%; padding: 7px 9px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 12.5px;">
-                        </div>
-                    </div>
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;">
+                        <input type="checkbox" id="livestream-use-vpn" style="width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent);">
+                        <span style="font-size: 13px; font-weight: 600; color: var(--text-primary);">Use VPN</span>
+                    </label>
+                    <span style="font-size: 11.5px; color: var(--text-secondary); display: block; margin-top: 4px; margin-left: 24px;">
+                        Routes stream ingestion through the configured Global VPN.
+                    </span>
                 </div>
             </div>
             <div class="modal-footer"
@@ -382,49 +350,14 @@
                         style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
                 </div>
                 <div style="border-top: 1px solid var(--border); padding-top: 12px; margin-top: 4px;">
-                    <label
-                        style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">VPN
-                        / Proxy Ingestion</label>
-                    <select id="webstream-vpn-mode" onchange="onVpnModeChange('webstream', true)"
-                        style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 13px;">
-                        <option value="none">Direct Connection (Default - No VPN)</option>
-                        <option value="global">Use Global VPN Config</option>
-                        <option value="wireguard">WireGuard Profile (.conf)</option>
-                        <option value="proxy">Custom Proxy (SOCKS5 / HTTP)</option>
-                    </select>
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;">
+                        <input type="checkbox" id="webstream-use-vpn" style="width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent);">
+                        <span style="font-size: 13px; font-weight: 600; color: var(--text-primary);">Use VPN</span>
+                    </label>
+                    <span style="font-size: 11.5px; color: var(--text-secondary); display: block; margin-top: 4px; margin-left: 24px;">
+                        Routes browser session through the configured Global VPN.
+                    </span>
                 </div>
-                <div id="webstream-vpn-file-box" style="display: none;">
-                    <label id="webstream-vpn-file-label"
-                        style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">WireGuard
-                        Profile (.conf)</label>
-                    <div style="display: flex; gap: 8px; align-items: center;">
-                        <button class="btn btn-secondary"
-                            onclick="document.getElementById('webstream-vpn-file-input').click()"
-                            style="font-size: 12px;">Browse Profile…</button>
-                        <span id="webstream-vpn-file-name"
-                            style="font-size: 12px; color: var(--text-secondary); font-family: 'JetBrains Mono', monospace;">No
-                            file selected</span>
-                        <input type="file" id="webstream-vpn-file-input" accept=".conf,.txt"
-                            style="display: none;" onchange="onVpnFileSelected(event, 'webstream')">
-                    </div>
-                </div>
-                <div id="webstream-proxy-box" style="display: none;">
-                    <div style="margin-bottom: 8px;">
-                        <label style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Proxy Server / URL</label>
-                        <input type="text" id="webstream-proxy-url" placeholder="e.g. nl.free.zoogvpn.com:1080 or socks5://127.0.0.1:1080" style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
-                    </div>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-                        <div>
-                            <label style="font-size: 11.5px; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 4px;">Username (Optional)</label>
-                            <input type="text" id="webstream-proxy-username" placeholder="user@domain.com" style="width: 100%; padding: 7px 9px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 12.5px;">
-                        </div>
-                        <div>
-                            <label style="font-size: 11.5px; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 4px;">Password (Optional)</label>
-                            <input type="password" id="webstream-proxy-password" placeholder="••••••••" style="width: 100%; padding: 7px 9px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 12.5px;">
-                        </div>
-                    </div>
-                </div>
-            </div>
             <div class="modal-footer"
                 style="padding: 12px 16px; display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--border);">
                 <button class="btn btn-secondary" onclick="closeWebStreamModal()">Cancel</button>

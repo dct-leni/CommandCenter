@@ -41,9 +41,10 @@ async def lifespan(app: FastAPI):
     from app.web_stream import web_stream_manager
     vpn_manager.purge_temp_dir()
     web_stream_manager.purge_all()
-
     # Resolve external IP on app start
     asyncio.create_task(streamer._resolve_external_ip())
+    # Start Global VPN on app startup if configured
+    vpn_manager.start_global_vpn()
 
     # Populate configured folders and handle auto-resume on boot
     cfg = load_config()
@@ -136,12 +137,7 @@ class LiveStreamCreateRequest(BaseModel):
     url: str
     port: int
     auto_start: bool = False
-    vpn_mode: str = "global"  # global, none, wireguard, proxy
-    vpn_profile_name: Optional[str] = None
-    vpn_profile_content: Optional[str] = None
-    proxy_url: Optional[str] = None
-    proxy_username: Optional[str] = None
-    proxy_password: Optional[str] = None
+    use_vpn: bool = False
     stream_type: str = "http"  # "http" or "web"
 
 
@@ -150,12 +146,7 @@ class LiveStreamUpdateRequest(BaseModel):
     url: Optional[str] = None
     port: Optional[int] = None
     auto_start: Optional[bool] = None
-    vpn_mode: Optional[str] = None
-    vpn_profile_name: Optional[str] = None
-    vpn_profile_content: Optional[str] = None
-    proxy_url: Optional[str] = None
-    proxy_username: Optional[str] = None
-    proxy_password: Optional[str] = None
+    use_vpn: Optional[bool] = None
     stream_type: Optional[str] = None
 
 
@@ -264,7 +255,10 @@ async def put_config(body: ConfigUpdate):
 
 @app.get("/api/system/status")
 async def system_status():
-    return get_binaries_status()
+    status = get_binaries_status()
+    from app.vpn_manager import vpn_manager
+    status["vpn"] = vpn_manager.get_status()
+    return status
 
 
 # ──────────────────────────────────────────────
@@ -803,6 +797,8 @@ async def update_global_vpn(body: GlobalVPNUpdateRequest):
         "vpn_password": body.vpn_password or "",
     }
     update_config({"streamer": {"global_vpn": new_vpn}})
+    from app.vpn_manager import vpn_manager
+    vpn_manager.start_global_vpn()
     return {"status": "success", "global_vpn": new_vpn}
 
 
@@ -812,13 +808,6 @@ async def create_live_stream(body: LiveStreamCreateRequest):
     import uuid
     cfg = load_config()
     check_port_conflict(body.port, cfg)
-    p_name, p_content, p_proxy = sanitize_vpn_data(
-        body.vpn_mode,
-        body.vpn_profile_name or "",
-        body.vpn_profile_content or "",
-        body.proxy_url or ""
-    )
-    validate_vpn_payload(body.vpn_mode, p_content, p_proxy)
     stream_id = f"live_{uuid.uuid4().hex[:8]}"
     new_item = {
         "id": stream_id,
@@ -826,12 +815,7 @@ async def create_live_stream(body: LiveStreamCreateRequest):
         "url": body.url,
         "port": body.port,
         "auto_start": body.auto_start,
-        "vpn_mode": body.vpn_mode,
-        "vpn_profile_name": p_name,
-        "vpn_profile_content": p_content,
-        "proxy_url": p_proxy,
-        "proxy_username": body.proxy_username or "",
-        "proxy_password": body.proxy_password or "",
+        "use_vpn": body.use_vpn,
         "stream_type": body.stream_type or "http",
     }
     cfg.streamer.live_streams.append(new_item)
@@ -847,14 +831,6 @@ async def update_live_stream(stream_id: str, body: LiveStreamUpdateRequest):
         check_port_conflict(body.port, cfg, ignore_live_stream_id=stream_id)
     for item in cfg.streamer.live_streams:
         if item.get("id") == stream_id:
-            target_mode = body.vpn_mode if body.vpn_mode is not None else item.get("vpn_mode", "none")
-            target_name = body.vpn_profile_name if body.vpn_profile_name is not None else item.get("vpn_profile_name", "")
-            target_content = body.vpn_profile_content if body.vpn_profile_content is not None else item.get("vpn_profile_content", "")
-            target_proxy = body.proxy_url if body.proxy_url is not None else item.get("proxy_url", "")
-
-            p_name, p_content, p_proxy = sanitize_vpn_data(target_mode, target_name, target_content, target_proxy)
-            validate_vpn_payload(target_mode, p_content, p_proxy)
-
             if body.name is not None:
                 item["name"] = body.name
             if body.url is not None:
@@ -863,21 +839,19 @@ async def update_live_stream(stream_id: str, body: LiveStreamUpdateRequest):
                 item["port"] = body.port
             if body.auto_start is not None:
                 item["auto_start"] = body.auto_start
-
-            item["vpn_mode"] = target_mode
-            item["vpn_profile_name"] = p_name
-            item["vpn_profile_content"] = p_content
-            item["proxy_url"] = p_proxy
-            
-            if body.proxy_username is not None:
-                item["proxy_username"] = body.proxy_username
-            if body.proxy_password is not None:
-                item["proxy_password"] = body.proxy_password
-
+            if body.use_vpn is not None:
+                item["use_vpn"] = body.use_vpn
             if body.stream_type is not None:
                 item["stream_type"] = body.stream_type
 
             update_config({"streamer": {"live_streams": cfg.streamer.live_streams}})
+
+            if stream_id in live_relay_manager.active_relays:
+                relay = live_relay_manager.active_relays[stream_id]
+                relay.name = item["name"]
+                relay.url = item["url"]
+                relay.port = item["port"]
+
             return {"status": "success", "live_stream": item}
     raise HTTPException(status_code=404, detail="Live stream not found")
 

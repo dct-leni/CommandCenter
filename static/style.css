@@ -111,7 +111,7 @@ body {
 .system-status { 
     display: flex; 
     align-items: center; 
-    gap: 12px; 
+    gap: 8px; 
 }
 
 .status-indicator {
@@ -120,8 +120,25 @@ body {
     gap: 6px;
     background: var(--bg-card);
     border: 1px solid var(--border);
-    padding: 4px 8px;
+    padding: 4px 10px;
     border-radius: var(--radius-sm);
+    height: 28px;
+}
+
+.status-indicator.divider-left {
+    margin-left: 6px;
+    border-left: 1px solid var(--border);
+    padding-left: 10px;
+}
+
+#vpn-status-indicator:hover {
+    border-color: var(--accent);
+    background: var(--bg-hover);
+}
+
+.status-icon {
+    color: var(--accent);
+    font-size: 11px;
 }
 
 .status-dot { 
@@ -132,11 +149,12 @@ body {
 }
 
 .status-dot.ok { background: var(--emerald); }
+.status-dot.warning { background: var(--amber); }
 .status-dot.error { background: var(--red); }
 
 .status-label { 
     color: var(--text-secondary); 
-    font-size: 12px; 
+    font-size: 11.5px; 
     font-weight: 600;
     font-family: 'JetBrains Mono', monospace; 
 }
@@ -852,12 +870,12 @@ body {
 .loading-spinner-ring {
     width: 48px;
     height: 48px;
-    border: 3px solid rgba(0, 240, 255, 0.15);
+    border: 3px solid rgba(217, 119, 6, 0.2);
     border-top: 3px solid var(--accent);
     border-right: 3px solid var(--accent);
     border-radius: 50%;
     animation: spin-ring 0.8s linear infinite;
-    box-shadow: 0 0 15px rgba(0, 240, 255, 0.2);
+    box-shadow: 0 0 15px var(--accent-glow);
 }
 
 @keyframes spin-ring {
@@ -870,6 +888,8 @@ body {
     border-radius: var(--radius);
     position: relative;
     overflow: hidden;
+}
+
 /* Live Stream Cards */
 .livestream-card {
     border: 1px solid var(--border);
@@ -918,8 +938,8 @@ body {
     font-size: 12px;
     font-weight: 600;
     color: var(--accent);
-    background: rgba(0, 240, 255, 0.1);
-    border: 1px solid rgba(0, 240, 255, 0.3);
+    background: var(--accent-glow);
+    border: 1px solid rgba(217, 119, 6, 0.3);
     border-radius: 4px;
     padding: 2px 8px;
     font-family: 'JetBrains Mono', monospace;
