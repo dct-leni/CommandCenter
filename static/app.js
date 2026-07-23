@@ -1545,13 +1545,13 @@ function closeAllModals() {
     });
 }
 
-async function openGlobalVpnModal() {
+function openGlobalVpnModal() {
     closeAllModals();
     const modal = document.getElementById('global-vpn-modal');
     if (modal) modal.style.display = 'flex';
 
-    try {
-        const data = await api('GET', '/vpn/global');
+    api('GET', '/vpn/global').then(data => {
+        if (!data) return;
         const modeEl = document.getElementById('global-vpn-mode');
         const urlEl = document.getElementById('global-proxy-url');
         const puEl = document.getElementById('global-proxy-username');
@@ -1570,9 +1570,9 @@ async function openGlobalVpnModal() {
         if (fnEl) fnEl.textContent = data.profile_name || 'No file selected';
 
         onVpnModeChange('global');
-    } catch (e) {
+    }).catch(e => {
         showToast(`Failed to load global VPN settings: ${e.message}`, 'error');
-    }
+    });
 }
 
 function closeGlobalVpnModal() {

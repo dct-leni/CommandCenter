@@ -37,7 +37,8 @@
                     <span class="status-dot" id="mediamtx-dot"></span>
                     <span class="status-label">MediaMTX</span>
                 </div>
-                <div class="status-indicator divider-left" id="vpn-status-indicator" onclick="openGlobalVpnModal()" title="Click to configure Global VPN" style="cursor: pointer;">
+                <div class="status-indicator divider-left" id="vpn-status-indicator" onclick="openGlobalVpnModal()"
+                    title="Click to configure Global VPN" style="cursor: pointer;">
                     <span class="status-dot" id="vpn-dot"></span>
                     <span class="status-label" id="vpn-status-label">VPN: Off</span>
                 </div>
@@ -112,10 +113,6 @@
                     <button class="btn btn-secondary" onclick="openCreateFolderModal()"
                         style="font-size: 12px; padding: 4px 8px;">
                         <i class="fa-solid fa-folder-plus"></i> New Folder
-                    </button>
-                    <button class="btn btn-secondary" onclick="openGlobalVpnModal()"
-                        style="font-size: 12px; padding: 4px 8px;" title="Global VPN / Proxy Settings">
-                        <i class="fa-solid fa-shield-halved"></i> VPN Settings
                     </button>
                 </div>
             </div>
@@ -303,10 +300,12 @@
                 </div>
                 <div style="border-top: 1px solid var(--border); padding-top: 12px; margin-top: 4px;">
                     <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;">
-                        <input type="checkbox" id="livestream-use-vpn" style="width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent);">
+                        <input type="checkbox" id="livestream-use-vpn"
+                            style="width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent);">
                         <span style="font-size: 13px; font-weight: 600; color: var(--text-primary);">Use VPN</span>
                     </label>
-                    <span style="font-size: 11.5px; color: var(--text-secondary); display: block; margin-top: 4px; margin-left: 24px;">
+                    <span
+                        style="font-size: 11.5px; color: var(--text-secondary); display: block; margin-top: 4px; margin-left: 24px;">
                         Routes stream ingestion through the configured Global VPN.
                     </span>
                 </div>
@@ -351,13 +350,16 @@
                 </div>
                 <div style="border-top: 1px solid var(--border); padding-top: 12px; margin-top: 4px;">
                     <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;">
-                        <input type="checkbox" id="webstream-use-vpn" style="width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent);">
+                        <input type="checkbox" id="webstream-use-vpn"
+                            style="width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent);">
                         <span style="font-size: 13px; font-weight: 600; color: var(--text-primary);">Use VPN</span>
                     </label>
-                    <span style="font-size: 11.5px; color: var(--text-secondary); display: block; margin-top: 4px; margin-left: 24px;">
+                    <span
+                        style="font-size: 11.5px; color: var(--text-secondary); display: block; margin-top: 4px; margin-left: 24px;">
                         Routes browser session through the configured Global VPN.
                     </span>
                 </div>
+            </div>
             <div class="modal-footer"
                 style="padding: 12px 16px; display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--border);">
                 <button class="btn btn-secondary" onclick="closeWebStreamModal()">Cancel</button>
@@ -406,17 +408,27 @@
                 </div>
                 <div id="global-proxy-box" style="display: none;">
                     <div style="margin-bottom: 8px;">
-                        <label style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Proxy Server / URL</label>
-                        <input type="text" id="global-proxy-url" placeholder="e.g. nl.free.zoogvpn.com:1080 or socks5://127.0.0.1:1080" style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
+                        <label
+                            style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Proxy
+                            Server / URL</label>
+                        <input type="text" id="global-proxy-url"
+                            placeholder="e.g. nl.free.zoogvpn.com:1080 or socks5://127.0.0.1:1080"
+                            style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
                     </div>
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
                         <div>
-                            <label style="font-size: 11.5px; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 4px;">Username (Optional)</label>
-                            <input type="text" id="global-proxy-username" placeholder="user@domain.com" style="width: 100%; padding: 7px 9px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 12.5px;">
+                            <label
+                                style="font-size: 11.5px; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 4px;">Username
+                                (Optional)</label>
+                            <input type="text" id="global-proxy-username" placeholder="user@domain.com"
+                                style="width: 100%; padding: 7px 9px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 12.5px;">
                         </div>
                         <div>
-                            <label style="font-size: 11.5px; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 4px;">Password (Optional)</label>
-                            <input type="password" id="global-proxy-password" placeholder="••••••••" style="width: 100%; padding: 7px 9px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 12.5px;">
+                            <label
+                                style="font-size: 11.5px; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 4px;">Password
+                                (Optional)</label>
+                            <input type="password" id="global-proxy-password" placeholder="••••••••"
+                                style="width: 100%; padding: 7px 9px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 12.5px;">
                         </div>
                     </div>
                 </div>
