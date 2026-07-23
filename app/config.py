@@ -112,6 +112,19 @@ def load_config() -> AppConfig:
     return cfg
 
 
+class CleanDumper(yaml.SafeDumper):
+    pass
+
+def _str_representer(dumper, data):
+    if "\n" in data:
+        clean_lines = [line.strip() for line in data.splitlines() if line.strip()]
+        cleaned_data = "\n".join(clean_lines)
+        return dumper.represent_scalar('tag:yaml.org,2002:str', cleaned_data, style='|')
+    return dumper.represent_scalar('tag:yaml.org,2002:str', data)
+
+CleanDumper.add_representer(str, _str_representer)
+
+
 def save_config(cfg: AppConfig) -> None:
     """Save configuration to config.yml."""
     data = asdict(cfg)
@@ -124,7 +137,7 @@ def save_config(cfg: AppConfig) -> None:
         except Exception:
             pass
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+        yaml.dump(data, f, Dumper=CleanDumper, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 
 def update_config(updates: dict) -> AppConfig:

@@ -1,10 +1,11 @@
 @echo off
+cd /d "%~dp0"
 echo ============================================
 echo   CommandCenter - Setup Prerequisites
 echo ============================================
 echo.
 echo This script installs Python 3.14 (if missing) and downloads
-echo portable binaries (FFmpeg, MediaMTX, WireGuard, OpenVPN) to bin\.
+echo portable binaries (FFmpeg, MediaMTX, WireGuard) to bin\.
 echo Run this ONCE before using the app.
 echo.
 
@@ -101,7 +102,7 @@ REM ---- WireGuard Proxy ----
 if exist "%BIN_DIR%\wireproxy.exe" (
     echo [OK] WireGuard proxy wireproxy.exe already exists in bin\, skipping.
 ) else (
-    echo [3/4] Downloading WireGuard proxy wireproxy...
+    echo [3/3] Downloading WireGuard proxy wireproxy...
     powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://github.com/windtf/wireproxy/releases/download/v1.1.3/wireproxy_windows_amd64.tar.gz' -OutFile '%BIN_DIR%\wireproxy.tar.gz' -UseBasicParsing; tar -xzf '%BIN_DIR%\wireproxy.tar.gz' -C '%BIN_DIR%'; Remove-Item '%BIN_DIR%\wireproxy.tar.gz' -ErrorAction SilentlyContinue }"
 
     if exist "%BIN_DIR%\wireproxy.exe" (
@@ -109,30 +110,6 @@ if exist "%BIN_DIR%\wireproxy.exe" (
     ) else (
         echo [WARNING] Failed to download wireproxy.exe.
     )
-)
-
-:openvpn
-REM ---- OpenVPN via Winget ----
-if exist "%BIN_DIR%\openvpn.exe" (
-    echo [OK] OpenVPN openvpn.exe already exists in bin\, skipping.
-    goto :done
-)
-if exist "C:\Program Files\OpenVPN\bin\openvpn.exe" (
-    echo [OK] OpenVPN found in C:\Program Files\OpenVPN\bin\.
-    goto :done
-)
-where openvpn >nul 2>nul
-if %ERRORLEVEL% equ 0 (
-    echo [OK] OpenVPN is installed on system PATH.
-    goto :done
-)
-
-echo [4/4] Installing latest OpenVPN via winget...
-winget install -e --id OpenVPNTechnologies.OpenVPN --accept-package-agreements --accept-source-agreements
-if %ERRORLEVEL% equ 0 (
-    echo [OK] OpenVPN installed successfully via winget.
-) else (
-    echo [WARNING] OpenVPN winget installation failed or was skipped.
 )
 
 :done

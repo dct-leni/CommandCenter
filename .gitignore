@@ -12,6 +12,8 @@ thumbnails/*
 !thumbnails/.gitkeep
 
 # Input/Output
+temp/*
+temp_vpn/*
 input/*
 !input/.gitkeep
 streams/*

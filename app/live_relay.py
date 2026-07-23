@@ -133,7 +133,8 @@ class LiveStreamManager:
             d["vpn_profile_name"] = vpn_profile_name
             d["vpn_profile_content"] = vpn_profile_content
             d["proxy_url"] = proxy_url
-            d["headers"] = headers
+            d["stream_type"] = item.get("stream_type", "http")
+            d["web_url"] = item.get("web_url", "")
             results.append(d)
         return results
 
@@ -209,18 +210,31 @@ class LiveStreamManager:
         if not item:
             raise ValueError(f"Live stream {stream_id} not found in configuration")
 
+        is_web = item.get("stream_type") == "web" or bool(item.get("web_url"))
+        current_relay = self.active_relays.get(stream_id)
+
+        # Stage 1 for Web Streams: If browser isn't opened yet (or status is stopped), open default browser first!
+        if is_web:
+            if not current_relay or current_relay.status not in ("browser_ready", "running", "listening"):
+                return await self.start_browser_for_stream(stream_id)
+
         if stream_id in self.active_relays and self.active_relays[stream_id].status in ("running", "listening"):
             return self.active_relays[stream_id].to_dict()
 
-        relay = LiveRelayStatus(
-            id=stream_id,
-            name=item.get("name", "Live Stream"),
-            url=item.get("url", ""),
-            port=int(item.get("port", 1913)),
-            status="listening",
-            error=None,
-        )
-        self.active_relays[stream_id] = relay
+        if current_relay:
+            relay = current_relay
+            relay.status = "listening"
+            relay.error = None
+        else:
+            relay = LiveRelayStatus(
+                id=stream_id,
+                name=item.get("name", "Live Stream"),
+                url=item.get("url", ""),
+                port=int(item.get("port", 1913)),
+                status="listening",
+                error=None,
+            )
+            self.active_relays[stream_id] = relay
 
         # Start Loopback Server to receive binary data from FFmpeg
         try:
@@ -387,7 +401,45 @@ class LiveStreamManager:
         relay.process = None
         from app.vpn_manager import vpn_manager
         vpn_manager.stop_vpn_for_stream(stream_id)
+        from app.web_stream import web_stream_manager
+        web_stream_manager.close_browser(stream_id)
         logger.info(f"Stopped live relay '{relay.name}'")
+        return relay.to_dict()
+
+    async def start_browser_for_stream(self, stream_id: str) -> dict:
+        """Launch browser instance for a web stream."""
+        cfg = load_config()
+        stream_item = next((x for x in cfg.streamer.live_streams if x.get("id") == stream_id), {})
+        if not stream_item:
+            raise ValueError(f"Stream {stream_id} not found")
+
+        from app.vpn_manager import vpn_manager
+        proxy_url = vpn_manager.start_vpn_for_stream(stream_id, stream_item)
+        if proxy_url:
+            await asyncio.sleep(0.5)  # Wait 500ms for SOCKS5 local bridge socket readiness
+
+        from app.web_stream import web_stream_manager
+        name = stream_item.get("name", "Web Stream")
+        target_url = stream_item.get("url", "")
+        
+        window_title = web_stream_manager.launch_browser(stream_id, name, target_url, proxy_url)
+
+        relay = self.active_relays.get(stream_id)
+        if not relay:
+            relay = LiveRelayStatus(
+                id=stream_id,
+                name=name,
+                url=target_url,
+                port=int(stream_item.get("port", 1916)),
+                status="browser_ready",
+                error=None,
+            )
+            self.active_relays[stream_id] = relay
+        else:
+            relay.status = "browser_ready"
+            relay.error = None
+
+        logger.info(f"Opened browser for web stream '{name}' ({stream_id}). Status: browser_ready.")
         return relay.to_dict()
 
     async def _auto_restart_loop(self, relay: LiveRelayStatus):
@@ -396,82 +448,105 @@ class LiveStreamManager:
         cfg = load_config()
         stream_item = next((x for x in cfg.streamer.live_streams if x.get("id") == relay.id), {})
         proxy_url = vpn_manager.start_vpn_for_stream(relay.id, stream_item)
-        headers = stream_item.get("headers", "")
+        is_web = stream_item.get("stream_type") == "web"
         from app.ffmpeg_setup import probe_source_codec, get_relay_params, get_best_encoder, get_relay_encoding_params, format_ffmpeg_headers
-        logger.info(f"Probing source codec for '{relay.name}' at {relay.url} (proxy: {proxy_url or 'none'}) …")
-        source_codec = await asyncio.get_event_loop().run_in_executor(
-            None, probe_source_codec, relay.url, 8, proxy_url, headers
-        )
-        if source_codec == "h264":
-            video_params = get_relay_params()   # stream copy — 0 GPU
-            logger.info(f"Source is H.264 — using stream copy for '{relay.name}'")
-        else:
+        if is_web:
             encoder = get_best_encoder()
             video_params = get_relay_encoding_params(encoder)
-            logger.info(f"Source codec '{source_codec}' — re-encoding with {encoder} for '{relay.name}'")
+            logger.info(f"Web stream capture for '{relay.name}' — encoding with {encoder}")
+        else:
+            logger.info(f"Probing source codec for '{relay.name}' at {relay.url} (proxy: {proxy_url or 'none'}) …")
+            source_codec = await asyncio.get_event_loop().run_in_executor(
+                None, probe_source_codec, relay.url, 8, proxy_url
+            )
+            if source_codec == "h264":
+                video_params = get_relay_params()   # stream copy — 0 GPU
+                logger.info(f"Source is H.264 — using stream copy for '{relay.name}'")
+            else:
+                encoder = get_best_encoder()
+                video_params = get_relay_encoding_params(encoder)
+                logger.info(f"Source codec '{source_codec}' — re-encoding with {encoder} for '{relay.name}'")
 
         while relay.status in ("running", "listening"):
             try:
 
                 cmd = [get_ffmpeg_path()]
 
-                if proxy_url:
-                    if proxy_url.startswith("socks5://") or proxy_url.startswith("socks4://"):
-                        cmd.extend(["-socks_proxy", proxy_url])
-                    else:
-                        cmd.extend(["-http_proxy", proxy_url])
-
-                formatted_headers = format_ffmpeg_headers(headers, relay.url)
-                if formatted_headers and (relay.url.startswith("http://") or relay.url.startswith("https://")):
-                    cmd.extend(["-headers", formatted_headers])
-
-                # Detect HLS — URL ends with .m3u8 or contains /m3u8
-                is_hls = ".m3u8" in relay.url.lower()
-
-                # Network buffering and protocol options
-                is_network_input = any(relay.url.startswith(proto) for proto in ("http://", "https://", "rtsp://", "rtmp://", "udp://"))
-                if is_network_input:
+                if is_web:
+                    from app.web_stream import web_stream_manager
+                    window_title = await asyncio.get_event_loop().run_in_executor(
+                        None, web_stream_manager.wait_for_window_title, relay.id, relay.name, relay.url, 8.0
+                    )
+                    logger.info(f"Web stream '{relay.name}' GDIGrab targeting exact window title: '{window_title}'")
                     cmd.extend([
-                        "-probesize", "10M",
-                        "-analyzeduration", "10M"
+                        "-f", "gdigrab",
+                        "-framerate", "30",
+                        "-draw_mouse", "0",
+                        "-i", f"title={window_title}",
+                        "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                        "-map", "0:v:0",
+                        "-map", "1:a:0",
+                        "-vf", "crop=iw:ih-38:0:38,format=yuv420p",
                     ])
+                else:
+                    if proxy_url:
+                        if proxy_url.startswith("socks5://") or proxy_url.startswith("socks4://"):
+                            cmd.extend(["-socks_proxy", proxy_url])
+                        else:
+                            cmd.extend(["-http_proxy", proxy_url])
 
-                # RTSP/UDP specific buffer size option and RTSP UDP transport configuration
-                if relay.url.startswith("rtsp://") or relay.url.startswith("udp://"):
-                    cmd.extend(["-buffer_size", "10M"])
-                if relay.url.startswith("rtsp://"):
-                    cmd.extend(["-rtsp_transport", "udp"])
+                    formatted_headers = format_ffmpeg_headers(relay.url)
+                    if formatted_headers and (relay.url.startswith("http://") or relay.url.startswith("https://")):
+                        cmd.extend(["-headers", formatted_headers])
 
-                if is_hls:
-                    cmd.extend([
-                        "-allowed_extensions", "ALL",
-                        "-allowed_segment_extensions", "ALL",
-                        "-extension_picky", "0",
-                        "-timeout", "10000000",
-                    ])
-                elif relay.url.startswith("http://") or relay.url.startswith("https://"):
-                    # Plain HTTP MPEG-TS stream
-                    cmd.extend([
-                        "-reconnect", "1",
-                        "-reconnect_streamed", "1",
-                        "-reconnect_delay_max", "5",
-                        "-timeout", "5000000",
-                    ])
-                elif relay.url.startswith("rtsp://"):
-                    cmd.extend(["-stimeout", "5000000"])
-                elif relay.url.startswith("rtmp://"):
-                    cmd.extend(["-rw_timeout", "5000000"])
-                elif not is_network_input:
-                    # Local file input
-                    cmd.extend(["-re", "-stream_loop", "-1"])
+                    # Detect HLS — URL ends with .m3u8 or contains /m3u8
+                    is_hls = ".m3u8" in relay.url.lower()
 
-                cmd.extend(["-i", relay.url])
+                    # Network buffering and protocol options
+                    is_network_input = any(relay.url.startswith(proto) for proto in ("http://", "https://", "rtsp://", "rtmp://", "udp://"))
+                    if is_network_input:
+                        cmd.extend([
+                            "-probesize", "10M",
+                            "-analyzeduration", "10M"
+                        ])
+
+                    # RTSP/UDP specific buffer size option and RTSP UDP transport configuration
+                    if relay.url.startswith("rtsp://") or relay.url.startswith("udp://"):
+                        cmd.extend(["-buffer_size", "10M"])
+                    if relay.url.startswith("rtsp://"):
+                        cmd.extend(["-rtsp_transport", "udp"])
+
+                    if is_hls:
+                        cmd.extend([
+                            "-allowed_extensions", "ALL",
+                            "-allowed_segment_extensions", "ALL",
+                            "-extension_picky", "0",
+                            "-timeout", "10000000",
+                        ])
+                    elif relay.url.startswith("http://") or relay.url.startswith("https://"):
+                        # Plain HTTP MPEG-TS stream
+                        cmd.extend([
+                            "-reconnect", "1",
+                            "-reconnect_streamed", "1",
+                            "-reconnect_delay_max", "5",
+                            "-timeout", "5000000",
+                        ])
+                    elif relay.url.startswith("rtsp://"):
+                        cmd.extend(["-stimeout", "5000000"])
+                    elif relay.url.startswith("rtmp://"):
+                        cmd.extend(["-rw_timeout", "5000000"])
+                    elif not is_network_input:
+                        # Local file input
+                        cmd.extend(["-re", "-stream_loop", "-1"])
+
+                    cmd.extend(["-i", relay.url])
 
                 cmd.extend(video_params)
 
                 # Output parameters - stream to Python's local loopback TCP port
+                audio_params = ["-c:a", "aac", "-b:a", "128k"] if is_web else ["-c:a", "copy"]
+                cmd.extend(audio_params)
                 cmd.extend([
-                    "-c:a", "copy",
                     "-bsf:v", "dump_extra",  # Repeat H.264/H.265 SPS/PPS headers before keyframes
                     "-f", "mpegts",
                     f"tcp://127.0.0.1:{relay.loopback_port}"

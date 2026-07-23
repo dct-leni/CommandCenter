@@ -1487,10 +1487,10 @@ function onVpnModeChange(scope, isUserChange = false) {
     const proxyBox = document.getElementById(`${scope}-proxy-box`);
     const labelEl = document.getElementById(`${scope}-vpn-file-label`);
 
-    if (fileBox) fileBox.style.display = (mode === 'wireguard' || mode === 'openvpn') ? 'block' : 'none';
+    if (fileBox) fileBox.style.display = (mode === 'wireguard') ? 'block' : 'none';
     if (proxyBox) proxyBox.style.display = (mode === 'proxy') ? 'block' : 'none';
     if (labelEl) {
-        labelEl.textContent = (mode === 'openvpn') ? 'OpenVPN Profile (.ovpn)' : 'WireGuard Profile (.conf)';
+        labelEl.textContent = 'WireGuard Profile (.conf)';
     }
 
     if (isUserChange) {
@@ -1527,6 +1527,10 @@ async function openGlobalVpnModal() {
         const data = await api('GET', '/vpn/global');
         document.getElementById('global-vpn-mode').value = data.mode || 'none';
         document.getElementById('global-proxy-url').value = data.proxy_url || '';
+        const puEl = document.getElementById('global-proxy-username');
+        const ppEl = document.getElementById('global-proxy-password');
+        if (puEl) puEl.value = data.proxy_username || '';
+        if (ppEl) ppEl.value = data.proxy_password || '';
         _vpnState.global.content = data.profile_content || '';
         _vpnState.global.name = data.profile_name || '';
         document.getElementById('global-vpn-file-name').textContent = data.profile_name || 'No file selected';
@@ -1542,13 +1546,12 @@ function closeGlobalVpnModal() {
 }
 
 function validateVpnSettings(mode, profileContent, proxyUrl) {
-    if ((mode === 'wireguard' || mode === 'openvpn') && (!profileContent || !profileContent.trim())) {
-        const label = (mode === 'openvpn') ? 'OpenVPN profile (.ovpn)' : 'WireGuard profile (.conf)';
-        showToast(`Please select a valid ${label} file before saving.`, 'error');
+    if (mode === 'wireguard' && (!profileContent || !profileContent.trim())) {
+        showToast('Please select a valid WireGuard profile (.conf) file before saving.', 'error');
         return false;
     }
     if (mode === 'proxy' && (!proxyUrl || !proxyUrl.trim())) {
-        showToast('Please enter a valid Proxy URL (e.g. socks5://127.0.0.1:1080) before saving.', 'error');
+        showToast('Please enter a valid Proxy Server / URL (e.g. nl.free.zoogvpn.com:1080) before saving.', 'error');
         return false;
     }
     return true;
@@ -1557,10 +1560,14 @@ function validateVpnSettings(mode, profileContent, proxyUrl) {
 async function submitGlobalVpn() {
     const mode = document.getElementById('global-vpn-mode').value;
     let proxy_url = document.getElementById('global-proxy-url').value.trim();
+    const puEl = document.getElementById('global-proxy-username');
+    const ppEl = document.getElementById('global-proxy-password');
+    const proxy_username = puEl ? puEl.value.trim() : '';
+    const proxy_password = ppEl ? ppEl.value : '';
     let profile_name = _vpnState.global.name;
     let profile_content = _vpnState.global.content;
 
-    if (mode !== 'wireguard' && mode !== 'openvpn') {
+    if (mode !== 'wireguard') {
         profile_name = '';
         profile_content = '';
     }
@@ -1576,6 +1583,8 @@ async function submitGlobalVpn() {
         await api('PUT', '/vpn/global', {
             mode,
             proxy_url,
+            proxy_username,
+            proxy_password,
             profile_name,
             profile_content,
         });
@@ -1585,15 +1594,6 @@ async function submitGlobalVpn() {
     } catch (e) {
         showToast(`Error saving global VPN settings: ${e.message}`, 'error');
     }
-}
-
-function fetchLiveStreams() {
-    api('GET', '/streamer/live_streams')
-        .then(data => {
-            state.liveStreams = data.live_streams || [];
-            renderLiveStreams();
-        })
-        .catch(e => console.error('Failed to fetch live streams:', e));
 }
 
 function renderLiveStreams() {
@@ -1607,11 +1607,14 @@ function renderLiveStreams() {
 
     const html = state.liveStreams.map(item => {
         const isRunning = item.status === 'running' || item.status === 'listening';
+        const isWeb = item.stream_type === 'web';
         let statusBadge = '';
         if (item.status === 'running') {
             statusBadge = `<span class="livestream-status running"><i class="fa-solid fa-play"></i> Watching</span>`;
         } else if (item.status === 'listening') {
             statusBadge = `<span class="livestream-status listening"><i class="fa-solid fa-spinner"></i> Sleeping</span>`;
+        } else if (item.status === 'browser_ready') {
+            statusBadge = `<span class="livestream-status listening" style="background: rgba(0, 240, 255, 0.15); color: var(--accent); border-color: rgba(0, 240, 255, 0.3);"><i class="fa-solid fa-window-restore"></i> Browser Ready</span>`;
         } else if (item.status === 'error') {
             statusBadge = `<span class="livestream-status error" style="max-width: 750px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-flex; align-items: center;" title="${escapeAttr(item.error || 'Error')}"><i class="fa-solid fa-triangle-exclamation"></i> Error: ${escapeAttr(item.error || 'Unknown Error')}</span>`;
         } else {
@@ -1622,8 +1625,6 @@ function renderLiveStreams() {
         const vmode = item.vpn_mode || 'global';
         if (vmode === 'wireguard') {
             vpnBadge = `<span style="font-size: 11px; background: rgba(147, 51, 234, 0.15); color: #c084fc; border: 1px solid rgba(147, 51, 234, 0.3); padding: 2px 7px; border-radius: 4px; font-family: 'JetBrains Mono', monospace;"><i class="fa-solid fa-shield-halved"></i> WireGuard</span>`;
-        } else if (vmode === 'openvpn') {
-            vpnBadge = `<span style="font-size: 11px; background: rgba(234, 88, 12, 0.15); color: #fb923c; border: 1px solid rgba(234, 88, 12, 0.3); padding: 2px 7px; border-radius: 4px; font-family: 'JetBrains Mono', monospace;"><i class="fa-solid fa-lock"></i> OpenVPN</span>`;
         } else if (vmode === 'proxy') {
             vpnBadge = `<span style="font-size: 11px; background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); padding: 2px 7px; border-radius: 4px; font-family: 'JetBrains Mono', monospace;"><i class="fa-solid fa-network-wired"></i> Proxy</span>`;
         } else if (vmode === 'none') {
@@ -1634,6 +1635,49 @@ function renderLiveStreams() {
 
         const thumbSrc = item.thumbnail_url || `/api/streamer/live_stream/${item.id}/thumbnail?v=0`;
         const thumbHtml = getThumbHtml(thumbSrc, item.has_thumbnail, 'livestream-thumb', 'fa-tower-broadcast');
+
+        let actionsHtml = '';
+        if (isWeb) {
+            if (isRunning) {
+                actionsHtml = `
+                    <button class="btn btn-danger" onclick="stopLiveStream('${item.id}')" title="Stop Stream & Close Browser" style="padding: 4px 10px; font-size: 12px; height: 28px;">
+                        <i class="fa-solid fa-stop"></i> Stop
+                    </button>
+                `;
+            } else if (item.status === 'browser_ready') {
+                actionsHtml = `
+                    <button class="btn btn-emerald" onclick="startLiveStream('${item.id}')" title="Start Streaming Captured Window" style="padding: 4px 10px; font-size: 12px; height: 28px;">
+                        <i class="fa-solid fa-play"></i> Stream
+                    </button>
+                    <button class="btn btn-danger" onclick="stopLiveStream('${item.id}')" title="Close Browser Window" style="padding: 4px 10px; font-size: 12px; height: 28px;">
+                        <i class="fa-solid fa-stop"></i> Stop
+                    </button>
+                `;
+            } else {
+                actionsHtml = `
+                    <button class="btn btn-secondary" onclick="startWebStreamBrowser('${item.id}')" title="Launch Browser Window" style="padding: 4px 10px; font-size: 12px; height: 28px;">
+                        <i class="fa-solid fa-window-restore"></i> Start Browser
+                    </button>
+                    <button class="btn btn-emerald" onclick="startLiveStream('${item.id}')" title="Launch Browser & Stream" style="padding: 4px 10px; font-size: 12px; height: 28px;">
+                        <i class="fa-solid fa-play"></i> Stream
+                    </button>
+                `;
+            }
+        } else {
+            if (isRunning) {
+                actionsHtml = `
+                    <button class="btn btn-danger" onclick="stopLiveStream('${item.id}')" title="Stop Stream" style="padding: 4px 10px; font-size: 12px; height: 28px;">
+                        <i class="fa-solid fa-stop"></i> Stop
+                    </button>
+                `;
+            } else {
+                actionsHtml = `
+                    <button class="btn btn-emerald" onclick="startLiveStream('${item.id}')" title="Start Stream" style="padding: 4px 10px; font-size: 12px; height: 28px;">
+                        <i class="fa-solid fa-play"></i> Start
+                    </button>
+                `;
+            }
+        }
 
         return `
             <div class="folder-card livestream-card ${isRunning ? 'active' : ''}" id="livestream-${item.id}">
@@ -1646,15 +1690,7 @@ function renderLiveStreams() {
                     <span class="folder-file-count" style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 20px;" title="${escapeAttr(item.url)}">${escapeAttr(item.url)}</span>
                     
                     <div class="livestream-actions" style="margin-left: 20px; display: flex; align-items: center; gap: 8px;">
-                        ${isRunning ? `
-                            <button class="btn btn-danger" onclick="stopLiveStream('${item.id}')" title="Stop Stream" style="padding: 4px 10px; font-size: 12px; height: 28px;">
-                                <i class="fa-solid fa-stop"></i> Stop
-                            </button>
-                        ` : `
-                            <button class="btn btn-emerald" onclick="startLiveStream('${item.id}')" title="Start Stream" style="padding: 4px 10px; font-size: 12px; height: 28px;">
-                                <i class="fa-solid fa-play"></i> Start
-                            </button>
-                        `}
+                        ${actionsHtml}
                         <button class="folder-edit-btn" onclick="openEditLiveStreamModal('${item.id}')" title="Edit Stream" style="height: 28px; width: 28px; display: flex; align-items: center; justify-content: center;"><i class="fa-solid fa-pen"></i></button>
                         <button class="folder-delete-btn" onclick="deleteLiveStream('${item.id}')" title="Delete Stream" style="height: 28px; width: 28px; display: flex; align-items: center; justify-content: center;"><i class="fa-solid fa-trash"></i></button>
                     </div>
@@ -1679,7 +1715,10 @@ function openCreateLiveStreamModal() {
     document.getElementById('livestream-port').value = '1913';
     document.getElementById('livestream-vpn-mode').value = 'none';
     document.getElementById('livestream-proxy-url').value = '';
-    document.getElementById('livestream-headers').value = '';
+    const puEl = document.getElementById('livestream-proxy-username');
+    const ppEl = document.getElementById('livestream-proxy-password');
+    if (puEl) puEl.value = '';
+    if (ppEl) ppEl.value = '';
     _vpnState.livestream = { content: '', name: '' };
     document.getElementById('livestream-vpn-file-name').textContent = 'No file selected';
     onVpnModeChange('livestream');
@@ -1697,7 +1736,10 @@ function openEditLiveStreamModal(streamId) {
     document.getElementById('livestream-port').value = item.port || 1913;
     document.getElementById('livestream-vpn-mode').value = item.vpn_mode || 'none';
     document.getElementById('livestream-proxy-url').value = item.proxy_url || '';
-    document.getElementById('livestream-headers').value = item.headers || '';
+    const puEl = document.getElementById('livestream-proxy-username');
+    const ppEl = document.getElementById('livestream-proxy-password');
+    if (puEl) puEl.value = item.proxy_username || '';
+    if (ppEl) ppEl.value = item.proxy_password || '';
     _vpnState.livestream = { content: item.vpn_profile_content || '', name: item.vpn_profile_name || '' };
     document.getElementById('livestream-vpn-file-name').textContent = item.vpn_profile_name || 'No file selected';
     onVpnModeChange('livestream');
@@ -1716,11 +1758,14 @@ async function submitLiveStream() {
     const port = parseInt(document.getElementById('livestream-port').value, 10);
     const vpn_mode = document.getElementById('livestream-vpn-mode').value;
     let proxy_url = document.getElementById('livestream-proxy-url').value.trim();
-    const headers = document.getElementById('livestream-headers').value.trim();
+    const puEl = document.getElementById('livestream-proxy-username');
+    const ppEl = document.getElementById('livestream-proxy-password');
+    const proxy_username = puEl ? puEl.value.trim() : '';
+    const proxy_password = ppEl ? ppEl.value : '';
     let vpn_profile_name = _vpnState.livestream.name;
     let vpn_profile_content = _vpnState.livestream.content;
 
-    if (vpn_mode !== 'wireguard' && vpn_mode !== 'openvpn') {
+    if (vpn_mode !== 'wireguard') {
         vpn_profile_name = '';
         vpn_profile_content = '';
     }
@@ -1739,7 +1784,7 @@ async function submitLiveStream() {
 
     try {
         const payload = {
-            name, url, port, vpn_mode, proxy_url, vpn_profile_name, vpn_profile_content, headers
+            name, url, port, vpn_mode, proxy_url, proxy_username, proxy_password, vpn_profile_name, vpn_profile_content
         };
         if (streamId) {
             await api('PUT', `/streamer/live_stream/${streamId}`, payload);
@@ -1787,6 +1832,111 @@ async function deleteLiveStream(streamId) {
     }
 }
 
+async function startWebStreamBrowser(streamId) {
+    try {
+        showToast('Launching browser window for web stream...', 'info');
+        await api('POST', `/streamer/live_stream/${streamId}/start_browser`);
+        showToast('Browser window ready. Click "Stream" when ready.', 'success');
+        await fetchLiveStreams();
+    } catch (e) {
+        showToast(`Failed to launch browser: ${e.message}`, 'error');
+    }
+}
+
+function openCreateWebStreamModal() {
+    document.getElementById('webstream-modal-title').textContent = 'Create Web Browser Stream';
+    document.getElementById('webstream-id').value = '';
+    document.getElementById('webstream-name').value = '';
+    document.getElementById('webstream-url').value = '';
+    document.getElementById('webstream-port').value = '1916';
+    document.getElementById('webstream-vpn-mode').value = 'none';
+    document.getElementById('webstream-proxy-url').value = '';
+    const puEl = document.getElementById('webstream-proxy-username');
+    const ppEl = document.getElementById('webstream-proxy-password');
+    if (puEl) puEl.value = '';
+    if (ppEl) ppEl.value = '';
+    _vpnState.webstream = { content: '', name: '' };
+    document.getElementById('webstream-vpn-file-name').textContent = 'No file selected';
+    onVpnModeChange('webstream');
+    document.getElementById('webstream-save-btn').textContent = 'Create';
+    document.getElementById('webstream-modal').style.display = 'flex';
+}
+
+function openEditWebStreamModal(streamId) {
+    const item = state.liveStreams.find(x => x.id === streamId);
+    if (!item) return;
+    document.getElementById('webstream-modal-title').textContent = 'Edit Web Browser Stream';
+    document.getElementById('webstream-id').value = item.id;
+    document.getElementById('webstream-name').value = item.name || '';
+    document.getElementById('webstream-url').value = item.url || '';
+    document.getElementById('webstream-port').value = item.port || 1916;
+    document.getElementById('webstream-vpn-mode').value = item.vpn_mode || 'none';
+    document.getElementById('webstream-proxy-url').value = item.proxy_url || '';
+    const puEl = document.getElementById('webstream-proxy-username');
+    const ppEl = document.getElementById('webstream-proxy-password');
+    if (puEl) puEl.value = item.proxy_username || '';
+    if (ppEl) ppEl.value = item.proxy_password || '';
+    _vpnState.webstream = { content: item.vpn_profile_content || '', name: item.vpn_profile_name || '' };
+    document.getElementById('webstream-vpn-file-name').textContent = item.vpn_profile_name || 'No file selected';
+    onVpnModeChange('webstream');
+    document.getElementById('webstream-save-btn').textContent = 'Save';
+    document.getElementById('webstream-modal').style.display = 'flex';
+}
+
+function closeWebStreamModal() {
+    document.getElementById('webstream-modal').style.display = 'none';
+}
+
+async function submitWebStream() {
+    const streamId = document.getElementById('webstream-id').value;
+    const name = document.getElementById('webstream-name').value.trim();
+    const url = document.getElementById('webstream-url').value.trim();
+    const port = parseInt(document.getElementById('webstream-port').value, 10);
+    const vpn_mode = document.getElementById('webstream-vpn-mode').value;
+    let proxy_url = document.getElementById('webstream-proxy-url').value.trim();
+    const puEl = document.getElementById('webstream-proxy-username');
+    const ppEl = document.getElementById('webstream-proxy-password');
+    const proxy_username = puEl ? puEl.value.trim() : '';
+    const proxy_password = ppEl ? ppEl.value : '';
+    let vpn_profile_name = _vpnState.webstream.name;
+    let vpn_profile_content = _vpnState.webstream.content;
+
+    if (vpn_mode !== 'wireguard') {
+        vpn_profile_name = '';
+        vpn_profile_content = '';
+    }
+    if (vpn_mode !== 'proxy') {
+        proxy_url = '';
+    }
+
+    if (!name || !url || isNaN(port)) {
+        showToast('Please enter valid Name, Web URL, and Port', 'error');
+        return;
+    }
+
+    if (!validateVpnSettings(vpn_mode, vpn_profile_content, proxy_url)) {
+        return;
+    }
+
+    try {
+        const payload = {
+            name, url, port, vpn_mode, proxy_url, proxy_username, proxy_password, vpn_profile_name, vpn_profile_content,
+            stream_type: 'web'
+        };
+        if (streamId) {
+            await api('PUT', `/streamer/live_stream/${streamId}`, payload);
+            showToast('Web stream updated', 'success');
+        } else {
+            await api('POST', '/streamer/live_stream', payload);
+            showToast('Web stream created', 'success');
+        }
+        closeWebStreamModal();
+        await fetchLiveStreams();
+    } catch (e) {
+        showToast(`Error saving web stream: ${e.message}`, 'error');
+    }
+}
+
 window.onVpnModeChange = onVpnModeChange;
 window.onVpnFileSelected = onVpnFileSelected;
 window.openGlobalVpnModal = openGlobalVpnModal;
@@ -1796,6 +1946,11 @@ window.openCreateLiveStreamModal = openCreateLiveStreamModal;
 window.openEditLiveStreamModal = openEditLiveStreamModal;
 window.closeLiveStreamModal = closeLiveStreamModal;
 window.submitLiveStream = submitLiveStream;
+window.openCreateWebStreamModal = openCreateWebStreamModal;
+window.openEditWebStreamModal = openEditWebStreamModal;
+window.closeWebStreamModal = closeWebStreamModal;
+window.submitWebStream = submitWebStream;
+window.startWebStreamBrowser = startWebStreamBrowser;
 window.startLiveStream = startLiveStream;
 window.stopLiveStream = stopLiveStream;
 window.deleteLiveStream = deleteLiveStream;

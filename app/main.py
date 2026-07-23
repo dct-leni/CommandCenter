@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Query, File, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
@@ -36,6 +36,12 @@ logger = logging.getLogger("commandcenter")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Purge any leftover temporary VPN config files and browser profiles on startup
+    from app.vpn_manager import vpn_manager
+    from app.web_stream import web_stream_manager
+    vpn_manager.purge_temp_dir()
+    web_stream_manager.purge_all()
+
     # Resolve external IP on app start
     asyncio.create_task(streamer._resolve_external_ip())
 
@@ -49,9 +55,9 @@ async def lifespan(app: FastAPI):
                 streamer.start_streaming(cfg.streamer.port_range_start, cfg.streamer.port_range_end)
             )
         
-    # Resume auto_start live streams across server restarts
+    # Resume auto_start live streams across server restarts (excluding web streams)
     for ls_item in cfg.streamer.live_streams:
-        if ls_item.get("auto_start"):
+        if ls_item.get("auto_start") and ls_item.get("stream_type") != "web":
             try:
                 logger.info(f"Auto-resuming live relay stream: {ls_item.get('name')} on :{ls_item.get('port')}")
                 asyncio.create_task(live_relay_manager.start_stream(ls_item.get("id")))
@@ -66,6 +72,9 @@ async def lifespan(app: FastAPI):
 
     for ls_status in list(live_relay_manager.active_relays.values()):
         await live_relay_manager.stop_stream(ls_status.id)
+
+    vpn_manager.purge_temp_dir()
+    web_stream_manager.purge_all()
 
 # Create FastAPI app
 app = FastAPI(title="CommandCenter", version="1.0.0", lifespan=lifespan)
@@ -127,11 +136,13 @@ class LiveStreamCreateRequest(BaseModel):
     url: str
     port: int
     auto_start: bool = False
-    vpn_mode: str = "global"  # global, none, wireguard, openvpn, proxy
+    vpn_mode: str = "global"  # global, none, wireguard, proxy
     vpn_profile_name: Optional[str] = None
     vpn_profile_content: Optional[str] = None
     proxy_url: Optional[str] = None
-    headers: Optional[str] = None
+    proxy_username: Optional[str] = None
+    proxy_password: Optional[str] = None
+    stream_type: str = "http"  # "http" or "web"
 
 
 class LiveStreamUpdateRequest(BaseModel):
@@ -143,7 +154,9 @@ class LiveStreamUpdateRequest(BaseModel):
     vpn_profile_name: Optional[str] = None
     vpn_profile_content: Optional[str] = None
     proxy_url: Optional[str] = None
-    headers: Optional[str] = None
+    proxy_username: Optional[str] = None
+    proxy_password: Optional[str] = None
+    stream_type: Optional[str] = None
 
 
 class GlobalVPNUpdateRequest(BaseModel):
@@ -151,6 +164,8 @@ class GlobalVPNUpdateRequest(BaseModel):
     profile_name: Optional[str] = None
     profile_content: Optional[str] = None
     proxy_url: Optional[str] = None
+    proxy_username: Optional[str] = None
+    proxy_password: Optional[str] = None
 
 
 # ──────────────────────────────────────────────
@@ -735,11 +750,10 @@ async def live_stream_thumbnail(stream_id: str):
 
 
 def validate_vpn_payload(mode: str, profile_content: str, proxy_url: str):
-    if mode in ("wireguard", "openvpn") and not (profile_content and profile_content.strip()):
-        label = "OpenVPN (.ovpn)" if mode == "openvpn" else "WireGuard (.conf)"
+    if mode == "wireguard" and not (profile_content and profile_content.strip()):
         raise HTTPException(
             status_code=400,
-            detail=f"{label} mode requires a valid profile file."
+            detail="WireGuard (.conf) mode requires a valid profile file."
         )
     if mode == "proxy" and not (proxy_url and proxy_url.strip()):
         raise HTTPException(
@@ -749,8 +763,11 @@ def validate_vpn_payload(mode: str, profile_content: str, proxy_url: str):
 
 
 def sanitize_vpn_data(mode: str, name: str, content: str, proxy: str):
-    """Ensure that profile name/content and proxy URL are cleared when mode changes to a mode that doesn't use them."""
-    if mode not in ("wireguard", "openvpn"):
+    """Ensure profile name/content and proxy URL are cleaned and cleared when mode changes."""
+    if mode == "wireguard":
+        if content:
+            content = "\n".join(line.strip() for line in content.splitlines() if line.strip())
+    else:
         name = ""
         content = ""
     if mode != "proxy":
@@ -780,6 +797,10 @@ async def update_global_vpn(body: GlobalVPNUpdateRequest):
         "profile_name": p_name,
         "profile_content": p_content,
         "proxy_url": p_proxy,
+        "proxy_username": body.proxy_username or "",
+        "proxy_password": body.proxy_password or "",
+        "vpn_username": body.vpn_username or "",
+        "vpn_password": body.vpn_password or "",
     }
     update_config({"streamer": {"global_vpn": new_vpn}})
     return {"status": "success", "global_vpn": new_vpn}
@@ -809,7 +830,9 @@ async def create_live_stream(body: LiveStreamCreateRequest):
         "vpn_profile_name": p_name,
         "vpn_profile_content": p_content,
         "proxy_url": p_proxy,
-        "headers": body.headers or "",
+        "proxy_username": body.proxy_username or "",
+        "proxy_password": body.proxy_password or "",
+        "stream_type": body.stream_type or "http",
     }
     cfg.streamer.live_streams.append(new_item)
     update_config({"streamer": {"live_streams": cfg.streamer.live_streams}})
@@ -845,12 +868,29 @@ async def update_live_stream(stream_id: str, body: LiveStreamUpdateRequest):
             item["vpn_profile_name"] = p_name
             item["vpn_profile_content"] = p_content
             item["proxy_url"] = p_proxy
+            
+            if body.proxy_username is not None:
+                item["proxy_username"] = body.proxy_username
+            if body.proxy_password is not None:
+                item["proxy_password"] = body.proxy_password
 
-            if body.headers is not None:
-                item["headers"] = body.headers
+            if body.stream_type is not None:
+                item["stream_type"] = body.stream_type
+
             update_config({"streamer": {"live_streams": cfg.streamer.live_streams}})
             return {"status": "success", "live_stream": item}
     raise HTTPException(status_code=404, detail="Live stream not found")
+
+
+
+@app.post("/api/streamer/live_stream/{stream_id}/start_browser")
+async def start_web_stream_browser(stream_id: str):
+    """Launch browser instance for a web stream."""
+    try:
+        res = await live_relay_manager.start_browser_for_stream(stream_id)
+        return res
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.delete("/api/streamer/live_stream/{stream_id}")
@@ -867,11 +907,14 @@ async def delete_live_stream(stream_id: str):
 async def start_live_stream(stream_id: str):
     """Start the FFmpeg relay process for a live stream."""
     try:
-        # Dynamically set auto_start to True in config so it auto-resumes on boot
+        # Dynamically set auto_start to True in config (excluding web streams) so it auto-resumes on boot
         cfg = load_config()
         for item in cfg.streamer.live_streams:
             if item.get("id") == stream_id:
-                item["auto_start"] = True
+                if item.get("stream_type") != "web":
+                    item["auto_start"] = True
+                else:
+                    item["auto_start"] = False
                 update_config({"streamer": {"live_streams": cfg.streamer.live_streams}})
                 break
         res = await live_relay_manager.start_stream(stream_id)

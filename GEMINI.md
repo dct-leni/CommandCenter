@@ -102,6 +102,18 @@ To prevent breaking the application, any AI or developer modifying this codebase
 * **Rule**: Always place `-ss <seconds>` BEFORE `-i video_path` when extracting thumbnails. Default seek offset is set to 15s (`-ss 15.0`) to avoid black intro screens.
 * **Why**: Placing `-ss` before `-i` forces FFmpeg to perform container-level keyframe fast-seeking (~15ms execution time), whereas placing `-ss` after `-i` decodes all frames sequentially from timestamp 0:00 (up to 2000ms execution time).
 
+### 8. Public Source Protection — No Hardcoded Real IPs or Domains
+* **Rule**: NEVER store real public IP addresses, real target domain names, private stream URLs, or specific service credentials in Python source code, frontend HTML/JS files, or documentation.
+* **Why**: The codebase is shared publicly. Storing real IPs or private service URLs in code risks security leaks and exposes infrastructure.
+* **Solution**: Real target URLs, VPN profiles, and external IPs must exist ONLY inside `config.yml`. All source code, templates, UI placeholders, test scripts, and documentation MUST use generic placeholders (`https://example.com/stream`, `rtmp://example.com/live`, `socks5://127.0.0.1:1080`).
+
+### 9. Web Stream 2-Stage Interactive Capture & GDI Flags
+* **Rule**: Web streams follow a 2-stage workflow:
+  1. **Stage 1 (`Start`)**: Launches a standalone 1280×720 browser popup window and sets status to `browser_ready` so users can log in, navigate, and enter full screen.
+  2. **Stage 2 (`Stream`)**: Initializes FFmpeg `gdigrab` screen capture and HTTP broadcasting on port `:1916`.
+* **Chromium Flags**: Browser instances must be launched with GDI software rendering flags (`--disable-gpu --disable-gpu-compositing --disable-direct-composition`) and strict popup blocking flags (`--block-new-web-contents --disable-notifications --disable-save-password-bubble --disable-infobars --deny-permission-prompts --disable-translate`).
+* **FFmpeg Video Filter**: Web stream capture MUST include `-vf "crop=iw:ih-38:0:38,format=yuv420p"` to crop out the top 38px OS window titlebar and convert raw BGRA frames to standard YUV 4:2:0 H.264 video for network decoders.
+
 
 
 

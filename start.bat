@@ -1,4 +1,5 @@
 @echo off
+cd /d "%~dp0"
 echo ============================================
 echo   CommandCenter - Video Converter ^& Streamer
 echo ============================================
@@ -9,3 +10,4 @@ echo.
 echo Starting CommandCenter...
 python -m app.main
 pause
+
