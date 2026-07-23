@@ -793,8 +793,6 @@ async def update_global_vpn(body: GlobalVPNUpdateRequest):
         "proxy_url": p_proxy,
         "proxy_username": body.proxy_username or "",
         "proxy_password": body.proxy_password or "",
-        "vpn_username": body.vpn_username or "",
-        "vpn_password": body.vpn_password or "",
     }
     update_config({"streamer": {"global_vpn": new_vpn}})
     from app.vpn_manager import vpn_manager
