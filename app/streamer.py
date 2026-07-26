@@ -866,6 +866,16 @@ class Streamer:
                 self._errors.append(stream_info.error)
                 return
 
+            # Check if audio stream in slot uses AAC (requires aac_adtstoasc filter for FLV/RTMP)
+            is_aac = False
+            if slot.paths:
+                for p in slot.paths[:3]:
+                    meta = get_video_metadata(p)
+                    a_codec = meta.get("audio_codec", "").lower()
+                    if "aac" in a_codec:
+                        is_aac = True
+                        break
+
             # 2. Start FFmpeg using concat demuxer
             ffmpeg_cmd = [
                 get_ffmpeg_path(),
@@ -876,10 +886,13 @@ class Streamer:
                 "-map", "0:v?",                # Map all video streams if present
                 "-map", "0:a?",                # Map all audio streams if present
                 "-c", "copy",
-                "-bsf:a", "aac_adtstoasc",    # Convert ADTS AAC headers to FLV/RTMP AudioSpecificConfig
+            ]
+            if is_aac:
+                ffmpeg_cmd.extend(["-bsf:a", "aac_adtstoasc"])  # Convert ADTS AAC headers to FLV/RTMP AudioSpecificConfig
+            ffmpeg_cmd.extend([
                 "-f", "flv",
                 ingest_url,
-            ]
+            ])
 
             ffmpeg_process = await asyncio.create_subprocess_exec(
                 *ffmpeg_cmd,

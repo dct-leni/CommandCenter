@@ -196,6 +196,7 @@ def get_video_metadata(video_path: str) -> dict:
                 "video_bitrate": v_bitrate,
                 "audio_bitrate": a_bitrate,
                 "codec": video_stream.get("codec_name", "unknown"),
+                "audio_codec": audio_stream.get("codec_name", "").lower(),
                 "width": int(video_stream.get("width", 0)),
                 "height": int(video_stream.get("height", 0)),
                 "fps": _parse_fps(video_stream.get("r_frame_rate", "0/1")),
