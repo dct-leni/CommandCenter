@@ -872,7 +872,7 @@ class Streamer:
                 for p in slot.paths[:3]:
                     meta = get_video_metadata(p)
                     a_codec = meta.get("audio_codec", "").lower()
-                    if "aac" in a_codec:
+                    if "aac" in a_codec or "mp4a" in a_codec:
                         is_aac = True
                         break
 

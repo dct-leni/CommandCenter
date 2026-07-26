@@ -181,6 +181,8 @@ def get_encoding_params(encoder: str, source_bitrate: Optional[int] = None) -> l
     if encoder == "h264_nvenc":
         return [
             "-c:v", "h264_nvenc",
+            "-rc", "vbr",                # Explicit VBR rate control to enforce target/max bitrate
+            "-cq", "24",                 # Constant quality target to prevent NVENC bitrate runaway
             "-preset", "p6",             # High-quality preset
             "-profile:v", "high",
             "-b:v", target_b_str,

@@ -120,7 +120,8 @@ async def probe_streams(input_path: str) -> dict:
             tags = stream.get("tags", {}) or {}
             language = (tags.get("language") or "").lower()
             title = (tags.get("title") or "").lower()
-            result["audio"].append({"index": idx, "language": language, "title": title})
+            codec_name = (stream.get("codec_name") or "").lower()
+            result["audio"].append({"index": idx, "language": language, "title": title, "codec": codec_name})
  
     return result
  
@@ -131,6 +132,7 @@ def _select_audio_by_language(audio_streams: List[dict], languages: List[str]) -
     `languages` is the configured list of language tags to keep (e.g.
     ["tur", "tr", "trk"]), matched against each stream's language tag or,
     as a loose fallback, checked as a substring of the stream title.
+    Keeps exactly ONE primary audio stream (preferring AAC if multiple match).
     """
     wanted = {lang.lower() for lang in languages}
  
@@ -139,11 +141,14 @@ def _select_audio_by_language(audio_streams: List[dict], languages: List[str]) -
         if a["language"] in wanted or any(lang in a["title"] for lang in wanted if lang)
     ]
     if matched:
-        return [a["index"] for a in matched], f"kept {len(matched)} audio track(s) matching {sorted(wanted)}"
+        # Prefer AAC audio stream if multiple match the language
+        aac_matched = [a for a in matched if "aac" in a.get("codec", "") or "mp4a" in a.get("codec", "")]
+        best = aac_matched[0] if aac_matched else matched[0]
+        return [best["index"]], f"kept 1 primary audio track (index {best['index']}, {best.get('codec', 'unknown')}) matching {sorted(wanted)}"
  
     if audio_streams:
         first = audio_streams[0]
-        return [first["index"]], f"no audio matching {sorted(wanted)} found — kept first audio track as fallback"
+        return [first["index"]], f"no audio matching {sorted(wanted)} found — kept first audio track (index {first['index']}) as fallback"
  
     return [], "no audio streams found"
  
