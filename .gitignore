@@ -23,3 +23,7 @@ streams/*
 config.yml
 
 .codegraph/
+
+auto.crt
+auto.key
+summery.md

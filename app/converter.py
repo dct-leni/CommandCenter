@@ -549,15 +549,18 @@ class Converter:
  
         base_cmd = [get_ffmpeg_path(), "-y", "-hwaccel", "auto", "-i", input_path]
  
-        # --- Stream mapping: explicit video + only the selected audio tracks.
+        # --- Stream mapping: explicit video + selected or fallback audio tracks.
         # Subtitles are dropped simply by never mapping them.
         map_args = []
         if video_stream_index is not None:
             map_args += ["-map", f"0:{video_stream_index}"]
         else:
             map_args += ["-map", "0:v:0"]  # best-effort fallback
-        for a_idx in audio_indices:
-            map_args += ["-map", f"0:{a_idx}"]
+        if audio_indices:
+            for a_idx in audio_indices:
+                map_args += ["-map", f"0:{a_idx}"]
+        else:
+            map_args += ["-map", "0:a?"]   # best-effort audio fallback if no indices were matched
  
         scale_args = []
         if target_size:

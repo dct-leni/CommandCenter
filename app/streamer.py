@@ -873,7 +873,10 @@ class Streamer:
                 "-f", "concat",                # Concat demuxer
                 "-safe", "0",
                 "-i", playlist_path,
+                "-map", "0:v?",                # Map all video streams if present
+                "-map", "0:a?",                # Map all audio streams if present
                 "-c", "copy",
+                "-bsf:a", "aac_adtstoasc",    # Convert ADTS AAC headers to FLV/RTMP AudioSpecificConfig
                 "-f", "flv",
                 ingest_url,
             ]
