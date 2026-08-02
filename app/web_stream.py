@@ -1,11 +1,17 @@
 """
 Browser manager for Web Stream Live Relays.
-Opens target URLs in system default web browser without hardcoded executable paths.
+Launches Portable Firefox (phyrox-portable) with an isolated profile and the
+CommandCenter MV2 audio extension that streams tab PCM audio over WebSocket.
 """
 
 import os
+import shutil
 import ctypes
 import logging
+import tempfile
+import time
+import zipfile
+import json
 import webbrowser
 import subprocess
 from pathlib import Path
@@ -14,8 +20,20 @@ from typing import Optional, Dict, List
 
 logger = logging.getLogger(__name__)
 
-# Directory for isolated browser user profile data
-BROWSER_PROFILES_DIR = Path(__file__).parent.parent / "temp" / "browser_profiles"
+# Base project directory (CommandCenter root)
+_BASE_DIR = Path(__file__).parent.parent
+
+# Directory for isolated Firefox profile data per stream
+BROWSER_PROFILES_DIR = _BASE_DIR / "temp" / "firefox_profiles"
+
+# Paths for portable Firefox binary candidates inside bin/
+_FIREFOX_CANDIDATES = [
+    # phyrox-portable v152 (user-provided)
+    _BASE_DIR / "bin" / "phyrox-portable-win64-152.0.4-70" / "app" / "firefox.exe",
+    # generic portable build fallback
+    _BASE_DIR / "bin" / "firefox-win" / "firefox.exe",
+    _BASE_DIR / "bin" / "firefox-win" / "app" / "firefox.exe",
+]
 
 
 if os.name == "nt":
@@ -33,6 +51,10 @@ if os.name == "nt":
     user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user32.GetWindowThreadProcessId.restype = wintypes.DWORD
     user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetClientRect.restype = wintypes.BOOL
+    user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    user32.ClientToScreen.restype = wintypes.BOOL
+    # ClientToScreen takes HWND + POINT pointer — declared lazily to avoid POINT definition issues here
 
 
 def get_child_pids(parent_pid: int) -> set:
@@ -66,42 +88,20 @@ def get_child_pids(parent_pid: int) -> set:
         pe32.dwSize = ctypes.sizeof(PROCESSENTRY32W)
 
         if kernel32.Process32FirstW(hSnapshot, ctypes.byref(pe32)):
-            while True:
-                if pe32.th32ParentProcessID in pids:
-                    pids.add(pe32.th32ProcessID)
-                if not kernel32.Process32NextW(hSnapshot, ctypes.byref(pe32)):
-                    break
+            added = True
+            while added:
+                added = False
+                if kernel32.Process32FirstW(hSnapshot, ctypes.byref(pe32)):
+                    while True:
+                        if pe32.th32ParentProcessID in pids and pe32.th32ProcessID not in pids:
+                            pids.add(pe32.th32ProcessID)
+                            added = True
+                        if not kernel32.Process32NextW(hSnapshot, ctypes.byref(pe32)):
+                            break
         kernel32.CloseHandle(hSnapshot)
     except Exception as e:
         logger.debug(f"Error querying child PIDs: {e}")
     return pids
-
-
-def get_window_titles_for_pids(target_pids: set) -> List[str]:
-    """Get all non-empty window titles belonging to target PIDs."""
-    if os.name != "nt" or not target_pids:
-        return []
-    try:
-        from ctypes import wintypes
-        titles = []
-
-        def foreach_window(hwnd, lParam):
-            pid = wintypes.DWORD()
-            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-            if pid.value in target_pids:
-                buff = ctypes.create_unicode_buffer(512)
-                user32.GetWindowTextW(hwnd, buff, 512)
-                val = buff.value
-                if val and val.strip():
-                    titles.append(val.strip())
-            return True
-
-        cb = WNDENUMPROC(foreach_window)
-        user32.EnumWindows(cb, 0)
-        return titles
-    except Exception as e:
-        logger.debug(f"Error getting window titles for PIDs: {e}")
-        return []
 
 
 def get_open_window_titles() -> List[str]:
@@ -126,75 +126,377 @@ def get_open_window_titles() -> List[str]:
         return []
 
 
-def find_browser_executable() -> Optional[str]:
-    """Find available Chromium-based browser binary path on host Windows system."""
-    import shutil
-    for name in ["chrome", "msedge", "brave", "opera", "vivaldi"]:
-        path = shutil.which(name)
-        if path:
-            return path
-
-    candidates = [
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
-        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-        r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-        os.path.expandvars(r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe"),
-    ]
-    for p in candidates:
-        if Path(p).exists():
-            return p
+def find_firefox_executable() -> Optional[str]:
+    """Return path to portable Firefox binary inside bin/."""
+    for candidate in _FIREFOX_CANDIDATES:
+        if candidate.exists():
+            logger.debug(f"Found portable Firefox at: {candidate}")
+            return str(candidate)
     return None
+
+
+def _ensure_firefox_policies(firefox_exe: Path) -> None:
+    """Write Enterprise policies.json to force Firefox to skip Welcome / Terms of Use / Telemetry prompts."""
+    try:
+        policy_data = {
+            "policies": {
+                "DisableAppUpdate": True,
+                "DisableFeedbackCommands": True,
+                "DisableFirefoxStudies": True,
+                "DisablePocket": True,
+                "DisableTelemetry": True,
+                "OverrideFirstRunPage": "",
+                "OverridePostUpdatePage": "",
+                "SkipFirstRunWelcome": True,
+                "UserMessaging": {
+                    "ExtensionRecommendations": False,
+                    "FeatureRecommendations": False,
+                    "UrlbarInteractions": False,
+                    "WhatsNew": False,
+                    "SkipOnboarding": True
+                },
+                "Preferences": {
+                    "browser.aboutwelcome.enabled": False,
+                    "browser.rights.3.shown": True,
+                    "browser.rights.override": "show",
+                    "browser.rights.silence": True,
+                    "browser.tos.accepted": True,
+                    "browser.tos.shown": True,
+                    "browser.onboarding.enabled": False,
+                    "browser.onboarding.hidden": True,
+                    "datareporting.policy.dataSubmissionPolicyAcceptedVersion": 999,
+                    "datareporting.policy.dataSubmissionPolicyBypassNotification": True,
+                    "datareporting.policy.firstRunURL": "",
+                    "toolkit.telemetry.reportingpolicy.firstRun": False
+                }
+            }
+        }
+        policy_json = json.dumps(policy_data, indent=2)
+
+        # Write to app/distribution and parent/distribution
+        dirs_to_try = [firefox_exe.parent / "distribution", firefox_exe.parent.parent / "distribution"]
+        for d in dirs_to_try:
+            try:
+                d.mkdir(exist_ok=True)
+                (d / "policies.json").write_text(policy_json, encoding="utf-8")
+            except Exception:
+                pass
+        logger.info("Created Enterprise policies.json to bypass Firefox Welcome / Terms of Use prompts.")
+    except Exception as e:
+        logger.warning(f"Could not write Firefox policies.json: {e}")
+
+
+def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, stream_id: str = "") -> None:
+    """
+    Create (or refresh) an isolated Firefox profile with user.js prefs and the MV2 audio
+    extension. On every call:
+      - Stale session/cache/cookie files are deleted so Firefox starts clean.
+      - Comprehensive user.js prefs silence all first-run dialogs (incl. Terms of Use),
+        block popups, and auto-accept cookie banners.
+      - The MV2 audio extension is copied fresh into the extensions folder.
+    """
+    profile_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- Clean stale session/cache/cookie files on every restart ---
+    _STALE_PATHS = [
+        "sessionstore.jsonlz4",
+        "sessionstore-backups",
+        "cookies.sqlite",
+        "cookies.sqlite-shm",
+        "cookies.sqlite-wal",
+        "cache2",
+        "startupCache",
+        "thumbnails",
+        "OfflineCache",
+        "storage",
+        "webappsstore.sqlite",
+        "extensions.json",
+        "addonStartup.json.lz4"
+    ]
+    for name in _STALE_PATHS:
+        p = profile_dir / name
+        try:
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+            elif p.exists():
+                p.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    # --- Generate Page Visibility Override Extension ---
+    # This prevents sites like YouTube/Twitch/TikTok from pausing video when unfocused
+    ext_dir = profile_dir / "extensions"
+    ext_dir.mkdir(exist_ok=True)
+    ext_id = "visibility@commandcenter.local"
+    ext_path = ext_dir / f"{ext_id}.xpi"
+    
+    manifest = {
+        "manifest_version": 2,
+        "name": "Visibility Override",
+        "version": "1.0",
+        "browser_specific_settings": {
+            "gecko": {
+                "id": ext_id
+            }
+        },
+        "content_scripts": [{
+            "matches": ["<all_urls>"],
+            "js": ["content.js"],
+            "run_at": "document_start",
+            "all_frames": True
+        }],
+        "permissions": [
+            "http://127.0.0.1/*",
+            "http://localhost/*"
+        ]
+    }
+    content_js = r"""
+    Object.defineProperty(document, 'visibilityState', { get: () => 'visible' });
+    Object.defineProperty(document, 'hidden', { get: () => false });
+    window.addEventListener('visibilitychange', e => e.stopImmediatePropagation(), true);
+
+    function hideHeaderAndFooter() {
+        const selectors = [
+            'header', 'nav', 'footer', 'aside', '#footer-id', '#header-id',
+            '[id*="footer"]', '[class*="footer"]', '[id*="Footer"]', '[class*="Footer"]',
+            '[id*="header"]', '[class*="header"]', '[id*="Header"]', '[class*="Header"]',
+            '[id*="nav"]', '[class*="nav"]', '[id*="Nav"]', '[class*="Nav"]',
+            '[class*="menu"]', '[class*="Menu"]'
+        ];
+        document.querySelectorAll(selectors.join(', ')).forEach(p => {
+            if (p) {
+                p.style.setProperty('opacity', '0', 'important');
+                p.style.setProperty('pointer-events', 'none', 'important');
+            }
+        });
+        
+        document.querySelectorAll('button, a').forEach(b => {
+            const txt = (b.textContent || '').trim().toLowerCase();
+            if (txt === 'continue' || txt === 'agree' || txt === 'accept' || txt === 'get started') {
+                if (document.body && (document.body.textContent.includes('Welcome to Firefox') || document.body.textContent.includes('Terms of Use'))) {
+                    try { b.click(); } catch(e) {}
+                }
+            }
+        });
+    }
+
+    hideHeaderAndFooter();
+    setInterval(hideHeaderAndFooter, 2000);
+    """
+    
+    with zipfile.ZipFile(ext_path, 'w') as zf:
+        zf.writestr('manifest.json', json.dumps(manifest))
+        zf.writestr('content.js', content_js.replace("{stream_id}", stream_id))
+
+    # --- Write user.js preferences ---
+    user_js = profile_dir / "user.js"
+    prefs = [
+        # --- Media autoplay & audio sink selection always allowed ---
+        'user_pref("media.autoplay.default", 0);',
+        'user_pref("media.autoplay.blocking_policy", 0);',
+        'user_pref("media.navigator.permission.disabled", true);',
+        'user_pref("media.setsinkid.enabled", true);',
+
+        # --- Keep media playing when Firefox is minimized / background / unfocused ---
+        'user_pref("media.block-autoplay-until-in-foreground", false);',
+        'user_pref("dom.suspend_inactive.enabled", false);',
+        'user_pref("media.block-play-during-focus-change", false);',
+        'user_pref("dom.webnotifications.enabled", false);',
+        'user_pref("browser.tabs.remote.force-enable", false);',
+        'user_pref("dom.disable_window_move_resize", true);',
+
+        # --- HTML5 Video Read-ahead Buffer (prevents 1-second network fetch pauses) ---
+        'user_pref("media.cache_readahead_limit", 7200);',
+        'user_pref("media.cache_resume_threshold", 3600);',
+
+        # --- Enable Extensions & userChrome/userContent.css stylesheet ---
+        'user_pref("extensions.autoDisableScopes", 0);',
+        'user_pref("extensions.enabledScopes", 15);',
+        'user_pref("xpinstall.signatures.required", false);',
+        'user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);',
+
+        # --- Skip Terms of Use / first-run flow entirely ---
+        'user_pref("browser.rights.3.shown", true);',
+        'user_pref("browser.rights.override", "show");',
+        'user_pref("browser.rights.silence", true);',
+        'user_pref("browser.tos.accepted", true);',
+        'user_pref("browser.tos.shown", true);',
+        'user_pref("browser.onboarding.enabled", false);',
+        'user_pref("browser.onboarding.hidden", true);',
+        'user_pref("privacy.privacyState.migration", 2);',
+        'user_pref("messaging-system.rcc.enabled", false);',
+        'user_pref("browser.messaging-system.whatsNewPanel.enabled", false);',
+        'user_pref("browser.newtabpage.activity-stream.asrouter.userprefs.cfr.addons", false);',
+        'user_pref("browser.newtabpage.activity-stream.asrouter.userprefs.cfr.features", false);',
+        'user_pref("trailhead.firstrun.branches", "nofirstrun-noop");',
+        'user_pref("browser.startup.homepage_override.mstone", "ignore");',
+        'user_pref("datareporting.policy.firstRunURL", "");',
+        'user_pref("datareporting.policy.currentPolicyVersion", 999);',
+        'user_pref("datareporting.policy.minimumPolicyVersion", 0);',
+        'user_pref("datareporting.policy.notifiedUserVersions", 999);',
+        'user_pref("datareporting.policy.dataSubmissionEnabled", false);',
+        'user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);',
+        'user_pref("toolkit.telemetry.enabled", false);',
+        'user_pref("toolkit.telemetry.unified", false);',
+        'user_pref("app.normandy.firstRun", false);',
+        'user_pref("app.normandy.enabled", false);',
+        'user_pref("app.shield.optoutstudies.enabled", false);',
+        'user_pref("browser.aboutwelcome.enabled", false);',
+        'user_pref("browser.startup.firstrunSkipsHomepage", true);',
+        'user_pref("browser.uitour.enabled", false);',
+        'user_pref("startup.homepage_welcome_url", "about:blank");',
+        'user_pref("startup.homepage_welcome_url.additional", "");',
+        'user_pref("browser.shell.checkDefaultBrowser", false);',
+        'user_pref("browser.startup.homepage", "about:blank");',
+        'user_pref("browser.newtabpage.enabled", false);',
+        'user_pref("browser.newtabpage.activity-stream.showSponsored", false);',
+        'user_pref("browser.newtabpage.activity-stream.showSponsoredTopSites", false);',
+
+        # --- Block popups & force new links into active tab ---
+        'user_pref("dom.disable_open_during_load", true);',
+        'user_pref("privacy.popups.policy", 1);',
+        'user_pref("dom.popup_maximum", 0);',
+        'user_pref("browser.link.open_newwindow", 1);',
+        'user_pref("browser.link.open_newwindow.restriction", 0);',
+
+        # --- Software WebRender GDI Compositor (Eliminates Hardware Fallback Loop) ---
+        'user_pref("gfx.webrender.all", false);',
+        'user_pref("gfx.webrender.software", true);',
+        'user_pref("gfx.webrender.software.opengl", false);',
+        'user_pref("media.hardware-video-decoding.enabled", true);',
+        'user_pref("layers.acceleration.disabled", true);',
+        'user_pref("gfx.direct2d.disabled", true);',
+
+        # --- Low-latency HTML5 video decoding & render sync ---
+        'user_pref("media.hardware-video-decoding.failed", false);',
+        'user_pref("image.mem.shared", true);',
+
+        # --- Disable background network & timer throttling & Windows 11 EcoQoS Efficiency Mode ---
+        'user_pref("widget.windows.window_occlusion_tracking.enabled", false);',
+        'user_pref("dom.timeout.enable_budget_timer_throttling", false);',
+        'user_pref("network.http.throttle.enable", false);',
+        'user_pref("dom.min_background_timeout_value", 10);',
+        'user_pref("dom.ipc.processPriorityManager.backgroundUsesEcoQoS", false);',
+        'user_pref("media.suspend-bkgnd-video.enabled", false);',
+        'user_pref("media.dormant-on-pause-timeout-ms", -1);',
+
+        # --- Auto-accept cookie banners & allow cross-site streaming cookies ---
+        'user_pref("cookiebanners.service.mode", 2);',
+        'user_pref("cookiebanners.service.mode.privateBrowsing", 2);',
+        'user_pref("cookiebanners.ui.desktop.enabled", false);',
+        'user_pref("privacy.consent-banner.mode", 2);',
+        'user_pref("privacy.globalprivacycontrol.enabled", true);',
+        'user_pref("network.cookie.cookieBehavior", 0);',
+        'user_pref("privacy.partition.always_partition_third_party_non_cookie_storage", false);',
+        'user_pref("security.mixed_content.block_active_content", false);',
+
+        # --- Disable update / crash prompts ---
+        'user_pref("app.update.enabled", false);',
+        'user_pref("app.update.auto", false);',
+        'user_pref("browser.crashReports.unsubmittedCheck.enabled", false);',
+        'user_pref("browser.crashReports.unsubmittedCheck.autoSubmit2", false);',
+        # --- Anti-Tracking / Region Spoofing (Bypass IP Leaks & Locale Checks) ---
+        'user_pref("media.peerconnection.enabled", false);',  # Disable WebRTC (prevents STUN/TURN IP leaks)
+        'user_pref("intl.accept_languages", "tr-TR, tr, en-US, en");',
+        'user_pref("javascript.use_us_english_locale", false);',
+    ]
+
+    user_js.write_text("\n".join(prefs), encoding="utf-8")
+
+    # --- Write userChrome.css to collapse address bar, tabs, and navigation toolbars ---
+    chrome_dir = profile_dir / "chrome"
+    chrome_dir.mkdir(exist_ok=True)
+    
+    (chrome_dir / "userChrome.css").write_text(
+        "#nav-bar, #TabsToolbar, #PersonalToolbar, #sidebar-box, #toolbar-menubar {\n"
+        "    visibility: collapse !important;\n"
+        "}\n",
+        encoding="utf-8"
+    )
+
+    # --- Write userContent.css to natively hide website headers/navbars/footers globally ---
+    (chrome_dir / "userContent.css").write_text(
+        "/* Auto-hide headers and footers, reveal on mouse hover for navigation */\n"
+        "header, nav, footer, aside, #footer-id, #header-id,\n"
+        "[id*='footer'], [class*='footer'], [id*='Footer'], [class*='Footer'],\n"
+        "[id*='header'], [class*='header'], [id*='Header'], [class*='Header'],\n"
+        "[id*='nav'], [class*='nav'], [id*='Nav'], [class*='Nav'],\n"
+        "[class*='menu'], [class*='Menu'] {\n"
+        "    opacity: 0 !important;\n"
+        "    transition: opacity 0.3s ease-in-out !important;\n"
+        "}\n"
+        "\n"
+        "header:hover, nav:hover, footer:hover, aside:hover, #footer-id:hover, #header-id:hover,\n"
+        "[id*='footer']:hover, [class*='footer']:hover, [id*='Footer']:hover, [class*='Footer']:hover,\n"
+        "[id*='header']:hover, [class*='header']:hover, [id*='Header']:hover, [class*='Header']:hover,\n"
+        "[id*='nav']:hover, [class*='nav']:hover, [id*='Nav']:hover, [class*='Nav']:hover,\n"
+        "[class*='menu']:hover, [class*='Menu']:hover {\n"
+        "    opacity: 1 !important;\n"
+        "}\n"
+        "\n"
+        "/* Eliminate the 96px top margin on Exxen's main content wrapper to remove top black bar */\n"
+        "div[style*=\"margin-top: 96px\"] {\n"
+        "    margin-top: 0 !important;\n"
+        "    min-height: 100vh !important;\n"
+        "}\n"
+        "\n"
+        "/* Ensure the body remains black and hides scrollbars visually without blocking scrolling */\n"
+        "html, body {\n"
+        "    background: #000 !important;\n"
+        "    scrollbar-width: none !important;\n"
+        "    -ms-overflow-style: none !important;\n"
+        "}\n"
+        "html::-webkit-scrollbar, body::-webkit-scrollbar {\n"
+        "    display: none !important;\n"
+        "}\n",
+        encoding="utf-8"
+    )
+
+
 
 
 class WebStreamManager:
     def __init__(self):
         self.browser_processes: Dict[str, subprocess.Popen] = {}
         self.window_titles: Dict[str, str] = {}
+        self.window_hwnds: Dict[str, int] = {}  # HWND of the Firefox content window
 
     def launch_browser(self, stream_id: str, name: str, url: str, proxy_url: Optional[str] = None) -> str:
         """
-        Launch a separate 1280x720 popup browser window for a web stream directly to the target URL.
+        Launch a 1280x720 Portable Firefox popup for a web stream.
+        Creates an isolated profile with the CommandCenter MV2 audio extension pre-loaded.
         """
         self.close_browser(stream_id)
 
         profile_dir = BROWSER_PROFILES_DIR / stream_id
-        profile_dir.mkdir(parents=True, exist_ok=True)
+        _create_firefox_profile(profile_dir, proxy_url, stream_id)
 
-        browser_exe = find_browser_executable()
-        if browser_exe:
+        firefox_exe = find_firefox_executable()
+        if firefox_exe:
+            _ensure_firefox_policies(Path(firefox_exe))
             cmd = [
-                browser_exe,
-                f"--app={url}",
-                "--window-size=1280,720",
-                f"--user-data-dir={profile_dir.resolve()}",
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--new-window",
-                "--disable-gpu",
-                "--disable-gpu-compositing",
-                "--disable-direct-composition",
-                "--block-new-web-contents",
-                "--disable-popup-blocking",
-                "--disable-notifications",
-                "--disable-save-password-bubble",
-                "--disable-infobars",
-                "--deny-permission-prompts",
-                "--disable-translate",
+                firefox_exe,
+                "--no-remote",
+                "--new-instance",
+                f"--profile", str(profile_dir.resolve()),
+                "--width=1280",
+                "--height=720",
+                url,
             ]
-            if proxy_url:
-                cmd.append(f"--proxy-server={proxy_url}")
+            env = os.environ.copy()
+            env["TZ"] = "Europe/Istanbul"
 
-            logger.info(f"Launching separate popup browser window for web stream '{name}' ({stream_id}) directly to '{url}' using: {browser_exe}")
+            logger.info(f"Launching Portable Firefox for web stream '{name}' ({stream_id}) -> '{url}' using: {firefox_exe}")
             proc = subprocess.Popen(
-                cmd,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                cmd + ["-foreground"],  # -foreground: prevents Firefox starting minimized
+                env=env,
+                # Do NOT use CREATE_NO_WINDOW — that hides the window, suspending media playback.
+                # DETACHED_PROCESS ensures the process runs independently without attaching to our console.
+                creationflags=getattr(subprocess, "DETACHED_PROCESS", 0x00000008),
             )
             self.browser_processes[stream_id] = proc
         else:
-            logger.info(f"Fallback: opening web stream '{name}' ({stream_id}) via default browser registration: {url}")
+            logger.warning(f"Portable Firefox not found. Falling back to default browser for web stream '{name}' ({stream_id})")
             try:
                 webbrowser.open_new(url)
             except Exception:
@@ -203,10 +505,10 @@ class WebStreamManager:
         return name
 
     def wait_for_window_title(self, stream_id: str, stream_name: str, url: str, timeout: float = 10.0) -> str:
-        """Poll system open window titles for up to `timeout` seconds until Chrome renders the target window title."""
+        """Poll window titles for up to timeout seconds. Also stores the HWND for region-based capture."""
         import time
         start_time = time.time()
-        
+
         proc = self.browser_processes.get(stream_id)
         target_pids = set()
         if proc and proc.pid:
@@ -221,42 +523,117 @@ class WebStreamManager:
         except Exception:
             pass
 
-        while time.time() - start_time < timeout:
-            # 1. Query exact window titles belonging to the launched Chrome process tree
-            if target_pids:
-                pid_titles = get_window_titles_for_pids(target_pids)
-                for t in pid_titles:
-                    if t and t.lower() not in ("chrome", "google chrome", "about:blank", "new tab"):
-                        logger.info(f"Detected exact Chrome window title by PID for stream '{stream_name}' ({stream_id}): '{t}'")
-                        self.window_titles[stream_id] = t
-                        return t
+        _FIREFOX_SKIP = {
+            "firefox media keys",
+            "about:blank", "new tab", "before you continue",
+            "privacy policy", "cookie", "consent",
+        }
 
-            # 2. Fallback: search open system window titles
+        while time.time() - start_time < timeout:
+            if proc and proc.pid:
+                target_pids = get_child_pids(proc.pid)
+            # 1. Scan PIDs — capture both title and HWND
+            if target_pids and os.name == "nt":
+                found: List[tuple] = []  # (hwnd, title)
+
+                def _enum_pid_windows(hwnd, lParam):
+                    if user32.IsWindowVisible(hwnd):
+                        pid = ctypes.wintypes.DWORD()
+                        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                        if pid.value in target_pids:
+                            buff = ctypes.create_unicode_buffer(512)
+                            user32.GetWindowTextW(hwnd, buff, 512)
+                            val = buff.value.strip()
+                            if val and not any(skip == val.lower() or skip in val.lower() for skip in _FIREFOX_SKIP):
+                                # Verify this is a main window (not a tiny helper window)
+                                rect = ctypes.wintypes.RECT()
+                                user32.GetClientRect(hwnd, ctypes.byref(rect))
+                                w = rect.right - rect.left
+                                h = rect.bottom - rect.top
+                                if w >= 400 and h >= 300:
+                                    found.append((hwnd, val))
+                    return True
+
+                cb = WNDENUMPROC(_enum_pid_windows)
+                user32.EnumWindows(cb, 0)
+                if found:
+                    hwnd, title = found[0]
+                    try:
+                        # Disable window resizing (remove WS_THICKFRAME and WS_MAXIMIZEBOX styles)
+                        GWL_STYLE = -16
+                        WS_THICKFRAME = 0x00040000
+                        WS_MAXIMIZEBOX = 0x00010000
+                        style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+                        if style:
+                            style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX)
+                            user32.SetWindowLongW(hwnd, GWL_STYLE, style)
+                            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0027)  # SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED
+                    except Exception as e:
+                        logger.debug(f"SetWindowLongW error: {e}")
+                        
+                    self.window_hwnds[stream_id] = hwnd
+                    self.window_titles[stream_id] = title
+
+                    # Ensure Firefox window is visible and anchored at top-left (0,0) for high-performance desktop capture
+                    try:
+                        is_minimized = user32.IsIconic(hwnd)
+                        if is_minimized:
+                            SW_RESTORE = 9
+                            user32.ShowWindow(hwnd, SW_RESTORE)
+                            logger.debug(f"Restored minimized Firefox window (hwnd=0x{hwnd:x})")
+                        else:
+                            SW_SHOW = 5
+                            user32.ShowWindow(hwnd, SW_SHOW)
+                        
+                        # Position window at (0,0) 1280x758
+                        SWP_SHOWWINDOW = 0x0040
+                        user32.SetWindowPos(hwnd, 0, 0, 0, 1280, 758, SWP_SHOWWINDOW)
+                        
+                        # Remove Minimize Box to prevent GDI capture freezing
+                        GWL_STYLE = -16
+                        WS_MINIMIZEBOX = 0x00020000
+                        style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+                        if style & WS_MINIMIZEBOX:
+                            user32.SetWindowLongW(hwnd, GWL_STYLE, style & ~WS_MINIMIZEBOX)
+                    except Exception as e:
+                        logger.debug(f"SetWindowPos/Style error: {e}")
+
+                    logger.info(f"Locked Firefox window title to '{title}' for stream '{stream_name}' ({stream_id}) (hwnd=0x{hwnd:x})")
+
+                    # Route firefox.exe to CABLE Input AFTER its WASAPI audio session exists in Windows Volume Mixer
+                    try:
+                        from app.audio_router import route_to_vb_cable
+                        route_to_vb_cable()
+                    except Exception as e:
+                        logger.debug(f"route_to_vb_cable error: {e}")
+
+                    return title
+                else:
+                    logger.debug(f"PID scan target_pids={target_pids} found 0 matching windows so far...")
+
+            # 2. Fallback: search open system window titles (no HWND tracking)
             titles = get_open_window_titles()
-            if full_netloc:
+            for matcher in [full_netloc, parsed_domain, stream_name]:
+                if not matcher:
+                    continue
                 for t in titles:
-                    if full_netloc.lower() in t.lower():
-                        logger.info(f"Detected open Chrome window matching netloc '{full_netloc}': '{t}'")
-                        self.window_titles[stream_id] = t
-                        return t
-            if parsed_domain:
-                for t in titles:
-                    if parsed_domain.lower() in t.lower():
-                        logger.info(f"Detected open Chrome window matching domain '{parsed_domain}': '{t}'")
-                        self.window_titles[stream_id] = t
-                        return t
-            if stream_name:
-                for t in titles:
-                    if stream_name.lower() in t.lower():
-                        logger.info(f"Detected open Chrome window matching stream name '{stream_name}': '{t}'")
+                    if matcher.lower() in t.lower() and not any(skip in t.lower() for skip in _FIREFOX_SKIP):
+                        logger.info(f"Detected open Firefox window for stream '{stream_name}' matching '{matcher}': '{t}'")
                         self.window_titles[stream_id] = t
                         return t
             time.sleep(0.5)
 
         fallback = full_netloc if full_netloc else (parsed_domain if parsed_domain else stream_name)
-        logger.info(f"Window title poll finished; using GDIGrab title: '{fallback}'")
+        logger.info(f"Window title poll finished; using GDIGrab fallback: '{fallback}'")
         self.window_titles[stream_id] = fallback
         return fallback
+
+    def get_window_hwnd(self, stream_id: str, stream_name: str = "", url: str = "") -> Optional[int]:
+        """Return HWND (int) for stream_id."""
+        if stream_id in self.window_hwnds:
+            return self.window_hwnds[stream_id]
+        self.wait_for_window_title(stream_id, stream_name, url, timeout=10.0)
+        return self.window_hwnds.get(stream_id)
 
     def get_window_title(self, stream_id: str, default_name: str = "", url: str = "") -> str:
         """Get expected window title for GDIGrab window capture."""
@@ -264,11 +641,58 @@ class WebStreamManager:
             return self.window_titles[stream_id]
         return self.wait_for_window_title(stream_id, default_name, url, timeout=5.0)
 
+    def get_live_window_title(self, stream_id: str) -> Optional[str]:
+        """Fetch the actual current window title from the OS."""
+        hwnd = self.window_hwnds.get(stream_id)
+        if not hwnd:
+            return None
+        if os.name == "nt":
+            import ctypes
+            user32 = ctypes.windll.user32
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length == 0:
+                return None
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            return buf.value
+        return None
+
     def close_browser(self, stream_id: str):
-        """Clean up state and close browser process for stream_id."""
+        """Clean up state and close browser process tree for stream_id."""
         proc = self.browser_processes.pop(stream_id, None)
         self.window_titles.pop(stream_id, None)
-        if proc:
+        hwnd = self.window_hwnds.pop(stream_id, None)
+
+        if os.name == "nt":
+            pids_to_kill = set()
+            if hwnd:
+                try:
+                    from ctypes import wintypes
+                    main_pid = wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(main_pid))
+                    if main_pid.value:
+                        pids_to_kill.add(main_pid.value)
+                except Exception as e:
+                    logger.debug(f"Error reading HWND PID: {e}")
+
+            if proc:
+                pids_to_kill.add(proc.pid)
+                try:
+                    pids_to_kill.update(get_child_pids(proc.pid))
+                except Exception:
+                    pass
+
+            for pid in pids_to_kill:
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(pid)],
+                        capture_output=True,
+                        timeout=3,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    )
+                except Exception:
+                    pass
+        elif proc:
             try:
                 if proc.poll() is None:
                     proc.terminate()
@@ -287,12 +711,19 @@ class WebStreamManager:
             except Exception:
                 pass
 
+        try:
+            from app.audio_router import restore_audio_routing
+            restore_audio_routing()
+        except Exception as e:
+            logger.debug(f"audio_router restore_audio_routing error: {e}")
+
     def purge_all(self):
         """Purge all browser processes and temporary profiles in BROWSER_PROFILES_DIR."""
         for stream_id in list(self.browser_processes.keys()):
             self.close_browser(stream_id)
 
         self.window_titles.clear()
+        self.window_hwnds.clear()
         if BROWSER_PROFILES_DIR.exists():
             import shutil
             for item in BROWSER_PROFILES_DIR.iterdir():

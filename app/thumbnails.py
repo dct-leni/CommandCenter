@@ -124,21 +124,6 @@ def generate_thumbnail(video_path: str, force: bool = False, seek_seconds: float
         logger.error(f"Thumbnail generation error for {video_path}: {e}")
         return None
 
-
-import asyncio
-
-
-async def async_generate_thumbnail(video_path: str, force: bool = False, seek_seconds: float = 15.0) -> Optional[str]:
-    """Asynchronous thread-pool wrapper for generate_thumbnail."""
-    return await asyncio.to_thread(generate_thumbnail, video_path, force=force, seek_seconds=seek_seconds)
-
-
-async def async_get_video_metadata(video_path: str) -> dict:
-    """Asynchronous thread-pool wrapper for get_video_metadata."""
-    return await asyncio.to_thread(get_video_metadata, video_path)
-
-
-
 def get_video_metadata(video_path: str) -> dict:
     """Get video file metadata using ffprobe with disk & memory caching."""
     _load_metadata_cache()

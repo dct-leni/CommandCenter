@@ -804,7 +804,11 @@ class Streamer:
         if protocol == "hls":
             public_port = port
             internal_rtmp_port = port + 6000
-            stream_url = f"http://{self.external_ip}:{public_port}/stream/index.m3u8"
+            internal_mediamtx_hls_port = port + 10000
+            stream_url = f"http://{self.external_ip}:{public_port}"
+            
+            from app.hls_cache import hls_cache
+            asyncio.create_task(hls_cache.start_proxy_server(public_port, internal_mediamtx_hls_port))
         else:
             public_port = port
             internal_rtmp_port = port
@@ -931,7 +935,8 @@ class Streamer:
         """Create a temporary MediaMTX YAML config for a specific RTMP port and target protocol."""
         hls_block = "hls: no"
         if protocol == "hls":
-            hls_block = f"hls: yes\nhlsAddress: :{public_port}\nhlsAlwaysRemux: yes\nhlsVariant: lowLatency"
+            internal_mediamtx_hls_port = public_port + 10000
+            hls_block = f"hls: yes\nhlsAddress: :{internal_mediamtx_hls_port}\nhlsAlwaysRemux: yes\nhlsVariant: mpegts\nhlsSegmentCount: 5\nhlsSegmentDuration: 2s"
 
         config_content = f"""
 logLevel: warn
@@ -1000,6 +1005,10 @@ paths:
                     pass
 
         stream.status = "stopped"
+        
+        from app.hls_cache import hls_cache
+        asyncio.create_task(hls_cache.stop_proxy_server(port))
+        
         logger.info(f"Stream stopped on port {port}")
 
     async def _health_check(self):

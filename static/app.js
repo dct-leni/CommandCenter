@@ -633,19 +633,16 @@ function renderFolderFiles(folder) {
                     ? window.location.hostname
                     : '127.0.0.1'));
         let displayUrl = '';
+        let urlHtml = '';
         if (liveStream && (liveStream.status === 'live' || liveStream.status === 'starting') && (liveStream.stream_url || liveStream.rtmp_url)) {
             displayUrl = liveStream.stream_url || liveStream.rtmp_url;
             if (displayUrl.includes('127.0.0.1') || displayUrl.includes('localhost')) {
                 displayUrl = displayUrl.replace(/127\.0\.0\.1|localhost/g, extIp);
             }
-        } else if (protocol === 'HLS') {
-            displayUrl = `http://${extIp}:${port}/stream/index.m3u8`;
-        } else {
-            displayUrl = `rtmp://${extIp}:${port}/stream`;
+            urlHtml = `<div class="slot-url" onclick="copyToClipboard('${escapeAttr(displayUrl)}'); event.stopPropagation();" title="Click to copy playback link (${protocol})">
+                <i class="fa-solid fa-link"></i> ${escapeHtml(displayUrl)} <span style="opacity:0.75; font-size:10px;">[${protocol}]</span>
+            </div>`;
         }
-        const urlHtml = `<div class="slot-url" onclick="copyToClipboard('${escapeAttr(displayUrl)}'); event.stopPropagation();" title="Click to copy playback link (${protocol})">
-            <i class="fa-solid fa-link"></i> ${escapeHtml(displayUrl)} <span style="opacity:0.75; font-size:10px;">[${protocol}]</span>
-        </div>`;
 
         // Progress bar
         const progressHtml = isLive ? `
@@ -1500,11 +1497,9 @@ function onVpnModeChange(scope, isUserChange = false) {
     if (!modeEl) return;
     const mode = modeEl.value;
     const fileBox = document.getElementById(`${scope}-vpn-file-box`);
-    const proxyBox = document.getElementById(`${scope}-proxy-box`);
     const labelEl = document.getElementById(`${scope}-vpn-file-label`);
 
     if (fileBox) fileBox.style.display = (mode === 'wireguard') ? 'block' : 'none';
-    if (proxyBox) proxyBox.style.display = (mode === 'proxy') ? 'block' : 'none';
     if (labelEl) {
         labelEl.textContent = 'WireGuard Profile (.conf)';
     }
@@ -1516,11 +1511,6 @@ function onVpnModeChange(scope, isUserChange = false) {
         if (nameEl) nameEl.textContent = 'No file selected';
         const fileInput = document.getElementById(`${scope}-vpn-file-input`);
         if (fileInput) fileInput.value = '';
-
-        if (mode !== 'proxy') {
-            const proxyInput = document.getElementById(`${scope}-proxy-url`);
-            if (proxyInput) proxyInput.value = '';
-        }
     }
 }
 
@@ -1553,15 +1543,9 @@ function openGlobalVpnModal() {
     api('GET', '/vpn/global').then(data => {
         if (!data) return;
         const modeEl = document.getElementById('global-vpn-mode');
-        const urlEl = document.getElementById('global-proxy-url');
-        const puEl = document.getElementById('global-proxy-username');
-        const ppEl = document.getElementById('global-proxy-password');
         const fnEl = document.getElementById('global-vpn-file-name');
 
         if (modeEl) modeEl.value = data.mode || 'none';
-        if (urlEl) urlEl.value = data.proxy_url || '';
-        if (puEl) puEl.value = data.proxy_username || '';
-        if (ppEl) ppEl.value = data.proxy_password || '';
 
         if (!_vpnState.global) _vpnState.global = { content: '', name: '' };
         _vpnState.global.content = data.profile_content || '';
@@ -1579,13 +1563,9 @@ function closeGlobalVpnModal() {
     document.getElementById('global-vpn-modal').style.display = 'none';
 }
 
-function validateVpnSettings(mode, profileContent, proxyUrl) {
+function validateVpnSettings(mode, profileContent) {
     if (mode === 'wireguard' && (!profileContent || !profileContent.trim())) {
         showToast('Please select a valid WireGuard profile (.conf) file before saving.', 'error');
-        return false;
-    }
-    if (mode === 'proxy' && (!proxyUrl || !proxyUrl.trim())) {
-        showToast('Please enter a valid Proxy Server / URL (e.g. nl.free.zoogvpn.com:1080) before saving.', 'error');
         return false;
     }
     return true;
@@ -1593,11 +1573,6 @@ function validateVpnSettings(mode, profileContent, proxyUrl) {
 
 async function submitGlobalVpn() {
     const mode = document.getElementById('global-vpn-mode').value;
-    let proxy_url = document.getElementById('global-proxy-url').value.trim();
-    const puEl = document.getElementById('global-proxy-username');
-    const ppEl = document.getElementById('global-proxy-password');
-    const proxy_username = puEl ? puEl.value.trim() : '';
-    const proxy_password = ppEl ? ppEl.value : '';
     let profile_name = _vpnState.global.name;
     let profile_content = _vpnState.global.content;
 
@@ -1605,20 +1580,14 @@ async function submitGlobalVpn() {
         profile_name = '';
         profile_content = '';
     }
-    if (mode !== 'proxy') {
-        proxy_url = '';
-    }
 
-    if (!validateVpnSettings(mode, profile_content, proxy_url)) {
+    if (!validateVpnSettings(mode, profile_content)) {
         return;
     }
 
     try {
         await api('PUT', '/vpn/global', {
             mode,
-            proxy_url,
-            proxy_username,
-            proxy_password,
             profile_name,
             profile_content,
         });

@@ -21,6 +21,17 @@ from app.thumbnails import THUMBNAILS_DIR
 
 logger = logging.getLogger(__name__)
 
+# Enforce 1ms Windows OS system timer interrupt resolution to eliminate 15.6ms quantum slips in GDIGrab
+if os.name == "nt":
+    try:
+        import ctypes
+        ctypes.windll.winmm.timeBeginPeriod(1)
+    except Exception:
+        pass
+
+# Per-relay asyncio Queue used to pipe PCM data from the Firefox extension WebSocket into FFmpeg stdin
+_TAB_AUDIO_QUEUES: Dict[str, asyncio.Queue] = {}
+
 
 @dataclass
 class LiveRelayStatus:
@@ -40,6 +51,7 @@ class LiveRelayStatus:
     server: Optional[asyncio.Server] = field(default=None, repr=False)
     loopback_server: Optional[asyncio.Server] = field(default=None, repr=False)
     loopback_port: int = 0
+    audio_ws_task: Optional[asyncio.Task] = field(default=None, repr=False)
 
     @property
     def has_thumbnail(self) -> bool:
@@ -145,11 +157,12 @@ class LiveStreamManager:
             results.append(d)
         return results
 
-    def trigger_thumbnail_generation(self, stream_id: str, stream_url: str):
-        """Trigger background generation of live stream thumbnail if running."""
+    def trigger_thumbnail_generation(self, stream_id: str, port: int):
+        """Trigger background generation of live stream thumbnail snapshot from local stream port (every 10min)."""
         now = time.time()
         last_time = _LAST_THUMBNAIL_TIME.get(stream_id, 0.0)
-        if now - last_time < 60.0:  # rate limit to once per 60 seconds (1 minute)
+        thumb_path = THUMBNAILS_DIR / f"live_{stream_id}.jpg"
+        if thumb_path.exists() and (now - last_time < 600.0):
             return
 
         _LAST_THUMBNAIL_TIME[stream_id] = now
@@ -157,21 +170,19 @@ class LiveStreamManager:
         async def task():
             try:
                 THUMBNAILS_DIR.mkdir(parents=True, exist_ok=True)
-                thumb_path = THUMBNAILS_DIR / f"live_{stream_id}.jpg"
                 temp_path = THUMBNAILS_DIR / f"live_{stream_id}_temp.jpg"
 
+                # Capture 1 frame directly from local HTTP stream output
                 cmd = [
                     get_ffmpeg_path(),
-                    "-skip_frame", "nokey",
-                    "-i", stream_url,
+                    "-ss", "0",
+                    "-i", f"http://127.0.0.1:{port}/",
                     "-vframes", "1",
                     "-q:v", "6",
-                    "-update", "1",
                     "-y",
                     str(temp_path)
                 ]
                 
-                # Start process and wait with a short timeout
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=subprocess.DEVNULL,
@@ -179,27 +190,21 @@ class LiveStreamManager:
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 )
                 try:
-                    await asyncio.wait_for(proc.wait(), timeout=15.0)
-                    if proc.returncode != 0:
-                        logger.warning(f"FFmpeg thumbnail generation failed (code {proc.returncode}) for live stream {stream_id}")
-                    elif temp_path.exists():
+                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+                    if temp_path.exists():
                         if thumb_path.exists():
                             thumb_path.unlink()
                         temp_path.rename(thumb_path)
-                except asyncio.TimeoutError:
-                    logger.warning(f"FFmpeg thumbnail generation timed out (15s) for live stream {stream_id}")
-                    try:
-                        proc.terminate()
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
                 finally:
                     if temp_path.exists():
                         try:
                             temp_path.unlink()
                         except Exception:
                             pass
-            except Exception as e:
-                logger.error(f"Error generating thumbnail for live stream {stream_id}: {e}")
+            except Exception:
+                pass
 
         asyncio.create_task(task())
 
@@ -220,6 +225,16 @@ class LiveStreamManager:
         url_str = item.get("url", "").lower()
         is_web = item.get("stream_type") == "web" or bool(item.get("web_url")) or any(kw in url_str for kw in ("wtfismyip", "exxen", "netflix", "youtube.com/watch"))
         current_relay = self.active_relays.get(stream_id)
+
+        # Enforce Single Active Web Stream Limit (VB-Audio hardware limitation)
+        if is_web:
+            for active_id, active_r in self.active_relays.items():
+                if active_id != stream_id and active_r.status in ("running", "listening", "browser_ready"):
+                    active_item = next((x for x in cfg.streamer.live_streams if x.get("id") == active_id), {})
+                    active_url = active_item.get("url", "").lower()
+                    active_is_web = active_item.get("stream_type") == "web" or bool(active_item.get("web_url")) or any(kw in active_url for kw in ("wtfismyip", "exxen", "netflix", "youtube.com/watch"))
+                    if active_is_web:
+                        raise ValueError(f"Only ONE web stream can run at a time (VB-Audio limit). Please stop active web stream '{active_r.name}' first.")
 
         # Stage 1 for Web Streams: If browser isn't opened yet (or status is stopped), open default browser first!
         if is_web:
@@ -250,6 +265,8 @@ class LiveStreamManager:
                 relay.status = "running"
                 try:
                     while relay.status in ("running", "listening"):
+                        # Read up to 64KB socket payload chunks so full H.264 video frames (40-80KB)
+                        # stream instantly in 1-2 reads without 30-fragment event loop delays
                         chunk = await reader.read(65536)
                         if not chunk:
                             break
@@ -259,8 +276,16 @@ class LiveStreamManager:
                                 try:
                                     q.put_nowait(chunk)
                                 except asyncio.QueueFull:
-                                    # Client is too slow, drop chunk to avoid memory build-up
-                                    pass
+                                    # Client fell behind — drain all stale data so it jumps to live
+                                    while not q.empty():
+                                        try:
+                                            q.get_nowait()
+                                        except asyncio.QueueEmpty:
+                                            break
+                                    try:
+                                        q.put_nowait(chunk)
+                                    except Exception:
+                                        pass
                 except Exception as e:
                     logger.error(f"Loopback error for {relay.name}: {e}")
                 finally:
@@ -306,8 +331,8 @@ class LiveStreamManager:
                     pass
                 return
 
-            # Bounded queue to prevent memory leaks if client blocks
-            queue = asyncio.Queue(maxsize=100)
+            # Low-latency queue size (128 chunks) prevents burst packet dumps that cause playback stacking
+            queue = asyncio.Queue(maxsize=128)
             relay.clients[queue] = writer
 
             async def client_write_loop():
@@ -315,8 +340,23 @@ class LiveStreamManager:
                     while True:
                         chunk = await queue.get()
                         writer.write(chunk)
-                        await writer.drain()
                         queue.task_done()
+
+                        # Batch-write any remaining queued chunks
+                        while not queue.empty():
+                            try:
+                                next_chunk = queue.get_nowait()
+                                writer.write(next_chunk)
+                                queue.task_done()
+                            except asyncio.QueueEmpty:
+                                break
+
+                        # Only call drain() when transport buffer > 64KB to prevent 15-30ms TCP pause stalls
+                        try:
+                            if writer.transport and writer.transport.get_write_buffer_size() > 65536:
+                                await writer.drain()
+                        except Exception:
+                            pass
                 except Exception:
                     pass
                 finally:
@@ -361,6 +401,9 @@ class LiveStreamManager:
 
     async def stop_stream(self, stream_id: str) -> dict:
         """Stop a running live relay stream cleanly."""
+        from app.web_stream import web_stream_manager
+        web_stream_manager.close_browser(stream_id)
+
         if stream_id not in self.active_relays:
             return {"id": stream_id, "status": "stopped"}
 
@@ -411,6 +454,25 @@ class LiveStreamManager:
         vpn_manager.stop_vpn_for_stream(stream_id)
         from app.web_stream import web_stream_manager
         web_stream_manager.close_browser(stream_id)
+
+        # Restore user's default audio device if it was routed to VB-Cable for this stream
+        if stream_id in self.active_relays:
+            _relay_item = load_config()
+            _item = next((x for x in _relay_item.streamer.live_streams if x.get("id") == stream_id), {})
+            if _item.get("stream_type") == "web":
+                pass  # Audio routing via Firefox cubeb pref — nothing to restore
+
+        # Cancel the tab audio WebSocket server if running
+        if relay.audio_ws_task and not relay.audio_ws_task.done():
+            relay.audio_ws_task.cancel()
+            try:
+                await relay.audio_ws_task
+            except asyncio.CancelledError:
+                pass
+            relay.audio_ws_task = None
+        # Remove the audio queue so no dangling data is held
+        _TAB_AUDIO_QUEUES.pop(stream_id, None)
+
         logger.info(f"Stopped live relay '{relay.name}'")
         return relay.to_dict()
 
@@ -424,9 +486,13 @@ class LiveStreamManager:
         from app.vpn_manager import vpn_manager
         proxy_url = vpn_manager.get_proxy_url_for_stream(stream_item)
         if proxy_url:
-            await asyncio.sleep(0.5)  # Wait 500ms for SOCKS5 local bridge socket readiness
+            await asyncio.sleep(0.5)  # Wait 500ms for WireGuard local proxy socket readiness
 
         from app.web_stream import web_stream_manager
+        web_stream_manager.close_browser(stream_id)
+
+
+
         name = stream_item.get("name", "Web Stream")
         target_url = stream_item.get("url", "")
         
@@ -448,6 +514,7 @@ class LiveStreamManager:
             relay.error = None
 
         logger.info(f"Opened browser for web stream '{name}' ({stream_id}). Status: browser_ready.")
+
         return relay.to_dict()
 
     async def _auto_restart_loop(self, relay: LiveRelayStatus):
@@ -458,10 +525,15 @@ class LiveStreamManager:
         proxy_url = vpn_manager.get_proxy_url_for_stream(stream_item)
         is_web = stream_item.get("stream_type") == "web"
         from app.ffmpeg_setup import probe_source_codec, get_relay_params, get_best_encoder, get_relay_encoding_params, format_ffmpeg_headers
+        from app.audio_router import get_cable_device_ids
+        _, cable_output_device = get_cable_device_ids()
+        audio_dev = cable_output_device or "CABLE Output (VB-Audio Virtual Cable)"
         if is_web:
+            from app.ffmpeg_setup import get_screen_capture_params
             encoder = get_best_encoder()
-            video_params = get_relay_encoding_params(encoder)
-            logger.info(f"Web stream capture for '{relay.name}' — encoding with {encoder}")
+            video_params = get_screen_capture_params(encoder)
+            logger.info(f"Web stream capture for '{relay.name}' — encoding with {encoder} (screen-capture profile)")
+            # Audio routes via Firefox cubeb pref in user.js (set at profile creation time).
         else:
             logger.info(f"Probing source codec for '{relay.name}' at {relay.url} (proxy: {proxy_url or 'none'}) …")
             source_codec = await asyncio.get_event_loop().run_in_executor(
@@ -482,16 +554,44 @@ class LiveStreamManager:
 
                 if is_web:
                     from app.web_stream import web_stream_manager
-                    window_title = await asyncio.get_event_loop().run_in_executor(
-                        None, web_stream_manager.wait_for_window_title, relay.id, relay.name, relay.url, 8.0
+                    hwnd = await asyncio.get_event_loop().run_in_executor(
+                        None, web_stream_manager.get_window_hwnd, relay.id, relay.name, relay.url
                     )
-                    logger.info(f"Web stream '{relay.name}' GDIGrab targeting exact window title: '{window_title}'")
+                    gdi_video_args = []
+                    vf_filter = "format=yuv420p"
+
+                    if hwnd:
+                        input_target = f"hwnd=0x{hwnd:x}"
+                        logger.info(f"Web stream '{relay.name}' GDIGrab targeting HWND: {input_target}")
+                    else:
+                        raise RuntimeError(f"Firefox browser window not found for web stream '{relay.name}'. Please click 'Open Browser' first.")
+
+                    logger.info(f"Web stream '{relay.name}': GDIGrab window capture targeting '{input_target}' with audio='{audio_dev}'")
+
+                    # Restore window if minimized
+                    if hwnd:
+                        try:
+                            import ctypes
+                            _user32 = ctypes.windll.user32
+                            if _user32.IsIconic(hwnd):
+                                _user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                                import time; time.sleep(0.3)
+                        except Exception:
+                            pass
+
                     cmd.extend([
+                        # Video: GDIGrab browser window HWND capture at 30 FPS (Master Clock Input 0)
+                        "-use_wallclock_as_timestamps", "1",
+                        "-thread_queue_size", "1024",
                         "-f", "gdigrab",
                         "-framerate", "30",
                         "-draw_mouse", "0",
-                        "-i", f"title={window_title}",
-                        "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                        "-i", input_target,
+                        # Audio: DirectShow capture from VB-Cable Output with 20ms low-latency buffer
+                        "-thread_queue_size", "1024",
+                        "-audio_buffer_size", "20",
+                        "-f", "dshow",
+                        "-i", f"audio={audio_dev}",
                         "-map", "0:v:0",
                         "-map", "1:a:0",
                         "-vf", "crop=iw:ih-38:0:38,format=yuv420p",
@@ -552,12 +652,21 @@ class LiveStreamManager:
                 cmd.extend(video_params)
 
                 # Output parameters - stream to Python's local loopback TCP port
-                audio_params = ["-c:a", "aac", "-b:a", "128k"] if is_web else ["-c:a", "copy"]
-                cmd.extend(audio_params)
+                from app.ffmpeg_setup import get_audio_params
+                cmd.extend(get_audio_params(is_web))
+                
+                # -bsf:v dump_extra is ONLY needed for stream copy (-c:v copy). NVENC already generates Annex B SPS/PPS NAL units natively.
+                if not is_web:
+                    cmd.extend(["-bsf:v", "dump_extra"])
+
+                interleave_delta = "0" if is_web else "50000"
                 cmd.extend([
-                    "-bsf:v", "dump_extra",  # Repeat H.264/H.265 SPS/PPS headers before keyframes
+                    "-avoid_negative_ts", "make_zero",
+                    "-fflags", "+genpts",
+                    "-max_interleave_delta", interleave_delta, # 0 for web streams forces instant video packet output without interleave holds
+                    "-flush_packets", "1",        # Flush MPEG-TS packets immediately
                     "-f", "mpegts",
-                    f"tcp://127.0.0.1:{relay.loopback_port}"
+                    f"tcp://127.0.0.1:{relay.loopback_port}?tcp_nodelay=1"
                 ])
 
                 relay.status = "listening"
@@ -568,8 +677,10 @@ class LiveStreamManager:
                     env["http_proxy"] = proxy_url
                     env["https_proxy"] = proxy_url
 
+                # Web streams use WASAPI loopback for audio — stdin is not needed
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
+                    stdin=subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     limit=1024 * 1024,  # 1 MB — prevents LimitOverrunError on long FFmpeg lines
@@ -582,7 +693,21 @@ class LiveStreamManager:
                     relay.log_task.cancel()
                 relay.log_task = asyncio.create_task(self._read_relay_logs(relay, process.stderr))
 
+                # Background task for 10-minute live snapshot generation from local HTTP stream output
+                async def _periodic_thumb_task(sid: str, s_port: int):
+                    await asyncio.sleep(3.0)
+                    while relay.status in ("running", "listening"):
+                        try:
+                            self.trigger_thumbnail_generation(sid, s_port)
+                        except Exception:
+                            pass
+                        await asyncio.sleep(600.0)
+
+                thumb_loop_task = asyncio.create_task(_periodic_thumb_task(relay.id, relay.port))
+
                 await process.wait()
+                if thumb_loop_task and not thumb_loop_task.done():
+                    thumb_loop_task.cancel()
 
                 # If process exited but status is still active (not stopped by user)
                 if relay.status in ("running", "listening"):
@@ -603,16 +728,25 @@ class LiveStreamManager:
 
                         relay.status = "error"
                         relay.error = f"FFmpeg error ({process.returncode}): {error_detail}"
+                        if is_web:
+                            from app.web_stream import web_stream_manager
+                            web_stream_manager.close_browser(relay.id)
                         break
                     else:
                         await asyncio.sleep(1.0)
 
             except asyncio.CancelledError:
+                if is_web:
+                    from app.web_stream import web_stream_manager
+                    web_stream_manager.close_browser(relay.id)
                 break
             except Exception as e:
                 logger.error(f"Relay loop error for {relay.name}: {e}")
                 relay.status = "error"
                 relay.error = str(e)
+                if is_web:
+                    from app.web_stream import web_stream_manager
+                    web_stream_manager.close_browser(relay.id)
                 break
 
     async def _read_relay_logs(self, relay: LiveRelayStatus, stderr):

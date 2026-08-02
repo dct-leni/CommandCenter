@@ -1,20 +1,16 @@
 """
-VPN and Proxy Manager for CommandCenter Live Relay Streams.
-Manages isolated user-space VPN proxy subprocesses (WireGuard via wireproxy,
-or custom SOCKS5/HTTP proxies) so individual live streams can be
-ingested over VPN without altering system network gateways or throttling
-local client network connections.
+VPN Manager for CommandCenter Live Relay Streams.
+Manages isolated user-space WireGuard proxy subprocesses (via wireproxy)
+so individual live streams or browsers can be ingested over WireGuard
+without altering system network gateways or throttling local client connections.
 """
 
-import asyncio
 import logging
 import os
 import shutil
 import subprocess
-import sys
-import time
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Optional
 
 from app.config import load_config
 
@@ -27,212 +23,15 @@ TEMP_VPN_DIR = BASE_DIR / "temp"
 TEMP_VPN_DIR.mkdir(exist_ok=True)
 
 
-class LocalProxyBridge:
-    """
-    High-performance local HTTP-to-SOCKS5/HTTP proxy bridge.
-    Accepts unauthenticated HTTP/CONNECT requests from Chrome/FFmpeg on 127.0.0.1:<port>
-    and forwards them to a remote authenticated SOCKS5 or HTTP proxy server (e.g. ZoogVPN SOCKS5).
-    Optimized with TCP_NODELAY, ThreadPoolExecutor worker recycling, and non-blocking select() multiplexing.
-    """
-    def __init__(self, local_port: int, remote_host: str, remote_port: int, scheme: str = "socks5", username: str = "", password: str = ""):
-        self.local_port = local_port
-        self.remote_host = remote_host
-        self.remote_port = remote_port
-        self.scheme = scheme.lower() if scheme else "socks5"
-        self.username = username
-        self.password = password
-        self.server_sock = None
-        self.running = False
-        self._thread = None
-        self._executor = None
-
-    def start(self):
-        import socket
-        import threading
-        from concurrent.futures import ThreadPoolExecutor
-
-        self._executor = ThreadPoolExecutor(max_workers=64)
-        self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        self.server_sock.bind(("127.0.0.1", self.local_port))
-        self.server_sock.listen(128)
-        self.running = True
-        self._thread = threading.Thread(target=self._listen_loop, daemon=True)
-        self._thread.start()
-        import time
-        time.sleep(0.2)
-        logger.info(f"Started high-performance local proxy bridge at http://127.0.0.1:{self.local_port} -> {self.scheme}://{self.remote_host}:{self.remote_port}")
-
-    def stop(self):
-        self.running = False
-        if self.server_sock:
-            try:
-                self.server_sock.close()
-            except Exception:
-                pass
-        if self._executor:
-            try:
-                self._executor.shutdown(wait=False)
-            except Exception:
-                pass
-
-    def _listen_loop(self):
-        import socket
-        while self.running:
-            try:
-                client_sock, _ = self.server_sock.accept()
-                client_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                self._executor.submit(self._handle_client, client_sock)
-            except Exception:
-                break
-
-    def _handle_client(self, client_sock):
-        import socket
-        import socks
-        try:
-            client_sock.settimeout(5.0)
-            req_data = client_sock.recv(16384)
-            if not req_data:
-                client_sock.close()
-                return
-
-            req_str = req_data.decode("utf-8", errors="ignore")
-            first_line = req_str.split("\r\n")[0]
-            parts = first_line.split(" ")
-            if len(parts) < 2:
-                client_sock.close()
-                return
-
-            method, target = parts[0], parts[1]
-
-            remote_sock = socks.socksocket()
-            remote_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            proxy_type = socks.SOCKS5 if "socks" in self.scheme else socks.HTTP
-            remote_sock.set_proxy(
-                proxy_type,
-                self.remote_host,
-                self.remote_port,
-                username=self.username if self.username else None,
-                password=self.password if self.password else None,
-                rdns=True,
-            )
-            remote_sock.settimeout(10.0)
-
-            if method == "CONNECT":
-                host_port = target.split(":")
-                host = host_port[0]
-                port = int(host_port[1]) if len(host_port) > 1 else 443
-                
-                try:
-                    remote_sock.connect((host, port))
-                    client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-                    self._pipe(client_sock, remote_sock)
-                except Exception as ce:
-                    logger.debug(f"LocalProxyBridge CONNECT error for {host}:{port}: {ce}")
-                    try:
-                        client_sock.sendall(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
-                    except Exception:
-                        pass
-            else:
-                if "://" in target:
-                    url_part = target.split("://", 1)[1]
-                else:
-                    url_part = target
-                host_part = url_part.split("/", 1)[0]
-                if ":" in host_part:
-                    host, port = host_part.split(":")
-                    port = int(port)
-                else:
-                    host = host_part
-                    port = 80
-
-                try:
-                    remote_sock.connect((host, port))
-                    remote_sock.sendall(req_data)
-                    self._pipe(client_sock, remote_sock)
-                except Exception as ce:
-                    logger.debug(f"LocalProxyBridge HTTP error for {host}:{port}: {ce}")
-                    try:
-                        client_sock.sendall(b"HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
-                    except Exception:
-                        pass
-        except Exception as e:
-            logger.debug(f"LocalProxyBridge connection handling error: {e}")
-        finally:
-            try:
-                client_sock.close()
-            except Exception:
-                pass
-
-    def _pipe(self, s1, s2):
-        import select
-        import socket
-        import time
-
-        # Extract pure native C OS sockets, bypassing PySocks wrapper logic after connection establishment
-        s1_native = getattr(s1, "_sock", s1)
-        s2_native = getattr(s2, "_sock", s2)
-
-        s1_native.setblocking(False)
-        s2_native.setblocking(False)
-
-        raw_to_sock = {s1_native: (s1_native, s2_native), s2_native: (s2_native, s1_native)}
-        sockets = [s1_native, s2_native]
-        bufsize = 131072
-        idle_start = time.time()
-
-        while self.running:
-            try:
-                readable, _, errors = select.select(sockets, [], sockets, 1.0)
-                if errors:
-                    break
-                if not readable:
-                    if time.time() - idle_start > 15.0:
-                        break
-                    continue
-
-                idle_start = time.time()
-                for r in readable:
-                    src, dst = raw_to_sock[r]
-                    try:
-                        data = src.recv(bufsize)
-                        if not data:
-                            return
-                        dst.sendall(data)
-                    except (socket.error, BlockingIOError, InterruptedError):
-                        return
-                    except Exception:
-                        return
-            except Exception:
-                break
-
-        try:
-            s1_native.close()
-        except Exception:
-            pass
-        try:
-            s2_native.close()
-        except Exception:
-            pass
-
-
 class VPNProcess:
-    def __init__(self, stream_id: str, mode: str, proxy_url: str, process: Optional[subprocess.Popen] = None, temp_file: Optional[Path] = None, bridge: Optional[LocalProxyBridge] = None):
+    def __init__(self, stream_id: str, mode: str, proxy_url: str, process: Optional[subprocess.Popen] = None, temp_file: Optional[Path] = None):
         self.stream_id = stream_id
         self.mode = mode
         self.proxy_url = proxy_url
         self.process = process
         self.temp_file = temp_file
-        self.bridge = bridge
 
     def stop(self):
-        if self.bridge:
-            try:
-                self.bridge.stop()
-            except Exception:
-                pass
-            self.bridge = None
         if self.process:
             try:
                 self.process.terminate()
@@ -250,28 +49,8 @@ class VPNProcess:
                 pass
 
 
-def parse_proxy_parts(raw_url: str, username: str = "", password: str = ""):
-    raw_url = (raw_url or "").strip()
-    if not raw_url:
-        return "", 0, "socks5", "", ""
-
-    from urllib.parse import urlparse, unquote
-    if "://" not in raw_url:
-        raw_url = f"socks5://{raw_url}"
-
-    parsed = urlparse(raw_url)
-    scheme = parsed.scheme or "socks5"
-    host = parsed.hostname or ""
-    port = parsed.port or (1080 if "socks" in scheme else 8080)
-
-    user = unquote(parsed.username) if parsed.username else (username or "").strip()
-    pwd = unquote(parsed.password) if parsed.password else (password or "").strip()
-
-    return host, port, scheme, user, pwd
-
-
 class VPNManager:
-    """Singleton managing global VPN proxy processes."""
+    """Singleton managing global WireGuard VPN proxy processes."""
 
     _instance = None
 
@@ -289,7 +68,7 @@ class VPNManager:
 
     def start_global_vpn(self) -> Optional[str]:
         """
-        Start Global VPN (WireGuard or Proxy) if configured in global settings.
+        Start Global WireGuard VPN if configured in global settings.
         Returns local proxy URL (e.g. 'http://127.0.0.1:10501') or None if disabled.
         """
         self.stop_global_vpn()
@@ -300,25 +79,6 @@ class VPNManager:
 
         if mode == "none" or not mode:
             return None
-
-        if mode == "proxy":
-            raw_url = global_vpn.get("proxy_url", "")
-            user = global_vpn.get("proxy_username", "")
-            pwd = global_vpn.get("proxy_password", "")
-            host, port, scheme, user, pwd = parse_proxy_parts(raw_url, user, pwd)
-
-            if not host:
-                logger.warning("Global VPN set to proxy mode but proxy_url host is empty.")
-                return None
-
-            local_port = self._allocate_port()
-            bridge = LocalProxyBridge(local_port, host, port, scheme, user, pwd)
-            bridge.start()
-
-            self._global_proxy_url = f"http://127.0.0.1:{local_port}"
-            self._global_vpn_process = VPNProcess(stream_id="global", mode="proxy", proxy_url=self._global_proxy_url, bridge=bridge)
-            logger.info(f"Global VPN active via local proxy bridge {self._global_proxy_url} -> {scheme}://{host}:{port}")
-            return self._global_proxy_url
 
         if mode == "wireguard":
             content = global_vpn.get("profile_content", "").strip()
@@ -365,10 +125,11 @@ class VPNManager:
                 temp_conf.unlink(missing_ok=True)
                 return None
 
+        logger.warning(f"Unsupported or removed VPN mode requested: {mode}")
         return None
 
     def stop_global_vpn(self):
-        """Stop global VPN proxy process or bridge if active."""
+        """Stop global WireGuard VPN proxy process if active."""
         if self._global_vpn_process:
             try:
                 self._global_vpn_process.stop()
@@ -388,7 +149,6 @@ class VPNManager:
         """
         use_vpn = stream_item.get("use_vpn")
         if use_vpn is None:
-            # Backward compatibility check for existing config items
             use_vpn = stream_item.get("vpn_mode", "none") != "none"
 
         if use_vpn:
@@ -438,22 +198,31 @@ class VPNManager:
                 except Exception:
                     pass
 
-
     def get_status(self) -> dict:
-        """Return current status of Global VPN manager."""
+        """Return actual live status of Global WireGuard VPN manager."""
         cfg = load_config()
         global_vpn = getattr(cfg.streamer, "global_vpn", {}) or {}
         mode = global_vpn.get("mode", "none")
-        is_active = self._global_proxy_url is not None
-        status = "disabled"
-        if mode != "none":
-            status = "active" if is_active else "inactive"
+        
+        if mode == "none" or not mode or mode != "wireguard":
+            return {
+                "mode": mode if mode != "wireguard" else "none",
+                "active": False,
+                "proxy_url": "",
+                "status": "disabled",
+            }
+
+        is_alive = False
+        if self._global_vpn_process and self._global_vpn_process.process:
+            is_alive = (self._global_vpn_process.process.poll() is None)
+
+        status_str = "active" if is_alive else "error"
 
         return {
-            "mode": mode,
-            "active": is_active,
-            "proxy_url": self._global_proxy_url or "",
-            "status": status,
+            "mode": "wireguard",
+            "active": is_alive,
+            "proxy_url": self._global_proxy_url if is_alive else "",
+            "status": status_str,
         }
 
 

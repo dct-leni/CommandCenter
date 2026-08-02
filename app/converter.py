@@ -274,10 +274,6 @@ class Converter:
         if pending_assets:
             from concurrent.futures import ThreadPoolExecutor
             def _load_asset(info: FileInfo, target_path: str):
-                if not info.thumbnail:
-                    thumb = generate_thumbnail(target_path)
-                    if thumb:
-                        info.thumbnail = thumb
                 if not info.metadata or not info.metadata.get("duration"):
                     info.metadata = get_video_metadata(target_path)
  
@@ -514,10 +510,7 @@ class Converter:
                 except Exception as e:
                     logger.warning(f"Could not move original file: {e}")
  
-                # Generate thumbnail and update metadata for the new .ts file
-                thumb = generate_thumbnail(output_path)
-                if thumb:
-                    info.thumbnail = thumb
+                # Update metadata for the new .ts file (thumbnails generated via stream snapshots every 10min)
                 info.metadata = get_video_metadata(output_path)
                 if Path(output_path).exists():
                     info.size = Path(output_path).stat().st_size

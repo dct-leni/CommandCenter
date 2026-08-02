@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Query, File, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import uvicorn
@@ -26,6 +26,7 @@ from app.streamer import streamer
 from app.thumbnails import get_thumbnail_path, generate_thumbnail
 from app.epg import generate_epg
 from app.live_relay import live_relay_manager
+from app.hls_cache import hls_cache
 
 # Configure logging
 logging.basicConfig(
@@ -36,6 +37,15 @@ logger = logging.getLogger("commandcenter")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Set Windows system timer resolution to 1ms (eliminates 15.6ms OS timer interrupt quantum slips)
+    if os.name == "nt":
+        try:
+            import ctypes
+            ctypes.windll.winmm.timeBeginPeriod(1)
+            logger.info("Set Windows system timer resolution to 1ms (timeBeginPeriod(1))")
+        except Exception as e:
+            logger.warning(f"Failed to set Windows timer resolution: {e}")
+
     # Purge any leftover temporary VPN config files and browser profiles on startup
     from app.vpn_manager import vpn_manager
     from app.web_stream import web_stream_manager
@@ -58,7 +68,7 @@ async def lifespan(app: FastAPI):
         
     # Resume auto_start live streams across server restarts (excluding web streams)
     for ls_item in cfg.streamer.live_streams:
-        if ls_item.get("auto_start") and ls_item.get("stream_type") != "web":
+        if ls_item.get("auto_start"):
             try:
                 logger.info(f"Auto-resuming live relay stream: {ls_item.get('name')} on :{ls_item.get('port')}")
                 asyncio.create_task(live_relay_manager.start_stream(ls_item.get("id")))
@@ -66,7 +76,7 @@ async def lifespan(app: FastAPI):
                 logger.error(f"Failed to auto-resume live stream {ls_item.get('id')}: {e}")
 
     yield
-    
+
     if streamer.is_running:
         # Pass is_shutdown=True to prevent wiping auto_resume state on restart
         await streamer.stop_streaming(is_shutdown=True)
@@ -154,9 +164,6 @@ class GlobalVPNUpdateRequest(BaseModel):
     mode: str = "none"
     profile_name: Optional[str] = None
     profile_content: Optional[str] = None
-    proxy_url: Optional[str] = None
-    proxy_username: Optional[str] = None
-    proxy_password: Optional[str] = None
 
 
 # ──────────────────────────────────────────────
@@ -743,30 +750,23 @@ async def live_stream_thumbnail(stream_id: str):
     raise HTTPException(status_code=404, detail="Thumbnail not found")
 
 
-def validate_vpn_payload(mode: str, profile_content: str, proxy_url: str):
+def validate_vpn_payload(mode: str, profile_content: str):
     if mode == "wireguard" and not (profile_content and profile_content.strip()):
         raise HTTPException(
             status_code=400,
             detail="WireGuard (.conf) mode requires a valid profile file."
         )
-    if mode == "proxy" and not (proxy_url and proxy_url.strip()):
-        raise HTTPException(
-            status_code=400,
-            detail="Proxy mode requires a valid Proxy URL (e.g. socks5://127.0.0.1:1080)."
-        )
 
 
-def sanitize_vpn_data(mode: str, name: str, content: str, proxy: str):
-    """Ensure profile name/content and proxy URL are cleaned and cleared when mode changes."""
+def sanitize_vpn_data(mode: str, name: str, content: str):
+    """Ensure profile name and content are cleaned and cleared when mode changes."""
     if mode == "wireguard":
         if content:
             content = "\n".join(line.strip() for line in content.splitlines() if line.strip())
     else:
         name = ""
         content = ""
-    if mode != "proxy":
-        proxy = ""
-    return name, content, proxy
+    return name, content
 
 
 @app.get("/api/vpn/global")
@@ -779,20 +779,16 @@ async def get_global_vpn():
 @app.put("/api/vpn/global")
 async def update_global_vpn(body: GlobalVPNUpdateRequest):
     """Update global VPN configuration."""
-    p_name, p_content, p_proxy = sanitize_vpn_data(
+    p_name, p_content = sanitize_vpn_data(
         body.mode,
         body.profile_name or "",
-        body.profile_content or "",
-        body.proxy_url or ""
+        body.profile_content or ""
     )
-    validate_vpn_payload(body.mode, p_content, p_proxy)
+    validate_vpn_payload(body.mode, p_content)
     new_vpn = {
         "mode": body.mode,
         "profile_name": p_name,
         "profile_content": p_content,
-        "proxy_url": p_proxy,
-        "proxy_username": body.proxy_username or "",
-        "proxy_password": body.proxy_password or "",
     }
     update_config({"streamer": {"global_vpn": new_vpn}})
     from app.vpn_manager import vpn_manager

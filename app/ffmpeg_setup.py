@@ -152,22 +152,28 @@ def get_binaries_status() -> dict:
     }
 
 
-def get_encoding_params(encoder: str, source_bitrate: Optional[int] = None) -> list:
+def get_encoding_params(
+    encoder: str,
+    source_bitrate: Optional[int] = None,
+    mode: str = "converter"
+) -> list:
     """
-    Return the optimized encoding parameters for local converter.
-    If source_bitrate is provided and lower than 2.8 Mbps, cap target & max bitrate
-    proportionally to prevent low-bitrate input files from inflating in size.
+    Unified encoding parameter generator for video conversion, live relays, and web streams.
+
+    Modes:
+      - 'converter': File transcode (NVENC preset p5, VBR, cq 24, spatial/temporal AQ)
+      - 'relay':     Live stream re-encode (NVENC preset p5, VBR 2.8M, temporal AQ)
+      - 'web':       GDIGrab screen capture (NVENC preset p5, single-pass CBR 2.8M, NO AQ buffers)
     """
     target_b_bps = 2_800_000   # 2.8 Mbps default
     max_b_bps    = 3_200_000   # 3.2 Mbps default
     buf_b_bps    = 6_400_000   # 6.4 Mbps default
 
     if source_bitrate and 0 < source_bitrate < target_b_bps:
-        # Match source bitrate 1:1 to preserve original file size without padding useless data
+        # Match source bitrate 1:1 to preserve original file size without padding
         target_b_bps = max(300_000, source_bitrate)
         max_b_bps    = int(target_b_bps * 1.1)
         buf_b_bps    = max_b_bps * 2
-
 
     def _format_rate(rate_bps: int) -> str:
         if rate_bps % 1_000_000 == 0:
@@ -179,41 +185,85 @@ def get_encoding_params(encoder: str, source_bitrate: Optional[int] = None) -> l
     buf_b_str    = _format_rate(buf_b_bps)
 
     if encoder == "h264_nvenc":
-        return [
+        params = [
             "-c:v", "h264_nvenc",
-            "-rc", "vbr",                # Explicit VBR rate control to enforce target/max bitrate
-            "-cq", "24",                 # Constant quality target to prevent NVENC bitrate runaway
-            "-preset", "p6",             # High-quality preset
+            "-preset", "p5",
+            "-profile:v", "high",
+            "-b:v", target_b_str,
+            "-maxrate", max_b_str if mode != "web" else target_b_str,
+            "-bufsize", buf_b_str,
+            "-g", "60",
+        ]
+        if mode == "web":
+            # GDIGrab requires single-pass CBR without AQ/lookahead buffers to prevent frame stalls
+            params.extend(["-rc", "cbr"])
+        elif mode == "converter":
+            params.extend(["-rc", "vbr", "-cq", "24", "-spatial-aq", "1", "-temporal-aq", "1"])
+        elif mode == "relay":
+            params.extend(["-rc", "vbr", "-temporal-aq", "1"])
+        return params
+
+    elif encoder == "h264_qsv":
+        params = [
+            "-c:v", "h264_qsv",
+            "-preset", "fast" if mode == "web" else "medium",
             "-profile:v", "high",
             "-b:v", target_b_str,
             "-maxrate", max_b_str,
             "-bufsize", buf_b_str,
-            "-spatial-aq", "1",          # Optimize dark scene details
-            "-temporal-aq", "1",         # Smooth out fast motion pixels
-            "-g", "60",                  # 2s keyframe interval
-        ]
-    elif encoder == "h264_qsv":
-        return [
-            "-c:v", "h264_qsv",
-            "-preset", "medium",
-            "-b:v", target_b_str,
-            "-maxrate", max_b_str,
-            "-bufsize", buf_b_str,
-            "-look_ahead", "1",          # Enable lookahead to smooth out motion
-            "-look_ahead_depth", "15",
             "-g", "60",
         ]
+        if mode == "converter":
+            params.extend(["-look_ahead", "1", "-look_ahead_depth", "15"])
+        return params
+
     elif encoder == "libx264":
-        return [
+        preset = "ultrafast" if mode == "web" else ("fast" if mode == "relay" else "medium")
+        params = [
             "-c:v", "libx264",
-            "-preset", "medium",
+            "-preset", preset,
+            "-profile:v", "high",
             "-b:v", target_b_str,
             "-maxrate", max_b_str,
             "-bufsize", buf_b_str,
             "-g", "60",
         ]
+        if mode == "web":
+            params.extend(["-tune", "zerolatency"])
+        elif mode == "converter":
+            params.extend(["-crf", "21"])
+        elif mode == "relay":
+            params.extend(["-crf", "23"])
+        return params
+
     else:
         return ["-c:v", "copy"]
+
+
+def get_relay_params() -> list:
+    """Return stream copy parameters for the live relay (zero GPU usage)."""
+    return ["-c:v", "copy"]
+
+
+def get_relay_encoding_params(encoder: str) -> list:
+    """Alias for get_encoding_params with mode='relay'."""
+    return get_encoding_params(encoder, mode="relay")
+
+
+def get_screen_capture_params(encoder: str) -> list:
+    """Alias for get_encoding_params with mode='web'."""
+    return get_encoding_params(encoder, mode="web")
+
+
+def get_audio_params(is_web: bool = False) -> list:
+    """Return standardized audio encoding/filter parameters for live stream copy vs web streams."""
+    if is_web:
+        return [
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-af", "adelay=350|350,aresample=async=1000:min_hard_comp=0.100000:first_pts=0"
+        ]
+    return ["-c:a", "copy"]
 
 
 def format_ffmpeg_headers(url: str) -> str:
@@ -304,7 +354,6 @@ def probe_source_codec(url: str, timeout: int = 8, proxy_url: Optional[str] = No
             logger.warning(f"ffprobe returned code {res.returncode} for {url}: {err_msg}")
 
         codec = res.stdout.decode("utf-8", errors="replace").strip()
-        # ffprobe may return one line per video track — take the first
         codec = codec.splitlines()[0].strip().lower() if codec else "unknown"
         return codec if codec else "unknown"
     except Exception as e:
@@ -313,59 +362,15 @@ def probe_source_codec(url: str, timeout: int = 8, proxy_url: Optional[str] = No
 
 
 def get_relay_params() -> list:
-    """
-    Return stream copy parameters for the live relay (zero GPU usage).
-    The live relay ingests an already-encoded H.264 stream and just re-muxes
-    it — no re-encode needed. Using codec copy eliminates GPU usage entirely
-    while preserving bit-for-bit identical video quality.
-    The bsf:v dump_extra filter injects SPS/PPS headers before every keyframe
-    so that late-joining clients can decode immediately without seeking.
-    """
+    """Return stream copy parameters for the live relay (zero GPU usage)."""
     return ["-c:v", "copy"]
 
 
 def get_relay_encoding_params(encoder: str) -> list:
-    """
-    Low-GPU re-encode parameters for live relay when source is not H.264.
+    """Alias for get_encoding_params with mode='relay'."""
+    return get_encoding_params(encoder, mode="relay")
 
-    Differences from get_encoding_params() (converter quality profile):
-      NVENC: preset p4 instead of p6  → ~20% less GPU, imperceptible quality loss
-             no spatial-aq/temporal-aq → ~18% less GPU, minor impact on dark/fast scenes
-             no rc-lookahead           → ~5%  less GPU, negligible for live content
-      QSV:   preset fast, no lookahead → ~20% less CPU/GPU compute
-      CPU:   preset fast, crf 23       → far less CPU, very similar visual quality to crf 21
-    """
-    if encoder == "h264_nvenc":
-        return [
-            "-c:v", "h264_nvenc",
-            "-preset", "p5",            # One step below converter's p6 — ~10% GPU saving, imperceptible quality diff
-            "-profile:v", "high",
-            "-b:v", "2.8M",
-            "-maxrate", "3.2M",
-            "-bufsize", "6.4M",
-            "-temporal-aq", "1",        # Keep: preserves motion sharpness in fast/sports content
-            "-g", "60",
-            # spatial-aq off: saves ~10% GPU; mainly helps dark flat areas, not motion content
-            # rc-lookahead off: saves ~5% GPU; live stream + VBR buffer already handles spikes
-        ]
-    elif encoder == "h264_qsv":
-        return [
-            "-c:v", "h264_qsv",
-            "-preset", "medium",
-            "-b:v", "2.8M",
-            "-maxrate", "3.2M",
-            "-bufsize", "6.4M",
-            "-g", "60",
-            # look_ahead disabled: saves compute; less beneficial for live relay
-        ]
-    elif encoder == "libx264":
-        return [
-            "-c:v", "libx264",
-            "-preset", "fast",          # Much lighter than 'medium'
-            "-crf", "23",               # +2 vs converter's 21; still visually very close
-            "-maxrate", "3.2M",
-            "-bufsize", "6.4M",
-            "-g", "60",
-        ]
-    else:
-        return ["-c:v", "copy"]
+
+def get_screen_capture_params(encoder: str) -> list:
+    """Alias for get_encoding_params with mode='web'."""
+    return get_encoding_params(encoder, mode="web")

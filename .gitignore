@@ -27,3 +27,7 @@ config.yml
 auto.crt
 auto.key
 summery.md
+
+# AI slop
+.agents/
+GEMINI.md

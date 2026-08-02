@@ -10,4 +10,3 @@ echo.
 echo Starting CommandCenter...
 python -m app.main
 pause
-

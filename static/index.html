@@ -388,7 +388,6 @@
                         style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 13px;">
                         <option value="none">Direct Connection (No VPN)</option>
                         <option value="wireguard">WireGuard Profile (.conf)</option>
-                        <option value="proxy">Custom Proxy (SOCKS5 / HTTP)</option>
                     </select>
                 </div>
                 <div id="global-vpn-file-box" style="display: none;">
@@ -404,32 +403,6 @@
                             file selected</span>
                         <input type="file" id="global-vpn-file-input" accept=".conf,.txt" style="display: none;"
                             onchange="onVpnFileSelected(event, 'global')">
-                    </div>
-                </div>
-                <div id="global-proxy-box" style="display: none;">
-                    <div style="margin-bottom: 8px;">
-                        <label
-                            style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Proxy
-                            Server / URL</label>
-                        <input type="text" id="global-proxy-url"
-                            placeholder="e.g. nl.free.zoogvpn.com:1080 or socks5://127.0.0.1:1080"
-                            style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
-                    </div>
-                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-                        <div>
-                            <label
-                                style="font-size: 11.5px; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 4px;">Username
-                                (Optional)</label>
-                            <input type="text" id="global-proxy-username" placeholder="user@domain.com"
-                                style="width: 100%; padding: 7px 9px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 12.5px;">
-                        </div>
-                        <div>
-                            <label
-                                style="font-size: 11.5px; font-weight: 600; color: var(--text-secondary); display: block; margin-bottom: 4px;">Password
-                                (Optional)</label>
-                            <input type="password" id="global-proxy-password" placeholder="••••••••"
-                                style="width: 100%; padding: 7px 9px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 12.5px;">
-                        </div>
                     </div>
                 </div>
             </div>

@@ -47,7 +47,6 @@ class StreamerConfig:
         "mode": "none",
         "profile_name": "",
         "profile_content": "",
-        "proxy_url": "",
     })
 
 
