@@ -18,7 +18,12 @@ from pathlib import Path
 from urllib.parse import urlparse
 from typing import Optional, Dict, List
 
+import threading
+
 logger = logging.getLogger(__name__)
+
+# Global lock to prevent race conditions when generating Portapps YAML config for concurrent streams
+_launcher_lock = threading.Lock()
 
 # Base project directory (CommandCenter root)
 _BASE_DIR = Path(__file__).parent.parent
@@ -28,9 +33,14 @@ BROWSER_PROFILES_DIR = _BASE_DIR / "temp" / "firefox_profiles"
 
 # Paths for portable Firefox binary candidates inside bin/
 _FIREFOX_CANDIDATES = [
-    # phyrox-portable v152 (user-provided)
+    # Phyrox-portable launcher (Portapps portable wrapper)
+    _BASE_DIR / "bin" / "firefox" / "phyrox-portable.exe",
+    _BASE_DIR / "bin" / "phyrox-portable-win64-152.0.4-70" / "phyrox-portable.exe",
+    _BASE_DIR / "bin" / "phyrox-portable.exe",
+    # Direct app binary fallbacks
+    _BASE_DIR / "bin" / "firefox" / "app" / "firefox.exe",
+    _BASE_DIR / "bin" / "firefox" / "firefox.exe",
     _BASE_DIR / "bin" / "phyrox-portable-win64-152.0.4-70" / "app" / "firefox.exe",
-    # generic portable build fallback
     _BASE_DIR / "bin" / "firefox-win" / "firefox.exe",
     _BASE_DIR / "bin" / "firefox-win" / "app" / "firefox.exe",
 ]
@@ -132,6 +142,17 @@ def find_firefox_executable() -> Optional[str]:
         if candidate.exists():
             logger.debug(f"Found portable Firefox at: {candidate}")
             return str(candidate)
+
+    # Dynamic fallback: search anywhere inside bin/ for phyrox-portable.exe first, then firefox.exe
+    bin_dir = _BASE_DIR / "bin"
+    if bin_dir.exists():
+        for found in bin_dir.rglob("phyrox-portable.exe"):
+            logger.info(f"Found phyrox-portable.exe via rglob scan at: {found}")
+            return str(found)
+        for found in bin_dir.rglob("firefox.exe"):
+            logger.info(f"Found firefox.exe via rglob scan at: {found}")
+            return str(found)
+
     return None
 
 
@@ -173,8 +194,13 @@ def _ensure_firefox_policies(firefox_exe: Path) -> None:
         }
         policy_json = json.dumps(policy_data, indent=2)
 
-        # Write to app/distribution and parent/distribution
-        dirs_to_try = [firefox_exe.parent / "distribution", firefox_exe.parent.parent / "distribution"]
+        # Write to app/distribution, data, and parent/distribution
+        dirs_to_try = [
+            firefox_exe.parent / "distribution",
+            firefox_exe.parent.parent / "distribution",
+            firefox_exe.parent / "app" / "distribution",  # For phyrox-portable.exe -> app/distribution
+            firefox_exe.parent / "data",                  # Portapps requires data/policies.json
+        ]
         for d in dirs_to_try:
             try:
                 d.mkdir(exist_ok=True)
@@ -468,32 +494,74 @@ class WebStreamManager:
         """
         self.close_browser(stream_id)
 
-        profile_dir = BROWSER_PROFILES_DIR / stream_id
-        _create_firefox_profile(profile_dir, proxy_url, stream_id)
-
         firefox_exe = find_firefox_executable()
         if firefox_exe:
-            _ensure_firefox_policies(Path(firefox_exe))
-            cmd = [
-                firefox_exe,
-                "--no-remote",
-                "--new-instance",
-                f"--profile", str(profile_dir.resolve()),
-                "--width=1280",
-                "--height=720",
-                url,
-            ]
-            env = os.environ.copy()
-            env["TZ"] = "Europe/Istanbul"
-
-            logger.info(f"Launching Portable Firefox for web stream '{name}' ({stream_id}) -> '{url}' using: {firefox_exe}")
-            proc = subprocess.Popen(
-                cmd + ["-foreground"],  # -foreground: prevents Firefox starting minimized
-                env=env,
-                # Do NOT use CREATE_NO_WINDOW — that hides the window, suspending media playback.
-                # DETACHED_PROCESS ensures the process runs independently without attaching to our console.
-                creationflags=getattr(subprocess, "DETACHED_PROCESS", 0x00000008),
-            )
+            exe_path = Path(firefox_exe)
+            
+            if exe_path.name.lower() == "phyrox-portable.exe":
+                # Portapps strictly resolves profiles relative to data/profile/
+                profile_dir = exe_path.parent / "data" / "profile" / stream_id
+                _create_firefox_profile(profile_dir, proxy_url, stream_id)
+                
+                yaml_path = exe_path.with_suffix(".yml")
+                yml_content = f"""common:
+  disable_log: true
+  args: []
+  env: {{}}
+  app_path: ""
+app:
+  profile: "{stream_id}"
+  multiple_instances: false
+  disable_telemetry: true
+  disable_firefox_studies: true
+  disable_crash_reporter: true
+  locale: en-US
+  cleanup: true
+"""
+                with _launcher_lock:
+                    _ensure_firefox_policies(exe_path)
+                    yaml_path.write_text(yml_content, encoding="utf-8")
+                    cmd = [
+                        firefox_exe,
+                        "--width=1280",
+                        "--height=720",
+                        url,
+                        "-foreground"
+                    ]
+                    env = os.environ.copy()
+                    env["TZ"] = "Europe/Istanbul"
+                    logger.info(f"Launching Portapps phyrox-portable for '{name}' ({stream_id}) -> '{url}'")
+                    proc = subprocess.Popen(
+                        cmd,
+                        env=env,
+                        creationflags=getattr(subprocess, "DETACHED_PROCESS", 0x00000008),
+                    )
+                    # Brief sleep to ensure Portapps reads the YAML before another thread can overwrite it
+                    time.sleep(1.0)
+            else:
+                profile_dir = BROWSER_PROFILES_DIR / stream_id
+                _create_firefox_profile(profile_dir, proxy_url, stream_id)
+                
+                _ensure_firefox_policies(exe_path)
+                cmd = [
+                    firefox_exe,
+                    "--no-remote",
+                    "--new-instance",
+                    f"--profile", str(profile_dir.resolve()),
+                    "--width=1280",
+                    "--height=720",
+                    url,
+                    "-foreground"
+                ]
+                env = os.environ.copy()
+                env["TZ"] = "Europe/Istanbul"
+                logger.info(f"Launching Native Firefox for web stream '{name}' ({stream_id}) -> '{url}'")
+                proc = subprocess.Popen(
+                    cmd,
+                    env=env,
+                    creationflags=getattr(subprocess, "DETACHED_PROCESS", 0x00000008),
+                )
+            
             self.browser_processes[stream_id] = proc
         else:
             logger.warning(f"Portable Firefox not found. Falling back to default browser for web stream '{name}' ({stream_id})")
@@ -611,16 +679,49 @@ class WebStreamManager:
                 else:
                     logger.debug(f"PID scan target_pids={target_pids} found 0 matching windows so far...")
 
-            # 2. Fallback: search open system window titles (no HWND tracking)
-            titles = get_open_window_titles()
-            for matcher in [full_netloc, parsed_domain, stream_name]:
-                if not matcher:
-                    continue
-                for t in titles:
-                    if matcher.lower() in t.lower() and not any(skip in t.lower() for skip in _FIREFOX_SKIP):
-                        logger.info(f"Detected open Firefox window for stream '{stream_name}' matching '{matcher}': '{t}'")
-                        self.window_titles[stream_id] = t
-                        return t
+            # 2. Fallback: search open system window titles and lock HWND (PID linkage broken by launcher)
+            if os.name == "nt":
+                found_fallback: List[tuple] = []
+                def _enum_title_windows(hwnd, lParam):
+                    if user32.IsWindowVisible(hwnd):
+                        buff = ctypes.create_unicode_buffer(512)
+                        user32.GetWindowTextW(hwnd, buff, 512)
+                        val = buff.value.strip()
+                        if val and not any(skip == val.lower() or skip in val.lower() for skip in _FIREFOX_SKIP):
+                            rect = ctypes.wintypes.RECT()
+                            user32.GetClientRect(hwnd, ctypes.byref(rect))
+                            if (rect.right - rect.left) >= 400 and (rect.bottom - rect.top) >= 300:
+                                found_fallback.append((hwnd, val))
+                    return True
+                
+                cb_title = WNDENUMPROC(_enum_title_windows)
+                user32.EnumWindows(cb_title, 0)
+                
+                for hwnd, t in found_fallback:
+                    for matcher in [full_netloc, parsed_domain, stream_name]:
+                        if matcher and matcher.lower() in t.lower():
+                            logger.info(f"Detected open Firefox window for stream '{stream_name}' matching '{matcher}': '{t}' (hwnd=0x{hwnd:x})")
+                            self.window_hwnds[stream_id] = hwnd
+                            self.window_titles[stream_id] = t
+                            try:
+                                GWL_STYLE = -16
+                                WS_THICKFRAME = 0x00040000
+                                WS_MAXIMIZEBOX = 0x00010000
+                                WS_MINIMIZEBOX = 0x00020000
+                                style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+                                if style:
+                                    style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX)
+                                    user32.SetWindowLongW(hwnd, GWL_STYLE, style)
+                                if user32.IsIconic(hwnd):
+                                    user32.ShowWindow(hwnd, 9)
+                                else:
+                                    user32.ShowWindow(hwnd, 5)
+                                user32.SetWindowPos(hwnd, 0, 0, 0, 1280, 758, 0x0067)
+                                from app.audio_router import route_to_vb_cable
+                                route_to_vb_cable()
+                            except Exception as e:
+                                logger.debug(f"Fallback window setup error: {e}")
+                            return t
             time.sleep(0.5)
 
         fallback = full_netloc if full_netloc else (parsed_domain if parsed_domain else stream_name)
@@ -703,6 +804,26 @@ class WebStreamManager:
                 except Exception:
                     pass
 
+        if os.name == "nt":
+            # Absolute fallback: Find and kill any firefox.exe whose command line contains our stream_id
+            try:
+                import psutil
+                for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+                    try:
+                        if p.info['name'] and p.info['name'].lower() == "firefox.exe":
+                            cmdline = p.info.get('cmdline')
+                            if cmdline and any(stream_id in arg for arg in cmdline):
+                                subprocess.run(
+                                    ["taskkill", "/F", "/T", "/PID", str(p.info['pid'])],
+                                    capture_output=True,
+                                    timeout=3,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                                )
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                        pass
+            except Exception as e:
+                logger.debug(f"psutil fallback kill error: {e}")
+
         profile_dir = BROWSER_PROFILES_DIR / stream_id
         if profile_dir.exists():
             import shutil
@@ -710,6 +831,17 @@ class WebStreamManager:
                 shutil.rmtree(profile_dir, ignore_errors=True)
             except Exception:
                 pass
+                
+        # Also clean up Portapps profile if it exists
+        firefox_exe = find_firefox_executable()
+        if firefox_exe:
+            portapps_profile = Path(firefox_exe).parent / "data" / "profile" / stream_id
+            if portapps_profile.exists():
+                import shutil
+                try:
+                    shutil.rmtree(portapps_profile, ignore_errors=True)
+                except Exception:
+                    pass
 
         try:
             from app.audio_router import restore_audio_routing

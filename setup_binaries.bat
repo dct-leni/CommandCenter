@@ -110,15 +110,14 @@ if exist "%BIN_DIR%\wireproxy.exe" (
 )
 
 :firefox
-REM ---- Portable Firefox (phyrox-portable) ----
-set FIREFOX_DIR=%BIN_DIR%\phyrox-portable-win64-152.0.4-70
-set FIREFOX_EXE=%FIREFOX_DIR%\app\firefox.exe
+REM ---- Portable Firefox ----
+set FIREFOX_TARGET_DIR=%BIN_DIR%\firefox
 
-if exist "%FIREFOX_EXE%" goto :firefox_exists
-if exist "%FIREFOX_DIR%\phyrox-portable.exe" goto :firefox_exists
-if exist "%FIREFOX_DIR%\firefox.exe" goto :firefox_exists
+if exist "%FIREFOX_TARGET_DIR%\app\firefox.exe" goto :firefox_exists
+if exist "%FIREFOX_TARGET_DIR%\firefox.exe" goto :firefox_exists
+if exist "%FIREFOX_TARGET_DIR%\phyrox-portable.exe" goto :firefox_exists
+if exist "%BIN_DIR%\phyrox-portable-win64-152.0.4-70\app\firefox.exe" goto :firefox_exists
 if exist "%BIN_DIR%\firefox-win\firefox.exe" goto :firefox_exists
-if exist "%BIN_DIR%\firefox-win\app\firefox.exe" goto :firefox_exists
 goto :download_firefox
 
 :firefox_exists
@@ -136,12 +135,13 @@ if not exist "%FIREFOX_7Z%" (
     goto :vbcable
 )
 
-echo         Extracting Portable Firefox...
+echo         Extracting Portable Firefox to bin\firefox...
+if not exist "%FIREFOX_TARGET_DIR%" mkdir "%FIREFOX_TARGET_DIR%"
 where 7z >nul 2>&1
 if %ERRORLEVEL% == 0 (
-    7z x "%FIREFOX_7Z%" -o"%BIN_DIR%" -y >nul
+    7z x "%FIREFOX_7Z%" -o"%FIREFOX_TARGET_DIR%" -y >nul
 ) else (
-    powershell -Command "& { $p = '%FIREFOX_7Z%'; $d = '%BIN_DIR%'; try { & 7z x $p -o$d -y 2>&1 | Out-Null } catch { Write-Host 'No 7z found — install 7-Zip from https://www.7-zip.org/ then re-run setup.' }; }"
+    powershell -Command "& { $p = '%FIREFOX_7Z%'; $d = '%FIREFOX_TARGET_DIR%'; try { & 7z x $p -o$d -y 2>&1 | Out-Null } catch { Write-Host 'No 7z found — install 7-Zip from https://www.7-zip.org/ then re-run setup.' }; }"
 )
 
 del "%FIREFOX_7Z%" 2>nul
