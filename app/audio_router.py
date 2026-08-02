@@ -67,7 +67,9 @@ def get_cable_device_ids() -> Tuple[Optional[str], Optional[str]]:
     )
 
 
-import asyncio
+import threading
+import time
+import json
 
 def route_to_vb_cable() -> bool:
     """
@@ -83,13 +85,12 @@ def route_to_vb_cable() -> bool:
         logger.warning(f"SoundVolumeView.exe missing at {svv_exe}")
         return False
 
-    # Launch background polling task
-    async def _poll_and_route():
+    def _poll_and_route():
         logger.info("Polling SoundVolumeView to dynamically resolve CABLE Input and route firefox.exe ...")
         for _ in range(60):  # Poll for up to 30 seconds
             try:
-                # Dump current audio sessions
-                temp_json = _BASE_DIR / "temp" / "svv.json"
+                base_dir = Path(__file__).resolve().parent.parent
+                temp_json = base_dir / "temp" / "svv.json"
                 temp_json.parent.mkdir(parents=True, exist_ok=True)
                 
                 subprocess.run(
@@ -99,7 +100,6 @@ def route_to_vb_cable() -> bool:
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 )
                 
-                import json
                 if temp_json.exists():
                     with open(temp_json, "r", encoding="utf-16") as f:
                         data = json.load(f)
@@ -137,18 +137,18 @@ def route_to_vb_cable() -> bool:
                         logger.info(f"Successfully routed Firefox audio session to VB-Cable ID: {cable_target_id}")
                         return
             except Exception as e:
-                logger.debug(f"Error during audio routing poll: {e}")
+                logger.warning(f"Error during audio routing poll: {e}")
                 
-            await asyncio.sleep(0.5)
+            time.sleep(0.5)
             
         logger.warning("Timed out waiting for Firefox audio session to appear in SoundVolumeView.")
 
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop.create_task(_poll_and_route())
+        t = threading.Thread(target=_poll_and_route, daemon=True)
+        t.start()
         return True
-    except RuntimeError:
+    except Exception as e:
+        logger.error(f"Failed to start audio routing thread: {e}")
         return False
 
 

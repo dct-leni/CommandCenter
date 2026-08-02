@@ -1,7 +1,8 @@
 """
 Browser manager for Web Stream Live Relays.
-Launches Portable Firefox (phyrox-portable) with an isolated profile and the
-CommandCenter MV2 audio extension that streams tab PCM audio over WebSocket.
+Launches Portable Firefox (phyrox-portable) with an isolated profile and a
+dynamically generated MV2 extension that overrides page visibility (prevents auto-pause).
+Audio is routed natively via OS-level WASAPI to VB-Audio Virtual Cable.
 """
 
 import os
