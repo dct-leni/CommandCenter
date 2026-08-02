@@ -114,10 +114,18 @@ REM ---- Portable Firefox (phyrox-portable) ----
 set FIREFOX_DIR=%BIN_DIR%\phyrox-portable-win64-152.0.4-70
 set FIREFOX_EXE=%FIREFOX_DIR%\app\firefox.exe
 
-if exist "%FIREFOX_EXE%" (
-    echo [OK] Portable Firefox already exists, skipping.
-    goto :vbcable
-)
+if exist "%FIREFOX_EXE%" goto :firefox_exists
+if exist "%FIREFOX_DIR%\phyrox-portable.exe" goto :firefox_exists
+if exist "%FIREFOX_DIR%\firefox.exe" goto :firefox_exists
+if exist "%BIN_DIR%\firefox-win\firefox.exe" goto :firefox_exists
+if exist "%BIN_DIR%\firefox-win\app\firefox.exe" goto :firefox_exists
+goto :download_firefox
+
+:firefox_exists
+echo [OK] Portable Firefox already exists, skipping.
+goto :vbcable
+
+:download_firefox
 
 echo [5/6] Downloading Portable Firefox (phyrox-portable v152.0.4-70)...
 set FIREFOX_7Z=%BIN_DIR%\phyrox-portable.7z
