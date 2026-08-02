@@ -189,8 +189,8 @@ def _ensure_firefox_policies(firefox_exe: Path) -> None:
                     "datareporting.policy.dataSubmissionPolicyAcceptedVersion": 999,
                     "datareporting.policy.dataSubmissionPolicyBypassNotification": True,
                     "datareporting.policy.firstRunURL": "",
-                    "toolkit.telemetry.reportingpolicy.firstRun": False
-                }
+                },
+                "DontCheckDefaultBrowser": True,
             }
         }
         policy_json = json.dumps(policy_data, indent=2)
@@ -420,9 +420,7 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         'user_pref("privacy.partition.always_partition_third_party_non_cookie_storage", false);',
         'user_pref("security.mixed_content.block_active_content", false);',
 
-        # --- Disable update / crash prompts ---
-        'user_pref("app.update.enabled", false);',
-        'user_pref("app.update.auto", false);',
+        # --- Disable crash prompts ---
         'user_pref("browser.crashReports.unsubmittedCheck.enabled", false);',
         'user_pref("browser.crashReports.unsubmittedCheck.autoSubmit2", false);',
         # --- Enable DRM / Widevine CDM (Required for Exxen, Netflix, etc.) ---
@@ -453,6 +451,15 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
 
     # --- Write userContent.css to natively hide website headers/navbars/footers globally ---
     (chrome_dir / "userContent.css").write_text(
+        "/* Hide Radiant Media Player ad overlays and Google IMA iframe containers */\n"
+        ".rmp-ad-container, .ima-ad-container, [id*='google_ads_iframe'] {\n"
+        "    display: none !important;\n"
+        "    opacity: 0 !important;\n"
+        "    pointer-events: none !important;\n"
+        "    width: 0 !important;\n"
+        "    height: 0 !important;\n"
+        "}\n"
+        "\n"
         "/* Auto-hide headers and footers, reveal on mouse hover for navigation */\n"
         "header, nav, footer, aside, #footer-id, #header-id,\n"
         "[id*='footer'], [class*='footer'], [id*='Footer'], [class*='Footer'],\n"
