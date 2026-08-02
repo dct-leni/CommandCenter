@@ -331,6 +331,9 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         'user_pref("dom.webnotifications.enabled", false);',
         'user_pref("browser.tabs.remote.force-enable", false);',
         'user_pref("dom.disable_window_move_resize", true);',
+        
+        # --- Prevent web players from triggering OS full-screen (breaks GDIGrab window capture bounds) ---
+        'user_pref("full-screen-api.enabled", false);',
 
         # --- HTML5 Video Read-ahead Buffer (prevents 1-second network fetch pauses) ---
         'user_pref("media.cache_readahead_limit", 7200);',
@@ -422,6 +425,13 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         'user_pref("app.update.auto", false);',
         'user_pref("browser.crashReports.unsubmittedCheck.enabled", false);',
         'user_pref("browser.crashReports.unsubmittedCheck.autoSubmit2", false);',
+        # --- Enable DRM / Widevine CDM (Required for Exxen, Netflix, etc.) ---
+        'user_pref("media.eme.enabled", true);',
+        'user_pref("media.gmp-widevinecdm.enabled", true);',
+        'user_pref("media.gmp-widevinecdm.visible", true);',
+        'user_pref("media.gmp-widevinecdm.autoupdate", true);',
+        'user_pref("media.gmp-manager.updateEnabled", true);',
+
         # --- Anti-Tracking / Region Spoofing (Bypass IP Leaks & Locale Checks) ---
         'user_pref("media.peerconnection.enabled", false);',  # Disable WebRTC (prevents STUN/TURN IP leaks)
         'user_pref("intl.accept_languages", "tr-TR, tr, en-US, en");',
@@ -824,25 +834,6 @@ app:
                         pass
             except Exception as e:
                 logger.debug(f"psutil fallback kill error: {e}")
-
-        profile_dir = BROWSER_PROFILES_DIR / stream_id
-        if profile_dir.exists():
-            import shutil
-            try:
-                shutil.rmtree(profile_dir, ignore_errors=True)
-            except Exception:
-                pass
-                
-        # Also clean up Portapps profile if it exists
-        firefox_exe = find_firefox_executable()
-        if firefox_exe:
-            portapps_profile = Path(firefox_exe).parent / "data" / "profile" / stream_id
-            if portapps_profile.exists():
-                import shutil
-                try:
-                    shutil.rmtree(portapps_profile, ignore_errors=True)
-                except Exception:
-                    pass
 
         try:
             from app.audio_router import restore_audio_routing
