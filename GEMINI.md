@@ -84,6 +84,8 @@ Connect VLC or RTMP client to `rtmp://127.0.0.1:1935/stream`.
 
 ### 5. Idempotent Config Saving
 * **Rule**: Compare `old_data == data` before writing `config.yml` to prevent Uvicorn reload loops.
+* **Locking**: `app/config.py` uses `threading.RLock()` to serialize config reads/writes across async handlers and WebSocket status loops. `update_config()` and `save_config()` both acquire this lock — `RLock` (reentrant) is MANDATORY because `update_config` internally calls `save_config`. NEVER downgrade to `threading.Lock()` or the same thread will deadlock on itself.
+* **WebSocket Status Loop**: The `/ws/status` WebSocket calls `load_config()` → `get_all_status()` every second. Config save inside HTTP handlers (stop/start stream) runs synchronously inside `update_config()` → `save_config()` under the lock. Single-threaded asyncio event loop means no true concurrency, but `RLock` guards against future multi-threaded executors.
 
 ### 6. HLS Stream Demuxing (.m3u8)
 * **Rule**: HLS URLs require `-allowed_extensions ALL`, `-allowed_segment_extensions ALL`, `-extension_picky 0`. Avoid `-reconnect_streamed`.
@@ -191,5 +193,27 @@ When `-use_wallclock_as_timestamps 1` was specified on BOTH Input 0 (GDIGrab) an
 * **TCP Window BDP Scaling**: Set `SO_RCVBUF` / `SO_SNDBUF` to 2MB (`2,097,152` bytes) to match WAN BDP windows without TCP buffer exhaustion.
 * **On-Demand SOCKS5 Connection Creation**: Avoid holding pre-authenticated idle SOCKS5 sockets in memory queues. Remote SOCKS servers drop idle connections after 5s, causing browser white pages and triggering remote rate-limits. Use on-demand connection creation with 2MB TCP BDP windows.
 * **Asyncio High-Water Marks**: Python `asyncio` limits socket writes to 64KB by default. To unlock full 2MB OS TCP socket speeds, you MUST synchronize the asyncio transport buffers: `writer.transport.set_write_buffer_limits(high=2097152, low=1048576)`. Otherwise, `writer.drain()` causes heavy stuttering.
+
+### 15. Browser Window HWND Capture & Cleanup (MANDATORY)
+
+* **Rule**: `start_browser_for_stream()` MUST call `wait_for_window_title()` after `launch_browser()` to capture the actual Firefox window HWND.
+* **Why**: `launch_browser()` stores `subprocess.Popen.pid` which (for phyrox-portable) is the **launcher** PID, not the actual `firefox.exe` PID. The phyrox-portable launcher exits immediately after spawning Firefox. Calling `taskkill /F /T /PID <launcher_pid>` kills nothing because the launcher is already gone, leaving Firefox orphaned.
+* **Solution**:
+  1. `start_browser_for_stream()` calls `wait_for_window_title(stream_id, name, url, timeout=10.0)` via `asyncio.to_thread()` after `launch_browser()`.
+  2. `wait_for_window_title()` resolves the actual HWND via `EnumWindows` + PID scan, stores it in `web_stream_manager.window_hwnds[stream_id]`.
+  3. `close_browser()` retrieves the HWND, calls `GetWindowThreadProcessId(hwnd)` to get the actual `firefox.exe` PID, then `taskkill /F /T /PID <firefox_pid>`.
+* **Fallback**: If HWND is `None`, `close_browser()` falls back to killing by launcher PID — but launcher may have already exited. Always ensure HWND capture succeeds.
+
+### 16. Audio Restore Thread Safety
+
+* **Rule**: `restore_audio_routing()` calls `subprocess.run()` to invoke `SoundVolumeView.exe /SetAppDefault` — each call MUST have `timeout=5`.
+* **Why**: `restore_audio_routing()` is called from `close_browser()` which runs via `asyncio.to_thread()`. If SVV hangs (COM contention, device busy), the thread pool thread blocks → `to_thread()` never returns → HTTP handler hangs.
+* **Implementation**: Wraps 3 `subprocess.run()` calls in `_async_restore()` daemon thread. Each call uses `timeout=5`, catches `TimeoutExpired`.
+
+### 17. Async Safety — No `time.sleep()` in Coroutines
+
+* **Rule**: NEVER call `time.sleep()` inside async coroutines. Use `await asyncio.sleep()`.
+* **Why**: `time.sleep()` blocks the entire event loop thread. `await asyncio.sleep()` yields control.
+* **Affected**: Window-restore block in `_auto_restart_loop` (`live_relay.py`) — uses `await asyncio.sleep(0.3)`.
 
 

@@ -124,39 +124,45 @@ def _str_representer(dumper, data):
 CleanDumper.add_representer(str, _str_representer)
 
 
+import threading
+_config_lock = threading.RLock()
+
+
 def save_config(cfg: AppConfig) -> None:
-    """Save configuration to config.yml."""
-    data = asdict(cfg)
-    if CONFIG_PATH.exists():
-        try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as rf:
-                old_data = yaml.safe_load(rf)
-            if old_data == data:
-                return
-        except Exception:
-            pass
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        yaml.dump(data, f, Dumper=CleanDumper, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    """Save configuration to config.yml with thread locking."""
+    with _config_lock:
+        data = asdict(cfg)
+        if CONFIG_PATH.exists():
+            try:
+                with open(CONFIG_PATH, "r", encoding="utf-8") as rf:
+                    old_data = yaml.safe_load(rf)
+                if old_data == data:
+                    return
+            except Exception:
+                pass
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            yaml.dump(data, f, Dumper=CleanDumper, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
 
 def update_config(updates: dict) -> AppConfig:
     """Merge partial updates into existing config and save."""
-    cfg = load_config()
+    with _config_lock:
+        cfg = load_config()
 
-    if "converter" in updates and isinstance(updates["converter"], dict):
-        for k, v in updates["converter"].items():
-            if hasattr(cfg.converter, k):
-                setattr(cfg.converter, k, v)
+        if "converter" in updates and isinstance(updates["converter"], dict):
+            for k, v in updates["converter"].items():
+                if hasattr(cfg.converter, k):
+                    setattr(cfg.converter, k, v)
 
-    if "streamer" in updates and isinstance(updates["streamer"], dict):
-        for k, v in updates["streamer"].items():
-            if hasattr(cfg.streamer, k):
-                setattr(cfg.streamer, k, v)
+        if "streamer" in updates and isinstance(updates["streamer"], dict):
+            for k, v in updates["streamer"].items():
+                if hasattr(cfg.streamer, k):
+                    setattr(cfg.streamer, k, v)
 
-    if "server" in updates and isinstance(updates["server"], dict):
-        for k, v in updates["server"].items():
-            if hasattr(cfg.server, k):
-                setattr(cfg.server, k, v)
+        if "server" in updates and isinstance(updates["server"], dict):
+            for k, v in updates["server"].items():
+                if hasattr(cfg.server, k):
+                    setattr(cfg.server, k, v)
 
-    save_config(cfg)
-    return cfg
+        save_config(cfg)
+        return cfg

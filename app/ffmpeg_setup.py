@@ -6,7 +6,9 @@ Binaries are expected in bin/ folder — run setup_binaries.bat once to download
 import logging
 import os
 from pathlib import Path
+import re
 import subprocess
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -363,16 +365,13 @@ def probe_source_codec(url: str, timeout: int = 8, proxy_url: Optional[str] = No
         return "unknown"
 
 
-def get_relay_params() -> list:
-    """Return stream copy parameters for the live relay (zero GPU usage)."""
-    return ["-c:v", "copy"]
-
-
-def get_relay_encoding_params(encoder: str) -> list:
-    """Alias for get_encoding_params with mode='relay'."""
-    return get_encoding_params(encoder, mode="relay")
-
-
-def get_screen_capture_params(encoder: str) -> list:
-    """Alias for get_encoding_params with mode='web'."""
-    return get_encoding_params(encoder, mode="web")
+def parse_ffmpeg_progress(line: str) -> Optional[float]:
+    """Parse time=HH:MM:SS.ms string from FFmpeg progress output and return total seconds."""
+    match = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", line)
+    if match:
+        try:
+            hours, minutes, seconds = map(float, match.groups())
+            return hours * 3600 + minutes * 60 + seconds
+        except (ValueError, TypeError):
+            pass
+    return None

@@ -69,49 +69,19 @@ if os.name == "nt":
 
 
 def get_child_pids(parent_pid: int) -> set:
-    """Recursively collect parent PID and all descendant child PIDs."""
+    """Recursively collect parent PID and all descendant child PIDs using psutil."""
     pids = {parent_pid}
-    if os.name != "nt":
-        return pids
     try:
-        from ctypes import wintypes
-        TH32CS_SNAPPROCESS = 0x00000002
-
-        class PROCESSENTRY32W(ctypes.Structure):
-            _fields_ = [
-                ('dwSize', wintypes.DWORD),
-                ('cntUsage', wintypes.DWORD),
-                ('th32ProcessID', wintypes.DWORD),
-                ('th32DefaultHeapID', ctypes.POINTER(ctypes.c_ulong)),
-                ('th32ModuleID', wintypes.DWORD),
-                ('cntThreads', wintypes.DWORD),
-                ('th32ParentProcessID', wintypes.DWORD),
-                ('pcPriClassBase', ctypes.c_long),
-                ('dwFlags', wintypes.DWORD),
-                ('szExeFile', ctypes.c_wchar * 260)
-            ]
-
-        hSnapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
-        if hSnapshot == -1 or hSnapshot == 0:
-            return pids
-
-        pe32 = PROCESSENTRY32W()
-        pe32.dwSize = ctypes.sizeof(PROCESSENTRY32W)
-
-        if kernel32.Process32FirstW(hSnapshot, ctypes.byref(pe32)):
-            added = True
-            while added:
-                added = False
-                if kernel32.Process32FirstW(hSnapshot, ctypes.byref(pe32)):
-                    while True:
-                        if pe32.th32ParentProcessID in pids and pe32.th32ProcessID not in pids:
-                            pids.add(pe32.th32ProcessID)
-                            added = True
-                        if not kernel32.Process32NextW(hSnapshot, ctypes.byref(pe32)):
-                            break
-        kernel32.CloseHandle(hSnapshot)
-    except Exception as e:
-        logger.debug(f"Error querying child PIDs: {e}")
+        import psutil
+        try:
+            parent = psutil.Process(parent_pid)
+            children = parent.children(recursive=True)
+            for child in children:
+                pids.add(child.pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    except ImportError:
+        pass
     return pids
 
 
@@ -434,7 +404,47 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         'user_pref("media.peerconnection.enabled", false);',  # Disable WebRTC (prevents STUN/TURN IP leaks)
         'user_pref("intl.accept_languages", "tr-TR, tr, en-US, en");',
         'user_pref("javascript.use_us_english_locale", false);',
+
+        # --- Force Reliable TCP over SOCKS5 (Fixes Secure Connection Failed) ---
+        'user_pref("network.http.http3.enable", false);',  # Disable QUIC/UDP (prevents SOCKS5 UDP Associate drops)
+        'user_pref("network.dns.disableIPv6", true);',     # Force IPv4 (matches WireGuard AllowedIPs)
+        'user_pref("network.dns.echconfig.enabled", false);', # Disable ECH to prevent TLS handshake aborts
+        'user_pref("network.trr.mode", 5);',               # Disable DoH (prevents proxy DNS conflicts)
     ]
+
+    # --- Apply Proxy Settings ---
+    if proxy_url:
+        from urllib.parse import urlparse
+        try:
+            p = urlparse(proxy_url)
+            host = p.hostname or "127.0.0.1"
+            port = p.port or 8080
+            
+            # network.proxy.type = 1 (Manual proxy configuration)
+            prefs.extend([
+                'user_pref("network.proxy.type", 1);',
+            ])
+            
+            if p.scheme.startswith("socks"):
+                prefs.extend([
+                    f'user_pref("network.proxy.socks", "{host}");',
+                    f'user_pref("network.proxy.socks_port", {port});',
+                    f'user_pref("network.proxy.socks_version", {5 if "5" in p.scheme else 4});',
+                    'user_pref("network.proxy.socks_remote_dns", true);',
+                ])
+            else:
+                prefs.extend([
+                    f'user_pref("network.proxy.http", "{host}");',
+                    f'user_pref("network.proxy.http_port", {port});',
+                    f'user_pref("network.proxy.ssl", "{host}");',
+                    f'user_pref("network.proxy.ssl_port", {port});',
+                ])
+            logger.info(f"Applied Firefox proxy settings for {proxy_url}")
+        except Exception as e:
+            logger.warning(f"Failed to parse proxy_url {proxy_url}: {e}")
+    else:
+        # network.proxy.type = 0 (Direct connection, no proxy)
+        prefs.append('user_pref("network.proxy.type", 0);')
 
     user_js.write_text("\n".join(prefs), encoding="utf-8")
 
@@ -552,6 +562,9 @@ app:
                     proc = subprocess.Popen(
                         cmd,
                         env=env,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
                         creationflags=getattr(subprocess, "DETACHED_PROCESS", 0x00000008),
                     )
                     # Brief sleep to ensure Portapps reads the YAML before another thread can overwrite it
@@ -577,6 +590,9 @@ app:
                 proc = subprocess.Popen(
                     cmd,
                     env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                     creationflags=getattr(subprocess, "DETACHED_PROCESS", 0x00000008),
                 )
             
@@ -781,66 +797,33 @@ app:
         proc = self.browser_processes.pop(stream_id, None)
         self.window_titles.pop(stream_id, None)
         hwnd = self.window_hwnds.pop(stream_id, None)
+        logger.info(f"close_browser: proc={proc is not None}, hwnd={hwnd}")
 
-        if os.name == "nt":
-            pids_to_kill = set()
-            if hwnd:
-                try:
-                    from ctypes import wintypes
-                    main_pid = wintypes.DWORD()
-                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(main_pid))
-                    if main_pid.value:
-                        pids_to_kill.add(main_pid.value)
-                except Exception as e:
-                    logger.debug(f"Error reading HWND PID: {e}")
-
-            if proc:
-                pids_to_kill.add(proc.pid)
-                try:
-                    pids_to_kill.update(get_child_pids(proc.pid))
-                except Exception:
-                    pass
-
-            for pid in pids_to_kill:
-                try:
-                    subprocess.run(
-                        ["taskkill", "/F", "/T", "/PID", str(pid)],
-                        capture_output=True,
-                        timeout=3,
-                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                    )
-                except Exception:
-                    pass
-        elif proc:
+        pids_to_kill = set()
+        if os.name == "nt" and hwnd:
             try:
-                if proc.poll() is None:
-                    proc.terminate()
-                    proc.wait(timeout=2.0)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-
-        if os.name == "nt":
-            # Absolute fallback: Find and kill any firefox.exe whose command line contains our stream_id
-            try:
-                import psutil
-                for p in psutil.process_iter(['pid', 'name', 'cmdline']):
-                    try:
-                        if p.info['name'] and p.info['name'].lower() == "firefox.exe":
-                            cmdline = p.info.get('cmdline')
-                            if cmdline and any(stream_id in arg for arg in cmdline):
-                                subprocess.run(
-                                    ["taskkill", "/F", "/T", "/PID", str(p.info['pid'])],
-                                    capture_output=True,
-                                    timeout=3,
-                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
-                                )
-                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                        pass
+                from ctypes import wintypes
+                main_pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(main_pid))
+                if main_pid.value:
+                    pids_to_kill.add(main_pid.value)
             except Exception as e:
-                logger.debug(f"psutil fallback kill error: {e}")
+                logger.debug(f"Error reading HWND PID: {e}")
+
+        if proc:
+            pids_to_kill.add(proc.pid)
+
+        for pid in pids_to_kill:
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(pid)],
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    timeout=3,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                )
+            except Exception:
+                pass
 
         try:
             from app.audio_router import restore_audio_routing

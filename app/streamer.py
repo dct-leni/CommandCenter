@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from app.ffmpeg_setup import get_ffmpeg_path, get_mediamtx_path, is_ffmpeg_installed, is_mediamtx_installed
-from app.thumbnails import generate_thumbnail, get_thumbnail_path, get_video_metadata
+from app.thumbnails import generate_thumbnail, get_thumbnail_path, get_video_metadata, batch_get_video_metadata
 from app.config import load_config, save_config, update_config
 
 logger = logging.getLogger(__name__)
@@ -281,6 +281,27 @@ class Streamer:
         used_files = set()
         available_ports = list(range(self.port_range_start, self.port_range_end + 1))
 
+        # Pre-collect all paths to batch-probe metadata concurrently
+        all_probe_paths = []
+        from app.converter import converter
+        conv_folder = Path(converter.source_folder) if converter.source_folder else None
+
+        if slots_cfg:
+            for slot_entry in slots_cfg:
+                for fname in slot_entry.get("files", []):
+                    fpath = folder_path / fname
+                    if fpath.exists():
+                        all_probe_paths.append(str(fpath))
+                    elif conv_folder and (conv_folder / fname).exists():
+                        all_probe_paths.append(str(conv_folder / fname))
+        else:
+            for fname in folder.files:
+                fpath = folder_path / fname
+                if fpath.exists():
+                    all_probe_paths.append(str(fpath))
+
+        meta_batch = batch_get_video_metadata(all_probe_paths)
+
         if slots_cfg:
             for slot_entry in slots_cfg:
                 port = slot_entry.get("port")
@@ -291,11 +312,9 @@ class Streamer:
                 for fname in slot_files:
                     fpath = folder_path / fname
                     if not fpath.exists():
-                        # Check if file is in converter source folder
-                        from app.converter import converter
-                        conv_path = Path(converter.source_folder) / fname if converter.source_folder else None
+                        conv_path = conv_folder / fname if conv_folder else None
                         if conv_path and conv_path.exists():
-                            meta = get_video_metadata(str(conv_path))
+                            meta = meta_batch.get(str(conv_path), {})
                             files_detail.append({
                                 "filename": fname,
                                 "size": conv_path.stat().st_size,
@@ -311,16 +330,7 @@ class Streamer:
                             })
                         continue
                     used_files.add(fname)
-                    meta = get_video_metadata(str(fpath))
-                    # Check live stream status
-                    stream_info = None
-                    if port in self.active_streams:
-                        si = self.active_streams[port]
-                        stream_info = {
-                            "status": si.status,
-                            "progress": round(si.progress, 3),
-                            "current_file": si.filename,
-                        }
+                    meta = meta_batch.get(str(fpath), {})
                     files_detail.append({
                         "filename": fname,
                         "size": fpath.stat().st_size if fpath.exists() else 0,
@@ -337,13 +347,12 @@ class Streamer:
                     "stream_current_file": self.active_streams[port].filename if port in self.active_streams else None,
                 })
         else:
-            # Fallback: auto-assign files to ports in alphabetical order
             for i, fname in enumerate(folder.files):
                 if i >= len(available_ports):
                     break
                 port = available_ports[i]
                 fpath = folder_path / fname
-                meta = get_video_metadata(str(fpath)) if fpath.exists() else {}
+                meta = meta_batch.get(str(fpath), {}) if fpath.exists() else {}
                 files_detail = [{
                     "filename": fname,
                     "size": fpath.stat().st_size if fpath.exists() else 0,
@@ -854,8 +863,9 @@ class Streamer:
             mtx_config = self._create_mediamtx_config(internal_rtmp_port, public_port, protocol)
             mtx_process = subprocess.Popen(
                 [get_mediamtx_path(), mtx_config],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
             stream_info.mediamtx_process = mtx_process
@@ -1022,7 +1032,10 @@ paths:
                 continue
 
             if stream.ffmpeg_process and stream.ffmpeg_process.returncode is not None:
-                logger.warning(f"FFmpeg died on port {port}, restarting...")
+                if stream.ffmpeg_process.returncode == 0:
+                    logger.info(f"FFmpeg finished cycle on port {port}, advancing playlist...")
+                else:
+                    logger.warning(f"FFmpeg process exited with code {stream.ffmpeg_process.returncode} on port {port}, restarting...")
                 await self._stop_single_stream(port)
                 slots = self._load_slots_for_folder(folder)
                 slot = next((s for s in slots if s.port == port), None)
@@ -1146,8 +1159,8 @@ paths:
         import urllib.request
         urls = [
             "https://api4.ipify.org",
-            "http://ipv4.icanhazip.com",
-            "http://v4.ident.me"
+            "https://ipv4.icanhazip.com",
+            "https://v4.ident.me"
         ]
         for url in urls:
             try:

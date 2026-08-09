@@ -158,7 +158,7 @@ def get_video_metadata(video_path: str) -> dict:
             encoding="utf-8",
             errors="replace",
             timeout=15,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
 
         if result.returncode == 0:
@@ -203,6 +203,38 @@ def get_video_metadata(video_path: str) -> dict:
 
     except Exception as e:
         return {"error": str(e)}
+
+
+def batch_get_video_metadata(video_paths: list) -> dict:
+    """Retrieve metadata for multiple video files in parallel using cache and ThreadPoolExecutor."""
+    import concurrent.futures
+    _load_metadata_cache()
+    results = {}
+    uncached_paths = []
+
+    for path in video_paths:
+        try:
+            stat = os.stat(path)
+            filename = Path(path).name
+            cache_key = f"{filename}:{stat.st_mtime}:{stat.st_size}"
+            if cache_key in _METADATA_CACHE:
+                results[path] = _METADATA_CACHE[cache_key]
+            else:
+                uncached_paths.append(path)
+        except Exception:
+            results[path] = {"error": "File not accessible"}
+
+    if uncached_paths:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(uncached_paths))) as executor:
+            future_to_path = {executor.submit(get_video_metadata, path): path for path in uncached_paths}
+            for future in concurrent.futures.as_completed(future_to_path):
+                path = future_to_path[future]
+                try:
+                    results[path] = future.result()
+                except Exception as e:
+                    results[path] = {"error": str(e)}
+
+    return results
 
 
 def _parse_fps(fps_str: str) -> float:

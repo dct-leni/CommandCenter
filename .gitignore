@@ -23,6 +23,7 @@ streams/*
 config.yml
 
 .codegraph/
+.graymatter/
 
 auto.crt
 auto.key

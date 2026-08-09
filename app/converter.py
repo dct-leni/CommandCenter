@@ -22,7 +22,9 @@ import subprocess
 import logging
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
+
+from app.ffmpeg_setup import FFMPEG_EXE, FFPROBE_EXE, parse_ffmpeg_progress
 from enum import Enum
  
 from app.ffmpeg_setup import get_ffmpeg_path, is_ffmpeg_installed
@@ -99,7 +101,7 @@ async def probe_streams(input_path: str) -> dict:
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         stdout, _ = await process.communicate()
         data = json.loads(stdout.decode("utf-8", errors="replace") or "{}")
@@ -126,7 +128,7 @@ async def probe_streams(input_path: str) -> dict:
     return result
  
  
-def _select_audio_by_language(audio_streams: List[dict], languages: List[str]) -> (List[int], str):
+def _select_audio_by_language(audio_streams: List[dict], languages: List[str]) -> Tuple[List[int], str]:
     """
     Return (list of absolute stream indices to keep, human-readable note).
     `languages` is the configured list of language tags to keep (e.g.
@@ -581,7 +583,6 @@ class Converter:
                 "-c:a", "aac",
                 "-b:a", audio_b_str,
                 "-ac", "2",                # Force stereo
-                "-bsf:v", "dump_extra",    # Repeat SPS/PPS headers before keyframes
                 "-f", "mpegts",
                 output_path,
             ]
@@ -593,7 +594,6 @@ class Converter:
                 "-c:a", "aac",
                 "-b:a", audio_b_str,
                 "-ac", "2",
-                "-bsf:v", "dump_extra",    # Repeat SPS/PPS headers before keyframes
                 "-f", "mpegts",
                 output_path,
             ]
@@ -603,33 +603,31 @@ class Converter:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
- 
-            self._active_processes[filename] = process
- 
-            # Parse progress from stderr using chunks to fix the \r block issue
-            stderr_data = []
+            info.ffmpeg_process = process
+
             buffer = ""
+            stderr_data = []
+
             while True:
                 chunk = await process.stderr.read(4096)
                 if not chunk:
                     break
- 
-                buffer += chunk.decode("utf-8", errors="replace")
- 
+                text = chunk.decode("utf-8", errors="replace")
+                buffer += text
+
                 if '\r' in buffer or '\n' in buffer:
                     lines = buffer.replace('\r', '\n').split('\n')
                     buffer = lines.pop()  # Keep the last incomplete part
- 
+
                     for line in lines:
                         if line.strip():
                             stderr_data.append(line)
-                        # Extract time from FFmpeg output
-                        match = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", line)
-                        if match and duration > 0:
-                            current_time = int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
-                            info.progress = min(current_time / duration, 0.99)
+                        # Extract time from FFmpeg output using shared parser helper
+                        current_sec = parse_ffmpeg_progress(line)
+                        if current_sec is not None and duration > 0:
+                            info.progress = min(current_sec / duration, 0.99)
  
             await process.wait()
  

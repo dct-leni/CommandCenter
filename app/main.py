@@ -13,7 +13,7 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, Query, File, UploadFile
+from fastapi import FastAPI, HTTPException, Query, File, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -35,6 +35,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger("commandcenter")
 
+def safe_create_task(coro, name=None):
+    """Create a background task with automatic exception logging on completion."""
+    task = asyncio.create_task(coro, name=name)
+    def _handle_result(t):
+        try:
+            t.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Unhandled exception in background task '{name or getattr(coro, '__name__', str(coro))}': {e}", exc_info=True)
+    task.add_done_callback(_handle_result)
+    return task
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Set Windows system timer resolution to 1ms (eliminates 15.6ms OS timer interrupt quantum slips)
@@ -46,13 +60,21 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Failed to set Windows timer resolution: {e}")
 
-    # Purge any leftover temporary VPN config files and browser profiles on startup
+    # Silence harmless Windows Proactor connection-reset exceptions (WinError 10054)
+    loop = asyncio.get_running_loop()
+    def custom_exception_handler(loop, context):
+        exc = context.get("exception")
+        if isinstance(exc, ConnectionResetError) or (isinstance(exc, OSError) and getattr(exc, "winerror", None) == 10054):
+            return
+        loop.default_exception_handler(context)
+    loop.set_exception_handler(custom_exception_handler)
+
     from app.vpn_manager import vpn_manager
     from app.web_stream import web_stream_manager
     vpn_manager.purge_temp_dir()
     web_stream_manager.purge_all()
     # Resolve external IP on app start
-    asyncio.create_task(streamer._resolve_external_ip())
+    safe_create_task(streamer._resolve_external_ip(), name="resolve_external_ip")
     # Start Global VPN on app startup if configured
     vpn_manager.start_global_vpn()
 
@@ -62,8 +84,9 @@ async def lifespan(app: FastAPI):
         streamer.scan_content_folder(cfg.streamer.content_folder)
         if cfg.streamer.auto_resume:
             logger.info(f"Auto-resume enabled, starting stream for folder: {cfg.streamer.content_folder}")
-            asyncio.create_task(
-                streamer.start_streaming(cfg.streamer.port_range_start, cfg.streamer.port_range_end)
+            safe_create_task(
+                streamer.start_streaming(cfg.streamer.port_range_start, cfg.streamer.port_range_end),
+                name="auto_resume_folder_streaming"
             )
         
     # Resume auto_start live streams across server restarts (excluding web streams)
@@ -71,7 +94,10 @@ async def lifespan(app: FastAPI):
         if ls_item.get("auto_start"):
             try:
                 logger.info(f"Auto-resuming live relay stream: {ls_item.get('name')} on :{ls_item.get('port')}")
-                asyncio.create_task(live_relay_manager.start_stream(ls_item.get("id")))
+                safe_create_task(
+                    live_relay_manager.start_stream(ls_item.get("id")),
+                    name=f"auto_start_relay_{ls_item.get('id')}"
+                )
             except Exception as e:
                 logger.error(f"Failed to auto-resume live stream {ls_item.get('id')}: {e}")
 
@@ -268,6 +294,30 @@ async def system_status():
     return status
 
 
+@app.websocket("/ws/status")
+async def websocket_status(websocket: WebSocket):
+    """Stream live converter, streamer, live relay, and system status updates over WebSocket."""
+    await websocket.accept()
+    from app.vpn_manager import vpn_manager
+    try:
+        while True:
+            payload = {
+                "system": get_binaries_status(),
+                "vpn": vpn_manager.get_status(),
+                "converter": {
+                    "folder": converter.source_folder,
+                    "files": converter.get_status(),
+                },
+                "live_streams": live_relay_manager.get_all_status(),
+            }
+            await websocket.send_json(payload)
+            await asyncio.sleep(1.0)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.debug(f"WebSocket status connection closed: {e}")
+
+
 # ──────────────────────────────────────────────
 #  Converter endpoints
 # ──────────────────────────────────────────────
@@ -383,7 +433,12 @@ async def converter_thumbnail(filename: str):
         if Path(ts_path).exists():
             filepath = ts_path
 
-    thumb = generate_thumbnail(filepath)
+    target_path = Path(filepath).resolve()
+    source_root = Path(converter.source_folder).resolve()
+    if not target_path.is_relative_to(source_root) or not target_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    thumb = generate_thumbnail(str(target_path))
     if not thumb or not Path(thumb).exists():
         raise HTTPException(status_code=404, detail="Thumbnail not available")
 
@@ -685,11 +740,12 @@ async def streamer_thumbnail(folder_name: str, filename: str):
     if not folder:
         raise HTTPException(status_code=404, detail="Folder not found")
 
-    filepath = str(Path(folder.path) / filename)
-    if not Path(filepath).exists():
+    folder_path = Path(folder.path).resolve()
+    target_path = (folder_path / filename).resolve()
+    if not target_path.is_relative_to(folder_path) or not target_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
 
-    thumb = generate_thumbnail(filepath)
+    thumb = generate_thumbnail(str(target_path))
     if not thumb or not Path(thumb).exists():
         raise HTTPException(status_code=404, detail="Thumbnail not available")
 
@@ -894,7 +950,6 @@ async def start_live_stream(stream_id: str):
 @app.post("/api/streamer/live_stream/{stream_id}/stop")
 async def stop_live_stream(stream_id: str):
     """Stop the FFmpeg relay process for a live stream."""
-    # Dynamically set auto_start to False in config so it stays stopped on boot
     cfg = load_config()
     for item in cfg.streamer.live_streams:
         if item.get("id") == stream_id:

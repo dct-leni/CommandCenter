@@ -90,9 +90,9 @@ class VPNManager:
             proxy_url = f"http://127.0.0.1:{proxy_port}"
 
             wireproxy_conf = content
-            if "[Socks5]" not in wireproxy_conf and "[HTTP]" not in wireproxy_conf:
+
+            if "[HTTP]" not in wireproxy_conf:
                 wireproxy_conf += f"\n\n[HTTP]\nBindAddress = 127.0.0.1:{proxy_port}\n"
-                wireproxy_conf += f"\n[Socks5]\nBindAddress = 127.0.0.1:{proxy_port + 1000}\n"
 
             temp_conf = TEMP_VPN_DIR / f"wg_global_{proxy_port}.conf"
             temp_conf.write_text(wireproxy_conf, encoding="utf-8")
@@ -109,16 +109,19 @@ class VPNManager:
                 return None
 
             try:
+                log_file = TEMP_VPN_DIR / f"wg_global_{proxy_port}.log"
+                log_fd = open(log_file, "w")
                 cmd = [str(wireproxy_bin), "-c", str(temp_conf)]
                 proc = subprocess.Popen(
                     cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_fd,
+                    stderr=subprocess.STDOUT,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 )
                 self._global_proxy_url = proxy_url
                 self._global_vpn_process = VPNProcess(stream_id="global", mode="wireguard", proxy_url=proxy_url, process=proc, temp_file=temp_conf)
-                logger.info(f"Started Global WireGuard proxy via wireproxy at {proxy_url}")
+                logger.info(f"Started Global WireGuard VPN tunnel (local bridge at {proxy_url})")
                 return proxy_url
             except Exception as e:
                 logger.error(f"Failed to launch wireproxy for global VPN: {e}")
@@ -173,6 +176,7 @@ class VPNManager:
             try:
                 _sp.run(
                     ["taskkill", "/F", "/IM", "wireproxy.exe"],
+                    stdin=_sp.DEVNULL,
                     stdout=_sp.DEVNULL,
                     stderr=_sp.DEVNULL,
                     creationflags=_sp.CREATE_NO_WINDOW,

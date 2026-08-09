@@ -401,10 +401,9 @@ class LiveStreamManager:
 
     async def stop_stream(self, stream_id: str) -> dict:
         """Stop a running live relay stream cleanly."""
-        from app.web_stream import web_stream_manager
-        web_stream_manager.close_browser(stream_id)
-
         if stream_id not in self.active_relays:
+            from app.web_stream import web_stream_manager
+            await asyncio.to_thread(web_stream_manager.close_browser, stream_id)
             return {"id": stream_id, "status": "stopped"}
 
         relay = self.active_relays[stream_id]
@@ -412,6 +411,10 @@ class LiveStreamManager:
 
         if relay.restart_task and not relay.restart_task.done():
             relay.restart_task.cancel()
+            try:
+                await relay.restart_task
+            except asyncio.CancelledError:
+                pass
         if relay.log_task and not relay.log_task.done():
             relay.log_task.cancel()
 
@@ -443,7 +446,7 @@ class LiveStreamManager:
         if relay.process and relay.process.returncode is None:
             try:
                 relay.process.terminate()
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.1)
                 if relay.process.returncode is None:
                     relay.process.kill()
             except Exception as e:
@@ -453,7 +456,7 @@ class LiveStreamManager:
         from app.vpn_manager import vpn_manager
         vpn_manager.stop_vpn_for_stream(stream_id)
         from app.web_stream import web_stream_manager
-        web_stream_manager.close_browser(stream_id)
+        await asyncio.to_thread(web_stream_manager.close_browser, stream_id)
 
         # Restore user's default audio device if it was routed to VB-Cable for this stream
         if stream_id in self.active_relays:
@@ -489,14 +492,14 @@ class LiveStreamManager:
             await asyncio.sleep(0.5)  # Wait 500ms for WireGuard local proxy socket readiness
 
         from app.web_stream import web_stream_manager
-        web_stream_manager.close_browser(stream_id)
-
-
+        await asyncio.to_thread(web_stream_manager.close_browser, stream_id)
 
         name = stream_item.get("name", "Web Stream")
         target_url = stream_item.get("url", "")
         
-        window_title = web_stream_manager.launch_browser(stream_id, name, target_url, proxy_url)
+        window_title = await asyncio.to_thread(web_stream_manager.launch_browser, stream_id, name, target_url, proxy_url)
+        # Capture actual Firefox window HWND so close_browser can kill by window
+        await asyncio.to_thread(web_stream_manager.wait_for_window_title, stream_id, name, target_url, 10.0)
 
         relay = self.active_relays.get(stream_id)
         if not relay:
@@ -526,7 +529,7 @@ class LiveStreamManager:
         is_web = stream_item.get("stream_type") == "web"
         from app.ffmpeg_setup import probe_source_codec, get_relay_params, get_best_encoder, get_relay_encoding_params, format_ffmpeg_headers
         from app.audio_router import get_cable_device_ids
-        _, cable_output_device = get_cable_device_ids()
+        _, cable_output_device = await asyncio.get_event_loop().run_in_executor(None, get_cable_device_ids)
         audio_dev = cable_output_device or "CABLE Output (VB-Audio Virtual Cable)"
         if is_web:
             from app.ffmpeg_setup import get_screen_capture_params
@@ -575,7 +578,7 @@ class LiveStreamManager:
                             _user32 = ctypes.windll.user32
                             if _user32.IsIconic(hwnd):
                                 _user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                                import time; time.sleep(0.3)
+                                await asyncio.sleep(0.3)
                         except Exception:
                             pass
 
@@ -730,15 +733,12 @@ class LiveStreamManager:
                         relay.error = f"FFmpeg error ({process.returncode}): {error_detail}"
                         if is_web:
                             from app.web_stream import web_stream_manager
-                            web_stream_manager.close_browser(relay.id)
+                            asyncio.create_task(asyncio.to_thread(web_stream_manager.close_browser, relay.id))
                         break
                     else:
                         await asyncio.sleep(1.0)
 
             except asyncio.CancelledError:
-                if is_web:
-                    from app.web_stream import web_stream_manager
-                    web_stream_manager.close_browser(relay.id)
                 break
             except Exception as e:
                 logger.error(f"Relay loop error for {relay.name}: {e}")
@@ -746,7 +746,7 @@ class LiveStreamManager:
                 relay.error = str(e)
                 if is_web:
                     from app.web_stream import web_stream_manager
-                    web_stream_manager.close_browser(relay.id)
+                    asyncio.create_task(asyncio.to_thread(web_stream_manager.close_browser, relay.id))
                 break
 
     async def _read_relay_logs(self, relay: LiveRelayStatus, stderr):
@@ -757,7 +757,7 @@ class LiveStreamManager:
             while True:
                 try:
                     line = await stderr.readline()
-                except asyncio.LimitOverrunError:
+                except (asyncio.LimitOverrunError, ValueError):
                     # FFmpeg wrote a line longer than the StreamReader buffer.
                     # Drain and discard the oversized chunk, then continue.
                     await stderr.read(1024 * 1024)

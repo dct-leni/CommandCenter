@@ -21,10 +21,10 @@ _ACTIVE_WEB_STREAMS_COUNT = 0
 
 
 def _com_init():
-    """Initialize COM on current thread."""
+    """Initialize COM on current thread as MTA to avoid message pump deadlocks."""
     try:
         import comtypes
-        comtypes.CoInitialize()
+        comtypes.CoInitializeEx(0, comtypes.COINIT_MULTITHREADED)
     except Exception:
         pass
 
@@ -127,6 +127,7 @@ def route_to_vb_cable() -> bool:
                             for role in (0, 1, 2):
                                 subprocess.run(
                                     [str(svv_exe), "/SetAppDefault", cable_target_id, str(role), proc_id],
+                                    stdin=subprocess.DEVNULL,
                                     stdout=subprocess.DEVNULL,
                                     stderr=subprocess.DEVNULL,
                                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
@@ -166,15 +167,24 @@ def restore_audio_routing() -> None:
     if not svv_exe.exists():
         return
 
-    try:
-        # Reset per-app routing for all firefox.exe processes
-        for role in (0, 1, 2):
-            subprocess.run(
-                [str(svv_exe), "/SetAppDefault", "", str(role), "firefox.exe"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-            )
-        logger.info("Reset application-level audio output of 'firefox.exe' to Default via SoundVolumeView")
-    except Exception as e:
-        logger.error(f"Error resetting firefox.exe audio routing: {e}")
+    def _async_restore():
+        try:
+            # Reset per-app routing for all firefox.exe processes
+            for role in (0, 1, 2):
+                try:
+                    subprocess.run(
+                        [str(svv_exe), "/SetAppDefault", "", str(role), "firefox.exe"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=5,
+                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                    )
+                except subprocess.TimeoutExpired:
+                    logger.warning(f"SoundVolumeView /SetAppDefault timed out for role {role}")
+                except Exception:
+                    pass
+            logger.info("Reset application-level audio output of 'firefox.exe' to Default via SoundVolumeView")
+        except Exception as e:
+            logger.error(f"Error resetting firefox.exe audio routing: {e}")
+
+    threading.Thread(target=_async_restore, daemon=True).start()
