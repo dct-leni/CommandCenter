@@ -623,6 +623,11 @@ function renderFolderFiles(folder) {
         const pct = liveStream ? Math.round((liveStream.progress || 0) * 100) : 0;
         const currentFile = liveStream ? liveStream.filename : null;
 
+        const viewersCount = liveStream ? (liveStream.viewers || 0) : 0;
+        const viewerBadge = isLive
+            ? `<span class="viewer-badge ${viewersCount > 0 ? 'active' : ''}" title="${viewersCount} active viewer(s)"><i class="fa-solid fa-users"></i> ${viewersCount}</span>`
+            : '';
+
         const portBadge = isLive
             ? `<span class="slot-port-badge live"><span class="live-dot"></span>:${port}</span>`
             : `<span class="slot-port-badge">:${port}</span>`;
@@ -684,6 +689,7 @@ function renderFolderFiles(folder) {
             <div class="slot-card" id="slot-${folder.name}-${port}" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleSlotDrop(event, '${escapeAttr(folder.name)}', ${port})">
                 <div class="slot-header">
                     ${portBadge}
+                    ${viewerBadge}
                     <span class="slot-file-count">${files.length} file${files.length !== 1 ? 's' : ''}</span>
                     ${urlHtml}
                     <button class="slot-add-btn" onclick="openAddFileModal('${escapeAttr(folder.name)}', ${port})">+ Add File</button>
@@ -1628,10 +1634,6 @@ function renderLiveStreams() {
             statusBadge = `<span class="livestream-status stopped"><i class="fa-solid fa-stop"></i> Stopped</span>`;
         }
 
-        const audioBadge = (isRunning && isWeb)
-            ? `<span class="audio-badge" title="Isolated Process Audio Capture (Speakers Silent)"><i class="fa-solid fa-volume-high pulse-icon"></i> Isolated Audio</span>`
-            : '';
-
         let vpnBadge = '';
         const useVpn = item.use_vpn ?? (item.vpn_mode && item.vpn_mode !== 'none');
         if (useVpn) {
@@ -1697,13 +1699,18 @@ function renderLiveStreams() {
             }
         }
 
+        const viewersCount = item.viewers || 0;
+        const viewerBadge = isRunning
+            ? `<span class="viewer-badge ${viewersCount > 0 ? 'active' : ''}" title="${viewersCount} active viewer(s)"><i class="fa-solid fa-users"></i> ${viewersCount}</span>`
+            : '';
+
         return `
             <div class="folder-card livestream-card ${isRunning ? 'active' : ''}" id="livestream-${item.id}">
                 <div class="folder-card-header" style="cursor: default; display: flex; align-items: center; gap: 10px; padding: 10px 12px;">
                     ${thumbHtml}
                     <span class="folder-card-title" style="margin-left: 5px;">${escapeAttr(item.name)}</span>
                     ${statusBadge}
-                    ${audioBadge}
+                    ${viewerBadge}
                     ${vpnBadge}
                     <span class="folder-date-range" style="font-family: 'JetBrains Mono', monospace; font-size: 12px; margin-left: auto; display: flex; align-items: center; gap: 4px;">
                         Port: ${item.port}

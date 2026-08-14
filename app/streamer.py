@@ -38,6 +38,8 @@ class StreamInfo:
     current_file_index: int = 0  # which file in slot is currently playing
     start_offset: float = 0.0   # Time skipped at start for sync
     cycle_start_offset: float = 0.0 # Time offset since beginning of the cycle
+    viewers: int = 0           # Active connected viewers count
+    api_port: int = 0          # MediaMTX control API port
     metadata: dict = field(default_factory=dict)  # metadata of first file in slot
     log_task: Optional[asyncio.Task] = field(default=None, repr=False)
     mediamtx_process: Optional[subprocess.Popen] = field(default=None, repr=False)
@@ -69,6 +71,7 @@ class StreamInfo:
             "rtmp_url": self.rtmp_url,
             "stream_url": self.stream_url,
             "status": self.status,
+            "viewers": self.viewers,
             "error": self.error,
             "progress": round(self.progress, 3),
             "current_file_index": self.current_file_index,
@@ -107,6 +110,7 @@ class Streamer:
         self.active_streams: Dict[int, StreamInfo] = {}  # port -> StreamInfo
         self.is_running: bool = False
         self._scheduler_task: Optional[asyncio.Task] = None
+        self._viewers_task: Optional[asyncio.Task] = None
         self._port_range_start: int = 1935
         self._port_range_end: int = 1944
         self._current_folder_name: str = ""
@@ -584,6 +588,9 @@ class Streamer:
         # Start scheduler loop
         self._scheduler_task = asyncio.create_task(self._scheduler_loop())
 
+        # Start background viewer count poller
+        self._viewers_task = asyncio.create_task(self._poll_viewers_loop())
+
         # Resolve external IP in background
         asyncio.create_task(self._resolve_external_ip())
 
@@ -604,10 +611,53 @@ class Streamer:
                 pass
             self._scheduler_task = None
 
+        if self._viewers_task:
+            self._viewers_task.cancel()
+            try:
+                await self._viewers_task
+            except asyncio.CancelledError:
+                pass
+            self._viewers_task = None
+
         await self._stop_all_streams()
         self._current_folder_name = ""
 
         return {"status": "stopped"}
+
+    async def _poll_viewers_loop(self):
+        """Periodically update viewer counts for all active slot streams."""
+        import httpx
+        from app.hls_cache import hls_cache
+        while self.is_running:
+            try:
+                if self.active_streams:
+                    cfg = load_config()
+                    is_hls = cfg.streamer.protocol.lower() == "hls"
+                    
+                    async with httpx.AsyncClient(timeout=1.0) as client:
+                        for port, info in list(self.active_streams.items()):
+                            if info.status != "live":
+                                info.viewers = 0
+                                continue
+
+                            if is_hls:
+                                info.viewers = hls_cache.get_active_viewer_count(port)
+                            elif info.api_port:
+                                try:
+                                    resp = await client.get(f"http://127.0.0.1:{info.api_port}/v3/paths/get/stream")
+                                    if resp.status_code == 200:
+                                        data = resp.json()
+                                        readers = data.get("readers", [])
+                                        info.viewers = len(readers)
+                                    else:
+                                        info.viewers = 0
+                                except Exception:
+                                    pass
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
+            await asyncio.sleep(2.0)
 
     def get_status(self) -> dict:
         """Get current streaming status."""
@@ -621,6 +671,7 @@ class Streamer:
                 "rtmp_url": info.rtmp_url,
                 "stream_url": info.stream_url,
                 "status": info.status,
+                "viewers": info.viewers,
                 "error": info.error,
                 "progress": round(info.progress, 3),
                 "metadata": info.metadata,
@@ -843,6 +894,8 @@ class Streamer:
         cum_dur = sum(slot.durations[:file_index])
         cycle_start_offset = cum_dur + seek_offset
 
+        internal_api_port = public_port + 20000
+
         stream_info = StreamInfo(
             port=port,
             slot_files=list(slot.files),
@@ -854,13 +907,14 @@ class Streamer:
             current_file_index=file_index,
             start_offset=seek_offset,
             cycle_start_offset=cycle_start_offset,
+            api_port=internal_api_port,
             metadata=metadata,
         )
         self.active_streams[port] = stream_info
 
         try:
             # 1. Start MediaMTX
-            mtx_config = self._create_mediamtx_config(internal_rtmp_port, public_port, protocol)
+            mtx_config = self._create_mediamtx_config(internal_rtmp_port, public_port, protocol, internal_api_port)
             mtx_process = subprocess.Popen(
                 [get_mediamtx_path(), mtx_config],
                 stdin=subprocess.DEVNULL,
@@ -941,12 +995,16 @@ class Streamer:
             logger.error(f"Failed to start slot stream on port {port}: {e}")
             self._errors.append(str(e))
 
-    def _create_mediamtx_config(self, internal_rtmp_port: int, public_port: int, protocol: str) -> str:
+    def _create_mediamtx_config(self, internal_rtmp_port: int, public_port: int, protocol: str, internal_api_port: int = 0) -> str:
         """Create a temporary MediaMTX YAML config for a specific RTMP port and target protocol."""
         hls_block = "hls: no"
         if protocol == "hls":
             internal_mediamtx_hls_port = public_port + 10000
             hls_block = f"hls: yes\nhlsAddress: :{internal_mediamtx_hls_port}\nhlsAlwaysRemux: yes\nhlsVariant: mpegts\nhlsSegmentCount: 5\nhlsSegmentDuration: 2s"
+
+        api_block = "api: no"
+        if internal_api_port:
+            api_block = f"api: yes\napiAddress: :{internal_api_port}"
 
         config_content = f"""
 logLevel: warn
@@ -958,11 +1016,13 @@ rtmpAddress: :{internal_rtmp_port}
 # Target Protocol configuration
 {hls_block}
 
+# MediaMTX Control API for real-time viewer tracking
+{api_block}
+
 # Disable other protocols to avoid port conflicts
 rtsp: no
 webrtc: no
 srt: no
-api: no
 moq: no
 
 paths:

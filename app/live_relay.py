@@ -83,6 +83,7 @@ class LiveRelayStatus:
             "port": self.port,
             "codec": best_encoder,
             "status": status_to_show,
+            "viewers": len(self.clients) if self.status in ("running", "listening") else 0,
             "error": self.error,
             "fps": round(self.fps, 1),
             "bitrate": self.bitrate,

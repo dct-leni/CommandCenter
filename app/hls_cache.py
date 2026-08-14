@@ -18,6 +18,16 @@ class HlsCacheManager:
         self._locks: Dict[str, asyncio.Event] = {}
         self.client: Optional[httpx.AsyncClient] = None
         self._runners: Dict[int, web.AppRunner] = {}
+        self._active_clients: Dict[int, Dict[str, float]] = {}  # port -> {client_ip: last_active_time}
+
+    def get_active_viewer_count(self, public_port: int, window_sec: float = 10.0) -> int:
+        clients = self._active_clients.get(public_port, {})
+        now = time.time()
+        active = [ip for ip, t in clients.items() if now - t <= window_sec]
+        # Clean up stale entries periodically
+        if len(clients) > 100:
+            self._active_clients[public_port] = {ip: t for ip, t in clients.items() if now - t <= 60.0}
+        return len(active)
 
     def start_client(self):
         if not self.client:
@@ -114,6 +124,11 @@ class HlsCacheManager:
         base_url = f"http://127.0.0.1:{internal_mediamtx_port}"
 
         async def handle_request(request: web.Request):
+            client_ip = request.remote or "127.0.0.1"
+            if public_port not in self._active_clients:
+                self._active_clients[public_port] = {}
+            self._active_clients[public_port][client_ip] = time.time()
+
             path = request.path_qs.lstrip("/")
             
             # Make the stream available directly at the root URL (e.g. http://127.0.0.1:1923)
@@ -158,6 +173,7 @@ class HlsCacheManager:
 
     async def stop_proxy_server(self, public_port: int):
         """Stops the proxy server on public_port."""
+        self._active_clients.pop(public_port, None)
         runner = self._runners.pop(public_port, None)
         if runner:
             await runner.cleanup()

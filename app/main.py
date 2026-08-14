@@ -308,6 +308,7 @@ async def websocket_status(websocket: WebSocket):
                     "folder": converter.source_folder,
                     "files": converter.get_status(),
                 },
+                "streamer": streamer.get_status(),
                 "live_streams": live_relay_manager.get_all_status(),
             }
             await websocket.send_json(payload)
