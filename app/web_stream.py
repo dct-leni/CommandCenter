@@ -547,19 +547,6 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
             }, 3000);
         }
 
-            if (document.body && document.body.classList.contains('cc-hide-nav')) {
-                document.body.classList.remove('cc-hide-nav');
-                sweepUI();
-            }
-            if (idleTimer) clearTimeout(idleTimer);
-            idleTimer = setTimeout(() => {
-                if (playSeconds >= 3 && document.body) {
-                    document.body.classList.add('cc-hide-nav');
-                    sweepUI();
-                }
-            }, 3000);
-        }
-
         window.addEventListener('mousemove', handleUserActivity, { passive: true });
         window.addEventListener('mousedown', handleUserActivity, { passive: true });
         window.addEventListener('keydown', handleUserActivity, { passive: true });
