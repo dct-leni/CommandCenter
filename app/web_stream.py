@@ -301,7 +301,109 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
             window.addEventListener('visibilitychange', e => e.stopImmediatePropagation(), true);
         } catch(e) {}
 
-        // 2. Universal Video Detection & Full-Window Scaling (with 3-4s delay)
+        // 2. Direct Style Injection for guaranteed CSS application across all frames
+        const cssRules = `
+            #warning_banner_wrapper, .warning-container, [id*='warning'], [class*='warning'],
+            [class*='alert-banner'], [id*='alert-banner'], .banner-warning, .alert-warning,
+            .rmp-ad-container, .ima-ad-container, [id*='google_ads_iframe'], #ad-container {
+                display: none !important;
+                opacity: 0 !important;
+                visibility: hidden !important;
+                pointer-events: none !important;
+                height: 0 !important;
+                min-height: 0 !important;
+                max-height: 0 !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                overflow: hidden !important;
+            }
+
+            body.cc-hide-nav .main-header,
+            body.cc-hide-nav .header,
+            body.cc-hide-nav header,
+            body.cc-hide-nav nav,
+            body.cc-hide-nav footer,
+            body.cc-hide-nav aside,
+            body.cc-hide-nav #footer-id,
+            body.cc-hide-nav #header-id,
+            body.cc-hide-nav .header-left,
+            body.cc-hide-nav .header-right,
+            body.cc-hide-nav .header-right li,
+            body.cc-hide-nav .header-center,
+            body.cc-hide-nav .header-center-mobile,
+            body.cc-hide-nav .site-logo,
+            body.cc-hide-nav .site-logo-mobile,
+            body.cc-hide-nav li.search,
+            body.cc-hide-nav li.notification,
+            body.cc-hide-nav li.user,
+            body.cc-hide-nav li.live-recent,
+            body.cc-hide-nav .search,
+            body.cc-hide-nav .notification,
+            body.cc-hide-nav .user,
+            body.cc-hide-nav .live-recent,
+            body.cc-hide-nav [class*='header'],
+            body.cc-hide-nav [id*='header'],
+            body.cc-hide-nav [class*='Header'],
+            body.cc-hide-nav [id*='Header'],
+            body.cc-hide-nav [class*='nav'],
+            body.cc-hide-nav [id*='nav'],
+            body.cc-hide-nav [class*='Nav'],
+            body.cc-hide-nav [id*='Nav'],
+            body.cc-hide-nav [class*='menu'],
+            body.cc-hide-nav [class*='Menu'],
+            body.cc-hide-nav [id*='footer'],
+            body.cc-hide-nav [class*='footer'],
+            body.cc-hide-nav [id*='Footer'],
+            body.cc-hide-nav [class*='Footer'],
+            body.cc-hide-nav .video-header,
+            body.cc-hide-nav .vjs-control-bar,
+            body.cc-hide-nav .vjs-big-play-button,
+            body.cc-hide-nav .vjs-loading-spinner,
+            body.cc-hide-nav .pip-wrapper,
+            body.cc-hide-nav .vjs-poster,
+            body.cc-hide-nav #live-main,
+            body.cc-hide-nav #search-main,
+            body.cc-hide-nav #notification-main,
+            body.cc-hide-nav #user-main {
+                opacity: 0 !important;
+                visibility: hidden !important;
+                pointer-events: none !important;
+            }
+
+            body:not(.cc-hide-nav) .main-header,
+            body:not(.cc-hide-nav) .header,
+            body:not(.cc-hide-nav) header,
+            body:not(.cc-hide-nav) nav,
+            body:not(.cc-hide-nav) .header-left,
+            body:not(.cc-hide-nav) .header-right,
+            body:not(.cc-hide-nav) .site-logo,
+            body:not(.cc-hide-nav) [class*='header'],
+            body:not(.cc-hide-nav) [class*='menu'],
+            body:not(.cc-hide-nav) #search-main,
+            body:not(.cc-hide-nav) #notification-main,
+            body:not(.cc-hide-nav) #user-main,
+            body:not(.cc-hide-nav) .video-header,
+            body:not(.cc-hide-nav) .vjs-control-bar,
+            body:not(.cc-hide-nav) .pip-wrapper {
+                opacity: 1 !important;
+                visibility: visible !important;
+                pointer-events: auto !important;
+                z-index: 100001 !important;
+            }
+        `;
+
+        function injectStyle() {
+            if (!document.getElementById('cc-injected-styles')) {
+                const s = document.createElement('style');
+                s.id = 'cc-injected-styles';
+                s.textContent = cssRules;
+                (document.head || document.documentElement).appendChild(s);
+            }
+        }
+        try { injectStyle(); } catch(e) {}
+        window.addEventListener('DOMContentLoaded', injectStyle);
+
+        // 3. Universal Video Detection & Full-Window Scaling (with 3-4s delay)
         let playSeconds = 0;
         let idleTimer = null;
         let activeFullscreenEl = null;
@@ -378,7 +480,33 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
             }
         }
 
-        // 3. User Activity: Reveal headers when mouse moves near top edge (clientY < 60) or on keypress
+        // 4. Active UI Cleanup (Removes warning banners & suppresses hidden elements)
+        function sweepUI() {
+            // Remove warning/alert banners
+            document.querySelectorAll('#warning_banner_wrapper, .warning-container, [class*="warning"], [id*="warning"]').forEach(el => {
+                el.style.setProperty('display', 'none', 'important');
+                el.style.setProperty('opacity', '0', 'important');
+                el.style.setProperty('visibility', 'hidden', 'important');
+                el.style.setProperty('height', '0px', 'important');
+            });
+
+            // Suppress search, notification, user icons if streaming
+            if (playSeconds >= 3 && document.body && document.body.classList.contains('cc-hide-nav')) {
+                document.querySelectorAll('.main-header, .header, .header-right, .header-right li, li.search, li.notification, li.user, #search-main, #notification-main, #user-main, #live-main, .site-logo').forEach(el => {
+                    el.style.setProperty('opacity', '0', 'important');
+                    el.style.setProperty('visibility', 'hidden', 'important');
+                    el.style.setProperty('pointer-events', 'none', 'important');
+                });
+            } else if (document.body && !document.body.classList.contains('cc-hide-nav')) {
+                document.querySelectorAll('.main-header, .header, .header-right, .header-right li, li.search, li.notification, li.user, #search-main, #notification-main, #user-main, #live-main, .site-logo').forEach(el => {
+                    el.style.removeProperty('opacity');
+                    el.style.removeProperty('visibility');
+                    el.style.removeProperty('pointer-events');
+                });
+            }
+        }
+
+        // 5. User Activity: Reveal headers when mouse moves near top edge (clientY < 60) or on keypress
         let lastX = -1, lastY = -1;
         function handleUserActivity(e) {
             if (e && e.type === 'mousemove') {
@@ -393,11 +521,13 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
 
             if (document.body && document.body.classList.contains('cc-hide-nav')) {
                 document.body.classList.remove('cc-hide-nav');
+                sweepUI();
             }
             if (idleTimer) clearTimeout(idleTimer);
             idleTimer = setTimeout(() => {
                 if (playSeconds >= 3 && document.body) {
                     document.body.classList.add('cc-hide-nav');
+                    sweepUI();
                 }
             }, 3000);
         }
@@ -406,7 +536,7 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         window.addEventListener('mousedown', handleUserActivity, { passive: true });
         window.addEventListener('keydown', handleUserActivity, { passive: true });
 
-        // 4. Auto-accept First Run / Onboarding Dialogs
+        // 6. Auto-accept First Run / Onboarding Dialogs
         function autoAcceptPrompts() {
             document.querySelectorAll('button, a').forEach(b => {
                 const txt = (b.textContent || '').trim().toLowerCase();
@@ -418,7 +548,11 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
             });
         }
 
-        setInterval(checkVideo, 1000);
+        setInterval(() => {
+            checkVideo();
+            sweepUI();
+            injectStyle();
+        }, 1000);
         setInterval(autoAcceptPrompts, 2000);
     })();
     """
@@ -553,13 +687,21 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
 
     # --- Write userContent.css to natively manage video player full-window & hover UI ---
     (chrome_dir / "userContent.css").write_text(
-        "/* Hide Radiant Media Player ad overlays and Google IMA iframe containers */\n"
-        ".rmp-ad-container, .ima-ad-container, [id*='google_ads_iframe'], #ad-container {\n"
+        "/* Hide Radiant Media Player ad overlays, Google IMA iframe containers, and all warning/alert banners */\n"
+        ".rmp-ad-container, .ima-ad-container, [id*='google_ads_iframe'], #ad-container,\n"
+        "#warning_banner_wrapper, .warning-container, [id*='warning'], [class*='warning'],\n"
+        "[class*='alert-banner'], [id*='alert-banner'], .banner-warning, .alert-warning {\n"
         "    display: none !important;\n"
         "    opacity: 0 !important;\n"
+        "    visibility: hidden !important;\n"
         "    pointer-events: none !important;\n"
         "    width: 0 !important;\n"
         "    height: 0 !important;\n"
+        "    min-height: 0 !important;\n"
+        "    max-height: 0 !important;\n"
+        "    margin: 0 !important;\n"
+        "    padding: 0 !important;\n"
+        "    overflow: hidden !important;\n"
         "}\n"
         "\n"
         "/* Eliminate top margins on main content wrappers to remove top black bar */\n"
@@ -642,10 +784,19 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         ".top-header,\n"
         ".header-left,\n"
         ".header-right,\n"
+        ".header-right li,\n"
         ".header-center,\n"
         ".header-center-mobile,\n"
         ".site-logo,\n"
         ".site-logo-mobile,\n"
+        "li.search,\n"
+        "li.notification,\n"
+        "li.user,\n"
+        "li.live-recent,\n"
+        ".search,\n"
+        ".notification,\n"
+        ".user,\n"
+        ".live-recent,\n"
         "[id*='footer'],\n"
         "[class*='footer'],\n"
         "[id*='Footer'],\n"
@@ -719,10 +870,19 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         "body.cc-hide-nav #header-id,\n"
         "body.cc-hide-nav .header-left,\n"
         "body.cc-hide-nav .header-right,\n"
+        "body.cc-hide-nav .header-right li,\n"
         "body.cc-hide-nav .header-center,\n"
         "body.cc-hide-nav .header-center-mobile,\n"
         "body.cc-hide-nav .site-logo,\n"
         "body.cc-hide-nav .site-logo-mobile,\n"
+        "body.cc-hide-nav li.search,\n"
+        "body.cc-hide-nav li.notification,\n"
+        "body.cc-hide-nav li.user,\n"
+        "body.cc-hide-nav li.live-recent,\n"
+        "body.cc-hide-nav .search,\n"
+        "body.cc-hide-nav .notification,\n"
+        "body.cc-hide-nav .user,\n"
+        "body.cc-hide-nav .live-recent,\n"
         "body.cc-hide-nav [class*='header'],\n"
         "body.cc-hide-nav [id*='header'],\n"
         "body.cc-hide-nav [class*='Header'],\n"
