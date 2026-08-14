@@ -303,9 +303,15 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
 
         // 2. Direct Style Injection for guaranteed CSS application across all frames
         const cssRules = `
-            #warning_banner_wrapper, .warning-container, [id*='warning'], [class*='warning'],
-            [class*='alert-banner'], [id*='alert-banner'], .banner-warning, .alert-warning,
-            .rmp-ad-container, .ima-ad-container, [id*='google_ads_iframe'], #ad-container {
+            /* 1. Permanent Suppress for Ads, Banners, Warnings, Notices, Cookies & Consents (Universal Wildcard) */
+            [class*='warning' i], [id*='warning' i],
+            [class*='alert' i], [id*='alert' i],
+            [class*='banner' i], [id*='banner' i],
+            [class*='notice' i], [id*='notice' i],
+            [class*='cookie' i], [id*='cookie' i],
+            [class*='consent' i], [id*='consent' i],
+            [class*='ad-' i], [class*='ads-' i], [id*='ad-' i], [id*='ads-' i],
+            [id*='google_ads_iframe' i], .rmp-ad-container, .ima-ad-container, #ad-container {
                 display: none !important;
                 opacity: 0 !important;
                 visibility: hidden !important;
@@ -318,70 +324,74 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
                 overflow: hidden !important;
             }
 
-            body.cc-hide-nav .main-header,
-            body.cc-hide-nav .header,
+            /* 2. Universal Navigation, Header, Menu, Logo, Search, User Auto-Hide when streaming */
             body.cc-hide-nav header,
             body.cc-hide-nav nav,
             body.cc-hide-nav footer,
             body.cc-hide-nav aside,
-            body.cc-hide-nav #footer-id,
-            body.cc-hide-nav #header-id,
-            body.cc-hide-nav .header-left,
-            body.cc-hide-nav .header-right,
-            body.cc-hide-nav .header-right li,
-            body.cc-hide-nav .header-center,
-            body.cc-hide-nav .header-center-mobile,
-            body.cc-hide-nav .site-logo,
-            body.cc-hide-nav .site-logo-mobile,
-            body.cc-hide-nav li.search,
-            body.cc-hide-nav li.notification,
-            body.cc-hide-nav li.user,
-            body.cc-hide-nav li.live-recent,
-            body.cc-hide-nav .search,
-            body.cc-hide-nav .notification,
-            body.cc-hide-nav .user,
-            body.cc-hide-nav .live-recent,
-            body.cc-hide-nav [class*='header'],
-            body.cc-hide-nav [id*='header'],
-            body.cc-hide-nav [class*='Header'],
-            body.cc-hide-nav [id*='Header'],
-            body.cc-hide-nav [class*='nav'],
-            body.cc-hide-nav [id*='nav'],
-            body.cc-hide-nav [class*='Nav'],
-            body.cc-hide-nav [id*='Nav'],
-            body.cc-hide-nav [class*='menu'],
-            body.cc-hide-nav [class*='Menu'],
-            body.cc-hide-nav [id*='footer'],
-            body.cc-hide-nav [class*='footer'],
-            body.cc-hide-nav [id*='Footer'],
-            body.cc-hide-nav [class*='Footer'],
+            body.cc-hide-nav [class*='header' i],
+            body.cc-hide-nav [id*='header' i],
+            body.cc-hide-nav [class*='navbar' i],
+            body.cc-hide-nav [id*='navbar' i],
+            body.cc-hide-nav [class*='topbar' i],
+            body.cc-hide-nav [id*='topbar' i],
+            body.cc-hide-nav [class*='menu' i],
+            body.cc-hide-nav [id*='menu' i],
+            body.cc-hide-nav [class*='nav' i],
+            body.cc-hide-nav [id*='nav' i],
+            body.cc-hide-nav [class*='logo' i],
+            body.cc-hide-nav [id*='logo' i],
+            body.cc-hide-nav [class*='brand' i],
+            body.cc-hide-nav [id*='brand' i],
+            body.cc-hide-nav [class*='search' i],
+            body.cc-hide-nav [id*='search' i],
+            body.cc-hide-nav [class*='notif' i],
+            body.cc-hide-nav [id*='notif' i],
+            body.cc-hide-nav [class*='profile' i],
+            body.cc-hide-nav [id*='profile' i],
+            body.cc-hide-nav [class*='user' i],
+            body.cc-hide-nav [id*='user' i],
+            body.cc-hide-nav [class*='account' i],
+            body.cc-hide-nav [id*='account' i],
             body.cc-hide-nav .video-header,
             body.cc-hide-nav .vjs-control-bar,
             body.cc-hide-nav .vjs-big-play-button,
             body.cc-hide-nav .vjs-loading-spinner,
             body.cc-hide-nav .pip-wrapper,
-            body.cc-hide-nav .vjs-poster,
-            body.cc-hide-nav #live-main,
-            body.cc-hide-nav #search-main,
-            body.cc-hide-nav #notification-main,
-            body.cc-hide-nav #user-main {
+            body.cc-hide-nav .vjs-poster {
                 opacity: 0 !important;
                 visibility: hidden !important;
                 pointer-events: none !important;
+                transition: opacity 0.3s ease-in-out, visibility 0.3s !important;
             }
 
-            body:not(.cc-hide-nav) .main-header,
-            body:not(.cc-hide-nav) .header,
+            /* 3. Reveal when user moves mouse to top or interacts */
             body:not(.cc-hide-nav) header,
             body:not(.cc-hide-nav) nav,
-            body:not(.cc-hide-nav) .header-left,
-            body:not(.cc-hide-nav) .header-right,
-            body:not(.cc-hide-nav) .site-logo,
-            body:not(.cc-hide-nav) [class*='header'],
-            body:not(.cc-hide-nav) [class*='menu'],
-            body:not(.cc-hide-nav) #search-main,
-            body:not(.cc-hide-nav) #notification-main,
-            body:not(.cc-hide-nav) #user-main,
+            body:not(.cc-hide-nav) [class*='header' i],
+            body:not(.cc-hide-nav) [id*='header' i],
+            body:not(.cc-hide-nav) [class*='navbar' i],
+            body:not(.cc-hide-nav) [id*='navbar' i],
+            body:not(.cc-hide-nav) [class*='topbar' i],
+            body:not(.cc-hide-nav) [id*='topbar' i],
+            body:not(.cc-hide-nav) [class*='menu' i],
+            body:not(.cc-hide-nav) [id*='menu' i],
+            body:not(.cc-hide-nav) [class*='nav' i],
+            body:not(.cc-hide-nav) [id*='nav' i],
+            body:not(.cc-hide-nav) [class*='logo' i],
+            body:not(.cc-hide-nav) [id*='logo' i],
+            body:not(.cc-hide-nav) [class*='brand' i],
+            body:not(.cc-hide-nav) [id*='brand' i],
+            body:not(.cc-hide-nav) [class*='search' i],
+            body:not(.cc-hide-nav) [id*='search' i],
+            body:not(.cc-hide-nav) [class*='notif' i],
+            body:not(.cc-hide-nav) [id*='notif' i],
+            body:not(.cc-hide-nav) [class*='profile' i],
+            body:not(.cc-hide-nav) [id*='profile' i],
+            body:not(.cc-hide-nav) [class*='user' i],
+            body:not(.cc-hide-nav) [id*='user' i],
+            body:not(.cc-hide-nav) [class*='account' i],
+            body:not(.cc-hide-nav) [id*='account' i],
             body:not(.cc-hide-nav) .video-header,
             body:not(.cc-hide-nav) .vjs-control-bar,
             body:not(.cc-hide-nav) .pip-wrapper {
@@ -480,25 +490,28 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
             }
         }
 
+        const UI_WILDCARD_SELECTOR = 'header, nav, footer, aside, [class*="header" i], [id*="header" i], [class*="navbar" i], [id*="navbar" i], [class*="topbar" i], [id*="topbar" i], [class*="menu" i], [id*="menu" i], [class*="nav" i], [id*="nav" i], [class*="logo" i], [id*="logo" i], [class*="brand" i], [id*="brand" i], [class*="search" i], [id*="search" i], [class*="notif" i], [id*="notif" i], [class*="profile" i], [id*="profile" i], [class*="user" i], [id*="user" i], [class*="account" i], [id*="account" i]';
+        const BANNER_WILDCARD_SELECTOR = '[class*="warning" i], [id*="warning" i], [class*="alert" i], [id*="alert" i], [class*="banner" i], [id*="banner" i], [class*="notice" i], [id*="notice" i], [class*="cookie" i], [id*="cookie" i], [class*="consent" i], [id*="consent" i]';
+
         // 4. Active UI Cleanup (Removes warning banners & suppresses hidden elements)
         function sweepUI() {
-            // Remove warning/alert banners
-            document.querySelectorAll('#warning_banner_wrapper, .warning-container, [class*="warning"], [id*="warning"]').forEach(el => {
+            // Remove warning/alert/cookie banners
+            document.querySelectorAll(BANNER_WILDCARD_SELECTOR).forEach(el => {
                 el.style.setProperty('display', 'none', 'important');
                 el.style.setProperty('opacity', '0', 'important');
                 el.style.setProperty('visibility', 'hidden', 'important');
                 el.style.setProperty('height', '0px', 'important');
             });
 
-            // Suppress search, notification, user icons if streaming
+            // Suppress headers, logos, navigation if streaming
             if (playSeconds >= 3 && document.body && document.body.classList.contains('cc-hide-nav')) {
-                document.querySelectorAll('.main-header, .header, .header-right, .header-right li, li.search, li.notification, li.user, #search-main, #notification-main, #user-main, #live-main, .site-logo').forEach(el => {
+                document.querySelectorAll(UI_WILDCARD_SELECTOR).forEach(el => {
                     el.style.setProperty('opacity', '0', 'important');
                     el.style.setProperty('visibility', 'hidden', 'important');
                     el.style.setProperty('pointer-events', 'none', 'important');
                 });
             } else if (document.body && !document.body.classList.contains('cc-hide-nav')) {
-                document.querySelectorAll('.main-header, .header, .header-right, .header-right li, li.search, li.notification, li.user, #search-main, #notification-main, #user-main, #live-main, .site-logo').forEach(el => {
+                document.querySelectorAll(UI_WILDCARD_SELECTOR).forEach(el => {
                     el.style.removeProperty('opacity');
                     el.style.removeProperty('visibility');
                     el.style.removeProperty('pointer-events');
@@ -773,48 +786,35 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         "    padding: 0 !important;\n"
         "}\n"
         "\n"
-        "/* Universal Header / Menu auto-hide: Default opacity 0 when video player is full window, reveal on hover */\n"
+        "/* Universal Navigation, Header, Menu, Logo, Search, User Auto-Hide (Universal Wildcard) */\n"
         "header,\n"
         "nav,\n"
         "footer,\n"
         "aside,\n"
-        ".main-header,\n"
-        ".header,\n"
-        ".site-header,\n"
-        ".top-header,\n"
-        ".header-left,\n"
-        ".header-right,\n"
-        ".header-right li,\n"
-        ".header-center,\n"
-        ".header-center-mobile,\n"
-        ".site-logo,\n"
-        ".site-logo-mobile,\n"
-        "li.search,\n"
-        "li.notification,\n"
-        "li.user,\n"
-        "li.live-recent,\n"
-        ".search,\n"
-        ".notification,\n"
-        ".user,\n"
-        ".live-recent,\n"
-        "[id*='footer'],\n"
-        "[class*='footer'],\n"
-        "[id*='Footer'],\n"
-        "[class*='Footer'],\n"
-        "[id*='header'],\n"
-        "[class*='header'],\n"
-        "[id*='Header'],\n"
-        "[class*='Header'],\n"
-        "[id*='nav'],\n"
-        "[class*='nav'],\n"
-        "[id*='Nav'],\n"
-        "[class*='Nav'],\n"
-        "[class*='menu'],\n"
-        "[class*='Menu'],\n"
-        "#live-main,\n"
-        "#search-main,\n"
-        "#notification-main,\n"
-        "#user-main {\n"
+        "[class*='header' i],\n"
+        "[id*='header' i],\n"
+        "[class*='navbar' i],\n"
+        "[id*='navbar' i],\n"
+        "[class*='topbar' i],\n"
+        "[id*='topbar' i],\n"
+        "[class*='menu' i],\n"
+        "[id*='menu' i],\n"
+        "[class*='nav' i],\n"
+        "[id*='nav' i],\n"
+        "[class*='logo' i],\n"
+        "[id*='logo' i],\n"
+        "[class*='brand' i],\n"
+        "[id*='brand' i],\n"
+        "[class*='search' i],\n"
+        "[id*='search' i],\n"
+        "[class*='notif' i],\n"
+        "[id*='notif' i],\n"
+        "[class*='profile' i],\n"
+        "[id*='profile' i],\n"
+        "[class*='user' i],\n"
+        "[id*='user' i],\n"
+        "[class*='account' i],\n"
+        "[id*='account' i] {\n"
         "    opacity: 0 !important;\n"
         "    pointer-events: none !important;\n"
         "    transition: opacity 0.3s ease-in-out !important;\n"
@@ -823,33 +823,46 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         "/* Reveal header when hovering top area / moving mouse over it */\n"
         "header:hover,\n"
         "nav:hover,\n"
-        ".main-header:hover,\n"
-        ".header:hover,\n"
-        ".site-header:hover,\n"
-        ".top-header:hover,\n"
-        ".header-left:hover,\n"
-        ".header-right:hover,\n"
-        "[class*='header']:hover,\n"
-        "[id*='header']:hover,\n"
-        "[class*='Header']:hover,\n"
-        "[id*='Header']:hover,\n"
-        "[class*='nav']:hover,\n"
-        "[id*='nav']:hover,\n"
-        "[class*='menu']:hover,\n"
-        "[class*='Menu']:hover,\n"
-        "body:not(.cc-hide-nav) .main-header,\n"
-        "body:not(.cc-hide-nav) .header,\n"
+        "[class*='header' i]:hover,\n"
+        "[id*='header' i]:hover,\n"
+        "[class*='navbar' i]:hover,\n"
+        "[id*='navbar' i]:hover,\n"
+        "[class*='topbar' i]:hover,\n"
+        "[id*='topbar' i]:hover,\n"
+        "[class*='menu' i]:hover,\n"
+        "[id*='menu' i]:hover,\n"
+        "[class*='nav' i]:hover,\n"
+        "[id*='nav' i]:hover,\n"
+        "[class*='logo' i]:hover,\n"
+        "[id*='logo' i]:hover,\n"
+        "[class*='brand' i]:hover,\n"
+        "[id*='brand' i]:hover,\n"
         "body:not(.cc-hide-nav) header,\n"
         "body:not(.cc-hide-nav) nav,\n"
-        "body:not(.cc-hide-nav) .header-left,\n"
-        "body:not(.cc-hide-nav) .header-right,\n"
-        "body:not(.cc-hide-nav) .site-logo,\n"
-        "body:not(.cc-hide-nav) .site-logo-mobile,\n"
-        "body:not(.cc-hide-nav) [class*='header'],\n"
-        "body:not(.cc-hide-nav) [class*='menu'],\n"
-        "body:not(.cc-hide-nav) #search-main,\n"
-        "body:not(.cc-hide-nav) #notification-main,\n"
-        "body:not(.cc-hide-nav) #user-main,\n"
+        "body:not(.cc-hide-nav) [class*='header' i],\n"
+        "body:not(.cc-hide-nav) [id*='header' i],\n"
+        "body:not(.cc-hide-nav) [class*='navbar' i],\n"
+        "body:not(.cc-hide-nav) [id*='navbar' i],\n"
+        "body:not(.cc-hide-nav) [class*='topbar' i],\n"
+        "body:not(.cc-hide-nav) [id*='topbar' i],\n"
+        "body:not(.cc-hide-nav) [class*='menu' i],\n"
+        "body:not(.cc-hide-nav) [id*='menu' i],\n"
+        "body:not(.cc-hide-nav) [class*='nav' i],\n"
+        "body:not(.cc-hide-nav) [id*='nav' i],\n"
+        "body:not(.cc-hide-nav) [class*='logo' i],\n"
+        "body:not(.cc-hide-nav) [id*='logo' i],\n"
+        "body:not(.cc-hide-nav) [class*='brand' i],\n"
+        "body:not(.cc-hide-nav) [id*='brand' i],\n"
+        "body:not(.cc-hide-nav) [class*='search' i],\n"
+        "body:not(.cc-hide-nav) [id*='search' i],\n"
+        "body:not(.cc-hide-nav) [class*='notif' i],\n"
+        "body:not(.cc-hide-nav) [id*='notif' i],\n"
+        "body:not(.cc-hide-nav) [class*='profile' i],\n"
+        "body:not(.cc-hide-nav) [id*='profile' i],\n"
+        "body:not(.cc-hide-nav) [class*='user' i],\n"
+        "body:not(.cc-hide-nav) [id*='user' i],\n"
+        "body:not(.cc-hide-nav) [class*='account' i],\n"
+        "body:not(.cc-hide-nav) [id*='account' i],\n"
         "body:not(.cc-hide-nav) .video-header,\n"
         "body:not(.cc-hide-nav) .vjs-control-bar,\n"
         "body:not(.cc-hide-nav) .pip-wrapper {\n"
@@ -860,53 +873,40 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         "}\n"
         "\n"
         "/* When cc-hide-nav is active (streaming mode), force hide completely */\n"
-        "body.cc-hide-nav .main-header,\n"
-        "body.cc-hide-nav .header,\n"
         "body.cc-hide-nav header,\n"
         "body.cc-hide-nav nav,\n"
         "body.cc-hide-nav footer,\n"
         "body.cc-hide-nav aside,\n"
-        "body.cc-hide-nav #footer-id,\n"
-        "body.cc-hide-nav #header-id,\n"
-        "body.cc-hide-nav .header-left,\n"
-        "body.cc-hide-nav .header-right,\n"
-        "body.cc-hide-nav .header-right li,\n"
-        "body.cc-hide-nav .header-center,\n"
-        "body.cc-hide-nav .header-center-mobile,\n"
-        "body.cc-hide-nav .site-logo,\n"
-        "body.cc-hide-nav .site-logo-mobile,\n"
-        "body.cc-hide-nav li.search,\n"
-        "body.cc-hide-nav li.notification,\n"
-        "body.cc-hide-nav li.user,\n"
-        "body.cc-hide-nav li.live-recent,\n"
-        "body.cc-hide-nav .search,\n"
-        "body.cc-hide-nav .notification,\n"
-        "body.cc-hide-nav .user,\n"
-        "body.cc-hide-nav .live-recent,\n"
-        "body.cc-hide-nav [class*='header'],\n"
-        "body.cc-hide-nav [id*='header'],\n"
-        "body.cc-hide-nav [class*='Header'],\n"
-        "body.cc-hide-nav [id*='Header'],\n"
-        "body.cc-hide-nav [class*='nav'],\n"
-        "body.cc-hide-nav [id*='nav'],\n"
-        "body.cc-hide-nav [class*='Nav'],\n"
-        "body.cc-hide-nav [id*='Nav'],\n"
-        "body.cc-hide-nav [class*='menu'],\n"
-        "body.cc-hide-nav [class*='Menu'],\n"
-        "body.cc-hide-nav [id*='footer'],\n"
-        "body.cc-hide-nav [class*='footer'],\n"
-        "body.cc-hide-nav [id*='Footer'],\n"
-        "body.cc-hide-nav [class*='Footer'],\n"
+        "body.cc-hide-nav [class*='header' i],\n"
+        "body.cc-hide-nav [id*='header' i],\n"
+        "body.cc-hide-nav [class*='navbar' i],\n"
+        "body.cc-hide-nav [id*='navbar' i],\n"
+        "body.cc-hide-nav [class*='topbar' i],\n"
+        "body.cc-hide-nav [id*='topbar' i],\n"
+        "body.cc-hide-nav [class*='menu' i],\n"
+        "body.cc-hide-nav [id*='menu' i],\n"
+        "body.cc-hide-nav [class*='nav' i],\n"
+        "body.cc-hide-nav [id*='nav' i],\n"
+        "body.cc-hide-nav [class*='logo' i],\n"
+        "body.cc-hide-nav [id*='logo' i],\n"
+        "body.cc-hide-nav [class*='brand' i],\n"
+        "body.cc-hide-nav [id*='brand' i],\n"
+        "body.cc-hide-nav [class*='search' i],\n"
+        "body.cc-hide-nav [id*='search' i],\n"
+        "body.cc-hide-nav [class*='notif' i],\n"
+        "body.cc-hide-nav [id*='notif' i],\n"
+        "body.cc-hide-nav [class*='profile' i],\n"
+        "body.cc-hide-nav [id*='profile' i],\n"
+        "body.cc-hide-nav [class*='user' i],\n"
+        "body.cc-hide-nav [id*='user' i],\n"
+        "body.cc-hide-nav [class*='account' i],\n"
+        "body.cc-hide-nav [id*='account' i],\n"
         "body.cc-hide-nav .video-header,\n"
         "body.cc-hide-nav .vjs-control-bar,\n"
         "body.cc-hide-nav .vjs-big-play-button,\n"
         "body.cc-hide-nav .vjs-loading-spinner,\n"
         "body.cc-hide-nav .pip-wrapper,\n"
-        "body.cc-hide-nav .vjs-poster,\n"
-        "body.cc-hide-nav #live-main,\n"
-        "body.cc-hide-nav #search-main,\n"
-        "body.cc-hide-nav #notification-main,\n"
-        "body.cc-hide-nav #user-main {\n"
+        "body.cc-hide-nav .vjs-poster {\n"
         "    opacity: 0 !important;\n"
         "    visibility: hidden !important;\n"
         "    pointer-events: none !important;\n"
