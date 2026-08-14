@@ -326,44 +326,49 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
 
             /* 2. Universal Navigation, Header, Menu, Logo, Search Auto-Hide when streaming */
             body.cc-hide-nav header,
-            body.cc-hide-nav nav,
+            body.cc-hide-nav nav:not(.sidebar):not([class*='sidebar']):not(aside),
             body.cc-hide-nav footer,
-            body.cc-hide-nav aside,
+            body.cc-hide-nav aside:not(.sidebar):not([class*='sidebar']),
             body.cc-hide-nav [class*='header' i]:not(.video-js):not([class*='player']):not(#videoPlayer),
             body.cc-hide-nav [id*='header' i]:not(.video-js):not([id*='player']):not(#videoPlayer),
             body.cc-hide-nav [class*='navbar' i]:not(.video-js):not([class*='player']),
             body.cc-hide-nav [id*='navbar' i]:not(.video-js):not([id*='player']),
             body.cc-hide-nav [class*='topbar' i]:not(.video-js):not([class*='player']),
             body.cc-hide-nav [id*='topbar' i]:not(.video-js):not([id*='player']),
-            body.cc-hide-nav [class*='menu' i]:not(.video-js):not([class*='vjs-']):not([class*='player']),
-            body.cc-hide-nav [id*='menu' i]:not(.video-js):not([class*='vjs-']):not([id*='player']),
-            body.cc-hide-nav [class*='nav' i]:not(.video-js):not([class*='vjs-']):not([class*='player']),
-            body.cc-hide-nav [id*='nav' i]:not(.video-js):not([id*='player']),
-            body.cc-hide-nav [class*='logo' i]:not(.video-js):not([class*='player']),
-            body.cc-hide-nav [id*='logo' i]:not(.video-js):not([id*='player']),
-            body.cc-hide-nav [class*='brand' i]:not(.video-js):not([class*='player']),
-            body.cc-hide-nav [id*='brand' i]:not(.video-js):not([id*='player']),
-            body.cc-hide-nav [class*='search' i]:not(.video-js):not([class*='player']),
-            body.cc-hide-nav [id*='search' i]:not(.video-js):not([id*='player']),
+            body.cc-hide-nav [class*='site-logo' i],
+            body.cc-hide-nav [class*='logo' i]:not(.video-js):not([class*='player']):not(.sidebar):not([class*='sidebar']),
+            body.cc-hide-nav [id*='logo' i]:not(.video-js):not([id*='player']):not(.sidebar):not([class*='sidebar']),
+            body.cc-hide-nav [class*='brand' i]:not(.video-js):not([class*='player']):not(.sidebar):not([class*='sidebar']),
+            body.cc-hide-nav [id*='brand' i]:not(.video-js):not([id*='player']):not(.sidebar):not([class*='sidebar']),
+            body.cc-hide-nav [class*='search' i]:not(.video-js):not([class*='player']):not(.sidebar):not([class*='sidebar']),
+            body.cc-hide-nav [id*='search' i]:not(.video-js):not([id*='player']):not(.sidebar):not([class*='sidebar']),
             body.cc-hide-nav [class*='notif' i]:not(.video-js):not([class*='player']),
             body.cc-hide-nav [id*='notif' i]:not(.video-js):not([id*='player']),
             body.cc-hide-nav [class*='profile' i]:not(.video-js):not([class*='player']),
             body.cc-hide-nav [id*='profile' i]:not(.video-js):not([id*='player']),
             body.cc-hide-nav [class*='account' i]:not(.video-js):not([class*='player']),
-            body.cc-hide-nav [id*='account' i]:not(.video-js):not([id*='player']),
-            body.cc-hide-nav .video-header,
-            body.cc-hide-nav .vjs-control-bar,
-            body.cc-hide-nav .vjs-big-play-button,
-            body.cc-hide-nav .vjs-loading-spinner,
-            body.cc-hide-nav .pip-wrapper,
-            body.cc-hide-nav .vjs-poster {
+            body.cc-hide-nav [id*='account' i]:not(.video-js):not([id*='player']) {
                 opacity: 0 !important;
                 visibility: hidden !important;
                 pointer-events: none !important;
                 transition: opacity 0.3s ease-in-out, visibility 0.3s !important;
             }
 
-            /* 3. Reveal when user moves mouse to top or interacts */
+            /* 3. Sidebars and category menus are ALWAYS visible and clickable */
+            .sidebar,
+            aside,
+            [class*='sidebar' i],
+            [id*='sidebar' i],
+            .sidebar *,
+            aside *,
+            [class*='sidebar' i] *,
+            [id*='sidebar' i] * {
+                opacity: 1 !important;
+                visibility: visible !important;
+                pointer-events: auto !important;
+            }
+
+            /* 4. Reveal when user moves mouse to top or interacts */
             body:not(.cc-hide-nav) header,
             body:not(.cc-hide-nav) nav,
             body:not(.cc-hide-nav) [class*='header' i],
@@ -387,10 +392,7 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
             body:not(.cc-hide-nav) [class*='profile' i],
             body:not(.cc-hide-nav) [id*='profile' i],
             body:not(.cc-hide-nav) [class*='account' i],
-            body:not(.cc-hide-nav) [id*='account' i],
-            body:not(.cc-hide-nav) .video-header,
-            body:not(.cc-hide-nav) .vjs-control-bar,
-            body:not(.cc-hide-nav) .pip-wrapper {
+            body:not(.cc-hide-nav) [id*='account' i] {
                 opacity: 1 !important;
                 visibility: visible !important;
                 pointer-events: auto !important;
@@ -486,25 +488,25 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
             }
         }
 
-        const UI_WILDCARD_SELECTOR = 'header, nav, footer, aside, [class*="header" i], [id*="header" i], [class*="navbar" i], [id*="navbar" i], [class*="topbar" i], [id*="topbar" i], [class*="menu" i], [id*="menu" i], [class*="nav" i], [id*="nav" i], [class*="logo" i], [id*="logo" i], [class*="brand" i], [id*="brand" i], [class*="search" i], [id*="search" i], [class*="notif" i], [id*="notif" i], [class*="profile" i], [id*="profile" i], [class*="account" i], [id*="account" i]';
+        const UI_WILDCARD_SELECTOR = 'header, nav, footer, [class*="header" i], [id*="header" i], [class*="navbar" i], [id*="navbar" i], [class*="topbar" i], [id*="topbar" i], [class*="site-logo" i], [class*="search" i], [id*="search" i], [class*="notif" i], [id*="notif" i], [class*="profile" i], [id*="profile" i], [class*="account" i], [id*="account" i]';
         const BANNER_WILDCARD_SELECTOR = '[class*="warning" i], [id*="warning" i], [class*="alert" i], [id*="alert" i], [class*="banner" i], [id*="banner" i], [class*="notice" i], [id*="notice" i], [class*="cookie" i], [id*="cookie" i], [class*="consent" i], [id*="consent" i]';
 
         // 4. Active UI Cleanup (Removes warning banners & suppresses hidden elements)
         function sweepUI() {
-            // Remove warning/alert/cookie banners outside video player
+            // Remove warning/alert/cookie banners outside video player and sidebar
             document.querySelectorAll(BANNER_WILDCARD_SELECTOR).forEach(el => {
-                if (el.closest && el.closest('.cc-full-window-player, .video-js, #video__wrapper, #full-screen-closed')) return;
+                if (el.closest && el.closest('.cc-full-window-player, .video-js, #video__wrapper, #full-screen-closed, .sidebar, aside, [class*="sidebar" i], [id*="sidebar" i]')) return;
                 el.style.setProperty('display', 'none', 'important');
                 el.style.setProperty('opacity', '0', 'important');
                 el.style.setProperty('visibility', 'hidden', 'important');
                 el.style.setProperty('height', '0px', 'important');
             });
 
-            // Suppress headers, logos, navigation if streaming
+            // Suppress top headers & logos if streaming
             const isStreaming = playSeconds >= 3 && document.body && document.body.classList.contains('cc-hide-nav');
             document.querySelectorAll(UI_WILDCARD_SELECTOR).forEach(el => {
-                // Never hide video elements, canvas, player wrappers, or controls inside player
-                if (el.tagName === 'VIDEO' || el.tagName === 'CANVAS' || el.id === 'videoPlayer' || el.id === 'video__wrapper' || el.classList.contains('video-js') || el.classList.contains('vjs-tech') || (el.closest && el.closest('.cc-full-window-player, .video-js, #video__wrapper, #full-screen-closed'))) {
+                // Never hide video elements, player wrappers, controls, or sidebar/category menus
+                if (el.tagName === 'VIDEO' || el.tagName === 'CANVAS' || el.id === 'videoPlayer' || el.id === 'video__wrapper' || el.classList.contains('video-js') || el.classList.contains('vjs-tech') || (el.closest && el.closest('.cc-full-window-player, .video-js, #video__wrapper, #full-screen-closed, .sidebar, aside, [class*="sidebar" i], [id*="sidebar" i]'))) {
                     return;
                 }
                 if (isStreaming) {
@@ -519,18 +521,31 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
             });
         }
 
-        // 5. User Activity: Reveal headers when mouse moves near top edge (clientY < 60) or on keypress
+        // 5. User Activity: Reveal headers when mouse moves near top edge (clientY < 80) or left edge (clientX < 100) or on keypress
         let lastX = -1, lastY = -1;
         function handleUserActivity(e) {
             if (e && e.type === 'mousemove') {
                 if (e.clientX === lastX && e.clientY === lastY) return;
                 lastX = e.clientX;
                 lastY = e.clientY;
-                // If video is playing and mouse is below the top 60px header area, do not reveal
-                if (e.clientY >= 60 && playSeconds >= 3) {
+                // If video is playing and mouse is not at top or left edge, do not reveal
+                if (e.clientY >= 80 && e.clientX >= 100 && playSeconds >= 3) {
                     return;
                 }
             }
+
+            if (document.body && document.body.classList.contains('cc-hide-nav')) {
+                document.body.classList.remove('cc-hide-nav');
+                sweepUI();
+            }
+            if (idleTimer) clearTimeout(idleTimer);
+            idleTimer = setTimeout(() => {
+                if (playSeconds >= 3 && document.body) {
+                    document.body.classList.add('cc-hide-nav');
+                    sweepUI();
+                }
+            }, 3000);
+        }
 
             if (document.body && document.body.classList.contains('cc-hide-nav')) {
                 document.body.classList.remove('cc-hide-nav');
@@ -787,35 +802,47 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         "}\n"
         "\n"
         "/* Universal Navigation, Header, Menu, Logo, Search Auto-Hide (Universal Wildcard) */\n"
-        "header,\n"
-        "nav,\n"
-        "footer,\n"
-        "aside,\n"
-        "[class*='header' i]:not(.video-js):not([class*='player']):not(#videoPlayer),\n"
-        "[id*='header' i]:not(.video-js):not([id*='player']):not(#videoPlayer),\n"
-        "[class*='navbar' i]:not(.video-js):not([class*='player']),\n"
-        "[id*='navbar' i]:not(.video-js):not([id*='player']),\n"
-        "[class*='topbar' i]:not(.video-js):not([class*='player']),\n"
-        "[id*='topbar' i]:not(.video-js):not([id*='player']),\n"
-        "[class*='menu' i]:not(.video-js):not([class*='vjs-']):not([class*='player']),\n"
-        "[id*='menu' i]:not(.video-js):not([class*='vjs-']):not([id*='player']),\n"
-        "[class*='nav' i]:not(.video-js):not([class*='vjs-']):not([class*='player']),\n"
-        "[id*='nav' i]:not(.video-js):not([id*='player']),\n"
-        "[class*='logo' i]:not(.video-js):not([class*='player']),\n"
-        "[id*='logo' i]:not(.video-js):not([id*='player']),\n"
-        "[class*='brand' i]:not(.video-js):not([class*='player']),\n"
-        "[id*='brand' i]:not(.video-js):not([id*='player']),\n"
-        "[class*='search' i]:not(.video-js):not([class*='player']),\n"
-        "[id*='search' i]:not(.video-js):not([id*='player']),\n"
-        "[class*='notif' i]:not(.video-js):not([class*='player']),\n"
-        "[id*='notif' i]:not(.video-js):not([id*='player']),\n"
-        "[class*='profile' i]:not(.video-js):not([class*='player']),\n"
-        "[id*='profile' i]:not(.video-js):not([id*='player']),\n"
-        "[class*='account' i]:not(.video-js):not([class*='player']),\n"
-        "[id*='account' i]:not(.video-js):not([id*='player']) {\n"
+        "body.cc-hide-nav header,\n"
+        "body.cc-hide-nav nav:not(.sidebar):not([class*='sidebar']):not(aside),\n"
+        "body.cc-hide-nav footer,\n"
+        "body.cc-hide-nav aside:not(.sidebar):not([class*='sidebar']),\n"
+        "body.cc-hide-nav [class*='header' i]:not(.video-js):not([class*='player']):not(#videoPlayer),\n"
+        "body.cc-hide-nav [id*='header' i]:not(.video-js):not([id*='player']):not(#videoPlayer),\n"
+        "body.cc-hide-nav [class*='navbar' i]:not(.video-js):not([class*='player']),\n"
+        "body.cc-hide-nav [id*='navbar' i]:not(.video-js):not([id*='player']),\n"
+        "body.cc-hide-nav [class*='topbar' i]:not(.video-js):not([class*='player']),\n"
+        "body.cc-hide-nav [id*='topbar' i]:not(.video-js):not([id*='player']),\n"
+        "body.cc-hide-nav [class*='site-logo' i],\n"
+        "body.cc-hide-nav [class*='logo' i]:not(.video-js):not([class*='player']):not(.sidebar):not([class*='sidebar']),\n"
+        "body.cc-hide-nav [id*='logo' i]:not(.video-js):not([id*='player']):not(.sidebar):not([class*='sidebar']),\n"
+        "body.cc-hide-nav [class*='brand' i]:not(.video-js):not([class*='player']):not(.sidebar):not([class*='sidebar']),\n"
+        "body.cc-hide-nav [id*='brand' i]:not(.video-js):not([id*='player']):not(.sidebar):not([class*='sidebar']),\n"
+        "body.cc-hide-nav [class*='search' i]:not(.video-js):not([class*='player']):not(.sidebar):not([class*='sidebar']),\n"
+        "body.cc-hide-nav [id*='search' i]:not(.video-js):not([id*='player']):not(.sidebar):not([class*='sidebar']),\n"
+        "body.cc-hide-nav [class*='notif' i]:not(.video-js):not([class*='player']),\n"
+        "body.cc-hide-nav [id*='notif' i]:not(.video-js):not([id*='player']),\n"
+        "body.cc-hide-nav [class*='profile' i]:not(.video-js):not([class*='player']),\n"
+        "body.cc-hide-nav [id*='profile' i]:not(.video-js):not([id*='player']),\n"
+        "body.cc-hide-nav [class*='account' i]:not(.video-js):not([class*='player']),\n"
+        "body.cc-hide-nav [id*='account' i]:not(.video-js):not([id*='player']) {\n"
         "    opacity: 0 !important;\n"
+        "    visibility: hidden !important;\n"
         "    pointer-events: none !important;\n"
-        "    transition: opacity 0.3s ease-in-out !important;\n"
+        "    transition: opacity 0.3s ease-in-out, visibility 0.3s !important;\n"
+        "}\n"
+        "\n"
+        "/* Sidebars and category menus are ALWAYS visible and clickable */\n"
+        ".sidebar,\n"
+        "aside,\n"
+        "[class*='sidebar' i],\n"
+        "[id*='sidebar' i],\n"
+        ".sidebar *,\n"
+        "aside *,\n"
+        "[class*='sidebar' i] *,\n"
+        "[id*='sidebar' i] * {\n"
+        "    opacity: 1 !important;\n"
+        "    visibility: visible !important;\n"
+        "    pointer-events: auto !important;\n"
         "}\n"
         "\n"
         "/* Reveal header when hovering top area / moving mouse over it */\n"
@@ -858,52 +885,11 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         "body:not(.cc-hide-nav) [class*='profile' i],\n"
         "body:not(.cc-hide-nav) [id*='profile' i],\n"
         "body:not(.cc-hide-nav) [class*='account' i],\n"
-        "body:not(.cc-hide-nav) [id*='account' i],\n"
-        "body:not(.cc-hide-nav) .video-header,\n"
-        "body:not(.cc-hide-nav) .vjs-control-bar,\n"
-        "body:not(.cc-hide-nav) .pip-wrapper {\n"
+        "body:not(.cc-hide-nav) [id*='account' i] {\n"
         "    opacity: 1 !important;\n"
         "    visibility: visible !important;\n"
         "    pointer-events: auto !important;\n"
         "    z-index: 100001 !important;\n"
-        "}\n"
-        "\n"
-        "/* When cc-hide-nav is active (streaming mode), force hide completely */\n"
-        "body.cc-hide-nav header,\n"
-        "body.cc-hide-nav nav,\n"
-        "body.cc-hide-nav footer,\n"
-        "body.cc-hide-nav aside,\n"
-        "body.cc-hide-nav [class*='header' i]:not(.video-js):not([class*='player']):not(#videoPlayer),\n"
-        "body.cc-hide-nav [id*='header' i]:not(.video-js):not([id*='player']):not(#videoPlayer),\n"
-        "body.cc-hide-nav [class*='navbar' i]:not(.video-js):not([class*='player']),\n"
-        "body.cc-hide-nav [id*='navbar' i]:not(.video-js):not([id*='player']),\n"
-        "body.cc-hide-nav [class*='topbar' i]:not(.video-js):not([class*='player']),\n"
-        "body.cc-hide-nav [id*='topbar' i]:not(.video-js):not([id*='player']),\n"
-        "body.cc-hide-nav [class*='menu' i]:not(.video-js):not([class*='vjs-']):not([class*='player']),\n"
-        "body.cc-hide-nav [id*='menu' i]:not(.video-js):not([class*='vjs-']):not([id*='player']),\n"
-        "body.cc-hide-nav [class*='nav' i]:not(.video-js):not([class*='vjs-']):not([class*='player']),\n"
-        "body.cc-hide-nav [id*='nav' i]:not(.video-js):not([id*='player']),\n"
-        "body.cc-hide-nav [class*='logo' i]:not(.video-js):not([class*='player']),\n"
-        "body.cc-hide-nav [id*='logo' i]:not(.video-js):not([id*='player']),\n"
-        "body.cc-hide-nav [class*='brand' i]:not(.video-js):not([class*='player']),\n"
-        "body.cc-hide-nav [id*='brand' i]:not(.video-js):not([id*='player']),\n"
-        "body.cc-hide-nav [class*='search' i]:not(.video-js):not([class*='player']),\n"
-        "body.cc-hide-nav [id*='search' i]:not(.video-js):not([id*='player']),\n"
-        "body.cc-hide-nav [class*='notif' i]:not(.video-js):not([class*='player']),\n"
-        "body.cc-hide-nav [id*='notif' i]:not(.video-js):not([id*='player']),\n"
-        "body.cc-hide-nav [class*='profile' i]:not(.video-js):not([class*='player']),\n"
-        "body.cc-hide-nav [id*='profile' i]:not(.video-js):not([id*='player']),\n"
-        "body.cc-hide-nav [class*='account' i]:not(.video-js):not([class*='player']),\n"
-        "body.cc-hide-nav [id*='account' i]:not(.video-js):not([id*='player']),\n"
-        "body.cc-hide-nav .video-header,\n"
-        "body.cc-hide-nav .vjs-control-bar,\n"
-        "body.cc-hide-nav .vjs-big-play-button,\n"
-        "body.cc-hide-nav .vjs-loading-spinner,\n"
-        "body.cc-hide-nav .pip-wrapper,\n"
-        "body.cc-hide-nav .vjs-poster {\n"
-        "    opacity: 0 !important;\n"
-        "    visibility: hidden !important;\n"
-        "    pointer-events: none !important;\n"
         "}\n",
         encoding="utf-8"
     )
