@@ -244,6 +244,27 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         except Exception:
             pass
 
+    # --- Ensure Widevine CDM is available for DRM content (S Sport Plus, Exxen, Tabii) ---
+    gmp_app_widevine = _BASE_DIR / "bin" / "firefox" / "app" / "gmp-widevinecdm"
+    if not gmp_app_widevine.exists():
+        app_data = os.environ.get("APPDATA")
+        if app_data:
+            mozilla_profiles = Path(app_data) / "Mozilla" / "Firefox" / "Profiles"
+            if mozilla_profiles.exists():
+                for found_w in mozilla_profiles.rglob("gmp-widevinecdm"):
+                    if found_w.is_dir() and any(found_w.iterdir()):
+                        try:
+                            shutil.copytree(found_w, gmp_app_widevine, dirs_exist_ok=True)
+                            logger.info(f"Copied Widevine CDM to {gmp_app_widevine}")
+                            break
+                        except Exception:
+                            pass
+    if gmp_app_widevine.exists():
+        try:
+            shutil.copytree(gmp_app_widevine, profile_dir / "gmp-widevinecdm", dirs_exist_ok=True)
+        except Exception:
+            pass
+
     # --- Generate Page Visibility Override Extension ---
     # This prevents sites like YouTube/Twitch/TikTok from pausing video when unfocused
     ext_dir = profile_dir / "extensions"
@@ -280,31 +301,78 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
             window.addEventListener('visibilitychange', e => e.stopImmediatePropagation(), true);
         } catch(e) {}
 
-        // 2. Video Playback Detection with 4-second delay
+        // 2. Universal Video Detection & Full-Window Scaling (with 3-4s delay)
         let playSeconds = 0;
         let idleTimer = null;
+        let activeFullscreenEl = null;
+
+        function findVideoContainer(videoEl) {
+            if (!videoEl) return null;
+            let bestContainer = videoEl;
+            let current = videoEl.parentElement;
+            let depth = 0;
+            while (current && current !== document.body && current !== document.documentElement && depth < 6) {
+                const id = (current.id || '').toLowerCase();
+                const cls = (current.className || '').toString().toLowerCase();
+                if (
+                    id === 'full-screen-closed' ||
+                    id === 'videoplayer' ||
+                    id === 'video__wrapper' ||
+                    id.includes('player') ||
+                    id.includes('video') ||
+                    cls.includes('video-js') ||
+                    cls.includes('vjs') ||
+                    cls.includes('player') ||
+                    cls.includes('video') ||
+                    cls.includes('rmp')
+                ) {
+                    bestContainer = current;
+                }
+                current = current.parentElement;
+                depth++;
+            }
+            return bestContainer;
+        }
 
         function checkVideo() {
             const videos = Array.from(document.querySelectorAll('video'));
             let isPlaying = false;
+            let playingVideo = null;
 
             for (const v of videos) {
-                const rect = v.getBoundingClientRect();
-                if (rect.width > 200 && rect.height > 150 && !v.paused && !v.ended && v.readyState > 2) {
+                // Check if video is playing: not paused, not ended, and has either started playback or is active
+                if (!v.paused && !v.ended && (v.currentTime > 0 || v.readyState >= 1 || v.seeking || v.duration > 0 || v.classList.contains('vjs-tech'))) {
                     isPlaying = true;
+                    playingVideo = v;
                     break;
                 }
             }
 
-            if (isPlaying) {
+            if (isPlaying && playingVideo) {
                 playSeconds += 1;
             } else {
                 playSeconds = 0;
+                if (activeFullscreenEl) {
+                    activeFullscreenEl.classList.remove('cc-full-window-player');
+                    activeFullscreenEl = null;
+                }
             }
 
-            // Only auto-hide headers after 4 seconds of confirmed continuous playback
-            if (playSeconds >= 4 && document.body) {
+            // Only auto-hide headers and scale after 3 seconds of confirmed continuous playback
+            if (playSeconds >= 3 && document.body) {
                 document.body.classList.add('cc-hide-nav');
+                if (playingVideo) {
+                    const container = findVideoContainer(playingVideo);
+                    if (container && container !== activeFullscreenEl) {
+                        if (activeFullscreenEl) {
+                            activeFullscreenEl.classList.remove('cc-full-window-player');
+                        }
+                        container.classList.add('cc-full-window-player');
+                        activeFullscreenEl = container;
+                    } else if (container) {
+                        container.classList.add('cc-full-window-player');
+                    }
+                }
             } else if (document.body) {
                 document.body.classList.remove('cc-hide-nav');
             }
@@ -317,7 +385,7 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
             }
             if (idleTimer) clearTimeout(idleTimer);
             idleTimer = setTimeout(() => {
-                if (playSeconds >= 4 && document.body) {
+                if (playSeconds >= 3 && document.body) {
                     document.body.classList.add('cc-hide-nav');
                 }
             }, 3500);
@@ -406,12 +474,16 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         'user_pref("permissions.default.desktop-notification", 2);',
         'user_pref("dom.webnotifications.enabled", false);',
 
-        # --- Disable crash prompts ---
+        # --- Enable Widevine CDM & DRM Playback ---
         'user_pref("browser.crashReports.unsubmittedCheck.enabled", false);',
         'user_pref("browser.crashReports.unsubmittedCheck.autoSubmit2", false);',
         'user_pref("media.eme.enabled", true);',
         'user_pref("media.gmp-widevinecdm.enabled", true);',
         'user_pref("media.gmp-widevinecdm.visible", true);',
+        'user_pref("media.gmp-widevinecdm.autoupdate", true);',
+        'user_pref("media.gmp-provider.enabled", true);',
+        'user_pref("media.gmp-manager.updateEnabled", true);',
+        'user_pref("media.gmp.decoder.enabled", true);',
 
         # --- WebRTC / Network Prefs ---
         'user_pref("media.peerconnection.enabled", false);',  # Disable WebRTC (prevents STUN/TURN IP leaks)
@@ -471,7 +543,7 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
     # --- Write userContent.css to natively manage video player full-window & hover UI ---
     (chrome_dir / "userContent.css").write_text(
         "/* Hide Radiant Media Player ad overlays and Google IMA iframe containers */\n"
-        ".rmp-ad-container, .ima-ad-container, [id*='google_ads_iframe'] {\n"
+        ".rmp-ad-container, .ima-ad-container, [id*='google_ads_iframe'], #ad-container {\n"
         "    display: none !important;\n"
         "    opacity: 0 !important;\n"
         "    pointer-events: none !important;\n"
@@ -479,8 +551,8 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         "    height: 0 !important;\n"
         "}\n"
         "\n"
-        "/* Eliminate the 96px top margin on Exxen's main content wrapper to remove top black bar */\n"
-        "div[style*=\"margin-top: 96px\"] {\n"
+        "/* Eliminate top margins on main content wrappers to remove top black bar */\n"
+        "div[style*=\"margin-top: 96px\"], div[style*=\"margin-top:96px\"] {\n"
         "    margin-top: 0 !important;\n"
         "    min-height: 100vh !important;\n"
         "}\n"
@@ -495,25 +567,57 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         "    display: none !important;\n"
         "}\n"
         "\n"
-        "/* Make the video player fill the entire browser window */\n"
-        "#full-screen-closed {\n"
+        "/* Universal Full-Window Video Player */\n"
+        ".cc-full-window-player,\n"
+        "#full-screen-closed,\n"
+        "#video__wrapper,\n"
+        ".video-js.vjs-playing,\n"
+        ".video-js.vjs-has-started,\n"
+        "#videoPlayer {\n"
         "    position: fixed !important;\n"
         "    top: 0 !important;\n"
         "    left: 0 !important;\n"
         "    width: 100vw !important;\n"
         "    height: 100vh !important;\n"
-        "    z-index: 99998 !important;\n"
+        "    max-width: 100vw !important;\n"
+        "    max-height: 100vh !important;\n"
+        "    min-width: 100vw !important;\n"
+        "    min-height: 100vh !important;\n"
+        "    z-index: 99990 !important;\n"
         "    background: #000 !important;\n"
+        "    margin: 0 !important;\n"
+        "    padding: 0 !important;\n"
+        "    padding-top: 0 !important; /* Overrides Video.js .vjs-fluid padding-top */\n"
         "}\n"
-        "#er-player, #zon-player-parent, #video-player, #radiant-player, .rmp-content {\n"
+        "\n"
+        "/* Make inner player containers and video elements fill 100% of the window */\n"
+        "#er-player, #zon-player-parent, #video-player, #radiant-player, .rmp-content,\n"
+        ".cc-full-window-player .video-js,\n"
+        ".cc-full-window-player #videoPlayer {\n"
         "    width: 100% !important;\n"
         "    height: 100% !important;\n"
+        "    padding-top: 0 !important;\n"
         "}\n"
-        ".rmp-video, video.rmp-video {\n"
+        "\n"
+        ".cc-full-window-player video,\n"
+        ".cc-full-window-player .vjs-tech,\n"
+        ".cc-full-window-player .rmp-video,\n"
+        "#full-screen-closed video,\n"
+        ".video-js video,\n"
+        "#videoPlayer video,\n"
+        "video.vjs-tech,\n"
+        "video.rmp-video {\n"
+        "    position: absolute !important;\n"
+        "    top: 0 !important;\n"
+        "    left: 0 !important;\n"
         "    width: 100% !important;\n"
         "    height: 100% !important;\n"
+        "    max-width: 100% !important;\n"
+        "    max-height: 100% !important;\n"
         "    object-fit: contain !important;\n"
         "    background: #000 !important;\n"
+        "    margin: 0 !important;\n"
+        "    padding: 0 !important;\n"
         "}\n"
         "\n"
         "/* Site header stays above the video player so hovering top reveals it */\n"
@@ -521,22 +625,67 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         "    z-index: 100001 !important;\n"
         "}\n"
         "\n"
-        "/* Auto-hide headers and footers natively, reveal on mouse hover */\n"
-        "header, nav, footer, aside, #footer-id, #header-id,\n"
-        "[id*='footer'], [class*='footer'], [id*='Footer'], [class*='Footer'],\n"
-        "[id*='header'], [class*='header'], [id*='Header'], [class*='Header'],\n"
-        "[id*='nav'], [class*='nav'], [id*='Nav'], [class*='Nav'],\n"
-        "[class*='menu'], [class*='Menu'] {\n"
+        "/* In-player header / controls and website headers auto-hide when streaming */\n"
+        "body.cc-hide-nav .video-header,\n"
+        "body.cc-hide-nav .vjs-control-bar,\n"
+        "body.cc-hide-nav .vjs-big-play-button,\n"
+        "body.cc-hide-nav .vjs-loading-spinner,\n"
+        "body.cc-hide-nav .pip-wrapper,\n"
+        "body.cc-hide-nav .vjs-poster,\n"
+        "body.cc-hide-nav header,\n"
+        "body.cc-hide-nav nav,\n"
+        "body.cc-hide-nav footer,\n"
+        "body.cc-hide-nav aside,\n"
+        "body.cc-hide-nav #footer-id,\n"
+        "body.cc-hide-nav #header-id,\n"
+        "body.cc-hide-nav [id*='footer'],\n"
+        "body.cc-hide-nav [class*='footer'],\n"
+        "body.cc-hide-nav [id*='Footer'],\n"
+        "body.cc-hide-nav [class*='Footer'],\n"
+        "body.cc-hide-nav [id*='header'],\n"
+        "body.cc-hide-nav [class*='header'],\n"
+        "body.cc-hide-nav [id*='Header'],\n"
+        "body.cc-hide-nav [class*='Header'],\n"
+        "body.cc-hide-nav [id*='nav'],\n"
+        "body.cc-hide-nav [class*='nav'],\n"
+        "body.cc-hide-nav [id*='Nav'],\n"
+        "body.cc-hide-nav [class*='Nav'],\n"
+        "body.cc-hide-nav [class*='menu'],\n"
+        "body.cc-hide-nav [class*='Menu'],\n"
+        "body.cc-hide-nav .header-right,\n"
+        "body.cc-hide-nav .header-left,\n"
+        "body.cc-hide-nav .header-center,\n"
+        "body.cc-hide-nav #live-main,\n"
+        "body.cc-hide-nav #search-main,\n"
+        "body.cc-hide-nav #notification-main,\n"
+        "body.cc-hide-nav #user-main {\n"
         "    opacity: 0 !important;\n"
-        "    transition: opacity 0.3s ease-in-out !important;\n"
+        "    visibility: hidden !important;\n"
+        "    pointer-events: none !important;\n"
+        "    transition: opacity 0.3s ease-in-out, visibility 0.3s !important;\n"
         "}\n"
         "\n"
-        "header:hover, nav:hover, footer:hover, aside:hover, #footer-id:hover, #header-id:hover,\n"
-        "[id*='footer']:hover, [class*='footer']:hover, [id*='Footer']:hover, [class*='Footer']:hover,\n"
-        "[id*='header']:hover, [class*='header']:hover, [id*='Header']:hover, [class*='Header']:hover,\n"
-        "[id*='nav']:hover, [class*='nav']:hover, [id*='Nav']:hover, [class*='Nav']:hover,\n"
-        "[class*='menu']:hover, [class*='Menu']:hover {\n"
+        "/* When user moves mouse (cc-hide-nav removed), reveal smoothly */\n"
+        "body:not(.cc-hide-nav) header,\n"
+        "body:not(.cc-hide-nav) nav,\n"
+        "body:not(.cc-hide-nav) footer,\n"
+        "body:not(.cc-hide-nav) aside,\n"
+        "body:not(.cc-hide-nav) [class*='header'],\n"
+        "body:not(.cc-hide-nav) [id*='header'],\n"
+        "body:not(.cc-hide-nav) [class*='Header'],\n"
+        "body:not(.cc-hide-nav) [id*='Header'],\n"
+        "body:not(.cc-hide-nav) [class*='nav'],\n"
+        "body:not(.cc-hide-nav) [id*='nav'],\n"
+        "body:not(.cc-hide-nav) [class*='menu'],\n"
+        "body:not(.cc-hide-nav) .header-right,\n"
+        "body:not(.cc-hide-nav) #search-main,\n"
+        "body:not(.cc-hide-nav) #notification-main,\n"
+        "body:not(.cc-hide-nav) #user-main,\n"
+        "body:not(.cc-hide-nav) .video-header,\n"
+        "body:not(.cc-hide-nav) .vjs-control-bar,\n"
+        "body:not(.cc-hide-nav) .pip-wrapper {\n"
         "    opacity: 1 !important;\n"
+        "    visibility: visible !important;\n"
         "    pointer-events: auto !important;\n"
         "}\n",
         encoding="utf-8"

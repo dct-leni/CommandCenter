@@ -108,7 +108,8 @@ Connect VLC or RTMP client to `rtmp://127.0.0.1:1935/stream`.
   * **Native Header Auto-Hide & Hover Reveal (`userContent.css`)**:
     * Headers and navigation bars (`[class*='header']`, `[class*='menu']`, `header`, `nav`, `footer`) auto-hide smoothly (`opacity: 0 !important; transition: opacity 0.3s ease-in-out !important;`).
     * When the user moves or hovers the mouse over the top edge or header area, it immediately reveals (`opacity: 1 !important; pointer-events: auto !important;`) at `z-index: 100001` on top of the full-screen video container.
-  * **Full-Window Video Scaling**: `#full-screen-closed` fills `100vw × 100vh` at `z-index: 99998` with `background: #000;`, eliminating top black bars without clipping or UI distortion.
+  * **Universal Full-Window Video Scaling**: `.cc-full-window-player`, `#video__wrapper`, `.video-js`, `#videoPlayer`, `#full-screen-closed` fill `100vw × 100vh` at `z-index: 99990` with `background: #000;`, eliminating top black bars, resetting `.vjs-fluid` padding-top, and centering video with `object-fit: contain`. In-player controls auto-hide during playback and reveal on hover.
+  * **Widevine DRM Support**: Automatically copies `gmp-widevinecdm` into portable Firefox profiles and configures EME prefs for DRM stream playback (S Sport Plus, Tabii, Exxen).
 * **FFmpeg Titlebar Filter**: `-vf "crop=iw:ih-38:0:38,format=yuv420p"` crops OS titlebar.
 
 ### 10. Web Stream Audio & COM Guardrails — FAILED Approaches (DO NOT RETRY)
