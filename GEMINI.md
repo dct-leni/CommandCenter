@@ -198,12 +198,11 @@ When `-use_wallclock_as_timestamps 1` was specified on BOTH Input 0 (GDIGrab) an
 ### 15. Browser Window HWND Capture & Cleanup (MANDATORY)
 
 * **Rule**: `start_browser_for_stream()` MUST call `wait_for_window_title()` after `launch_browser()` to capture the actual Firefox window HWND.
-* **Why**: `launch_browser()` stores `subprocess.Popen.pid` which (for phyrox-portable) is the **launcher** PID, not the actual `firefox.exe` PID. The phyrox-portable launcher exits immediately after spawning Firefox. Calling `taskkill /F /T /PID <launcher_pid>` kills nothing because the launcher is already gone, leaving Firefox orphaned.
+* **Why**: `launch_browser()` stores `subprocess.Popen.pid` which (for phyrox-portable or detached spawns) may be the launcher PID or parent process. In slow network conditions, the window title is initially `"Mozilla Firefox"` rather than the page domain.
 * **Solution**:
-  1. `start_browser_for_stream()` calls `wait_for_window_title(stream_id, name, url, timeout=10.0)` via `asyncio.to_thread()` after `launch_browser()`.
-  2. `wait_for_window_title()` resolves the actual HWND via `EnumWindows` + PID scan, stores it in `web_stream_manager.window_hwnds[stream_id]`.
-  3. `close_browser()` retrieves the HWND, calls `GetWindowThreadProcessId(hwnd)` to get the actual `firefox.exe` PID, then `taskkill /F /T /PID <firefox_pid>`.
-* **Fallback**: If HWND is `None`, `close_browser()` falls back to killing by launcher PID — but launcher may have already exited. Always ensure HWND capture succeeds.
+  1. `get_stream_pids(stream_id, proc_pid)` scans running `firefox.exe` processes matching `stream_id` in their command line / profile path, collecting all child PIDs.
+  2. `wait_for_window_title()` detects `MozillaWindowClass` windows matching `pid in target_pids`, locking the HWND immediately on second 1 regardless of whether the webpage has finished loading or displays a localized title.
+  3. `close_browser()` collects all PIDs from `get_stream_pids()` + the HWND's PID, sends `WM_CLOSE`, and terminates all matching Firefox worker processes via `taskkill /F /T /PID <pid>`.
 
 ### 16. Pure Python Audio Capture & Teardown
 * **Rule**: Audio capture uses pure Python WASAPI `PROCESS_LOOPBACK` worker threads (`ProcessLoopbackAudioCapture`).

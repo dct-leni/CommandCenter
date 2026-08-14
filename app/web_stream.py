@@ -85,6 +85,38 @@ def get_child_pids(parent_pid: int) -> set:
     return pids
 
 
+def get_stream_pids(stream_id: str, parent_pid: Optional[int] = None) -> set:
+    """
+    Collect all PIDs belonging to this stream's Firefox process tree.
+    Combines direct child process tree tracking with full psutil command-line matching.
+    """
+    pids = set()
+    if parent_pid:
+        pids.add(parent_pid)
+        pids.update(get_child_pids(parent_pid))
+
+    try:
+        import psutil
+        for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                pname = (p.info.get('name') or '').lower()
+                if 'firefox' in pname or 'phyrox' in pname:
+                    cmdline = p.info.get('cmdline') or []
+                    if any(stream_id in str(arg) for arg in cmdline):
+                        pids.add(p.info['pid'])
+                        try:
+                            for child in p.children(recursive=True):
+                                pids.add(child.pid)
+                        except Exception:
+                            pass
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+    except Exception:
+        pass
+
+    return pids
+
+
 def get_open_window_titles() -> List[str]:
     """Retrieve list of currently open window titles on Windows."""
     if os.name != "nt":
@@ -114,14 +146,14 @@ def find_firefox_executable() -> Optional[str]:
             logger.debug(f"Found portable Firefox at: {candidate}")
             return str(candidate)
 
-    # Dynamic fallback: search anywhere inside bin/ for phyrox-portable.exe first, then firefox.exe
+    # Dynamic fallback: search anywhere inside bin/ for firefox.exe first, then phyrox-portable.exe
     bin_dir = _BASE_DIR / "bin"
     if bin_dir.exists():
-        for found in bin_dir.rglob("phyrox-portable.exe"):
-            logger.info(f"Found phyrox-portable.exe via rglob scan at: {found}")
-            return str(found)
         for found in bin_dir.rglob("firefox.exe"):
             logger.info(f"Found firefox.exe via rglob scan at: {found}")
+            return str(found)
+        for found in bin_dir.rglob("phyrox-portable.exe"):
+            logger.info(f"Found phyrox-portable.exe via rglob scan at: {found}")
             return str(found)
 
     return None
@@ -165,20 +197,12 @@ def _ensure_firefox_policies(firefox_exe: Path) -> None:
         }
         policy_json = json.dumps(policy_data, indent=2)
 
-        # Write to app/distribution, data, and parent/distribution
-        dirs_to_try = [
-            firefox_exe.parent / "distribution",
-            firefox_exe.parent.parent / "distribution",
-            firefox_exe.parent / "app" / "distribution",  # For phyrox-portable.exe -> app/distribution
-            firefox_exe.parent / "data",                  # Portapps requires data/policies.json
-        ]
-        for d in dirs_to_try:
-            try:
-                d.mkdir(exist_ok=True)
-                (d / "policies.json").write_text(policy_json, encoding="utf-8")
-            except Exception:
-                pass
-        logger.info("Created Enterprise policies.json to bypass Firefox Welcome / Terms of Use prompts.")
+        # Write Enterprise policies.json directly next to the firefox.exe binary
+        app_dir = firefox_exe.parent if firefox_exe.name.lower() == "firefox.exe" else firefox_exe.parent / "app"
+        dist_dir = app_dir / "distribution"
+        dist_dir.mkdir(parents=True, exist_ok=True)
+        (dist_dir / "policies.json").write_text(policy_json, encoding="utf-8")
+        logger.info(f"Created Enterprise policies.json at: {dist_dir / 'policies.json'}")
     except Exception as e:
         logger.warning(f"Could not write Firefox policies.json: {e}")
 
@@ -621,11 +645,6 @@ app:
         import time
         start_time = time.time()
 
-        proc = self.browser_processes.get(stream_id)
-        target_pids = set()
-        if proc and proc.pid:
-            target_pids = get_child_pids(proc.pid)
-
         parsed_domain = ""
         full_netloc = ""
         try:
@@ -642,47 +661,62 @@ app:
         }
 
         while time.time() - start_time < timeout:
-            if proc and proc.pid:
-                target_pids = get_child_pids(proc.pid)
-            # 1. Scan PIDs — capture both title and HWND
-            if target_pids and os.name == "nt":
-                found: List[tuple] = []  # (hwnd, title)
+            proc = self.browser_processes.get(stream_id)
+            target_pids = get_stream_pids(stream_id, proc.pid if proc else None)
 
-                def _enum_pid_windows(hwnd, lParam):
+            if os.name == "nt":
+                found: List[tuple] = []  # (hwnd, title, score)
+
+                def _enum_windows(hwnd, lParam):
                     if user32.IsWindowVisible(hwnd):
-                        pid = ctypes.wintypes.DWORD()
-                        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                        if pid.value in target_pids:
-                            buff = ctypes.create_unicode_buffer(512)
-                            user32.GetWindowTextW(hwnd, buff, 512)
-                            val = buff.value.strip()
-                            if val and not any(skip == val.lower() or skip in val.lower() for skip in _FIREFOX_SKIP):
-                                # Verify this is a main window (not a tiny helper window)
-                                rect = ctypes.wintypes.RECT()
-                                user32.GetClientRect(hwnd, ctypes.byref(rect))
-                                w = rect.right - rect.left
-                                h = rect.bottom - rect.top
-                                if w >= 400 and h >= 300:
-                                    found.append((hwnd, val))
+                        rect = ctypes.wintypes.RECT()
+                        user32.GetClientRect(hwnd, ctypes.byref(rect))
+                        w = rect.right - rect.left
+                        h = rect.bottom - rect.top
+                        if w >= 400 and h >= 300:
+                            cls_buf = ctypes.create_unicode_buffer(256)
+                            user32.GetClassNameW(hwnd, cls_buf, 256)
+                            cls = cls_buf.value
+                            pid = ctypes.wintypes.DWORD()
+                            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                            title_buf = ctypes.create_unicode_buffer(512)
+                            user32.GetWindowTextW(hwnd, title_buf, 512)
+                            val = title_buf.value.strip()
+
+                            # Match 1: PID belongs to this stream's process tree (Direct 100% confidence match)
+                            if target_pids and pid.value in target_pids:
+                                found.append((hwnd, val or "Mozilla Firefox", 100))
+                            # Match 2: Window class is MozillaWindowClass and title matches stream name / domain
+                            elif cls == "MozillaWindowClass":
+                                for matcher in [full_netloc, parsed_domain, stream_name]:
+                                    if matcher and matcher.lower() in val.lower():
+                                        found.append((hwnd, val, 80))
+                                        break
+                                # Match 3: Visible MozillaWindowClass when no other matches exist
+                                if not found and val and not any(skip == val.lower() or skip in val.lower() for skip in _FIREFOX_SKIP):
+                                    found.append((hwnd, val, 20))
                     return True
 
-                cb = WNDENUMPROC(_enum_pid_windows)
+                cb = WNDENUMPROC(_enum_windows)
                 user32.EnumWindows(cb, 0)
+
                 if found:
-                    hwnd, title = found[0]
+                    found.sort(key=lambda x: x[2], reverse=True)
+                    hwnd, title, score = found[0]
                     try:
                         # Disable window resizing (remove WS_THICKFRAME and WS_MAXIMIZEBOX styles)
                         GWL_STYLE = -16
                         WS_THICKFRAME = 0x00040000
                         WS_MAXIMIZEBOX = 0x00010000
+                        WS_MINIMIZEBOX = 0x00020000
                         style = user32.GetWindowLongW(hwnd, GWL_STYLE)
                         if style:
-                            style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX)
+                            style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX)
                             user32.SetWindowLongW(hwnd, GWL_STYLE, style)
                             user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0027)  # SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED
                     except Exception as e:
                         logger.debug(f"SetWindowLongW error: {e}")
-                        
+
                     self.window_hwnds[stream_id] = hwnd
                     self.window_titles[stream_id] = title
 
@@ -696,66 +730,16 @@ app:
                         else:
                             SW_SHOW = 5
                             user32.ShowWindow(hwnd, SW_SHOW)
-                        
+
                         # Position window at (0,0) 1280x758
                         SWP_SHOWWINDOW = 0x0040
                         user32.SetWindowPos(hwnd, 0, 0, 0, 1280, 758, SWP_SHOWWINDOW)
-                        
-                        # Remove Minimize Box to prevent GDI capture freezing
-                        GWL_STYLE = -16
-                        WS_MINIMIZEBOX = 0x00020000
-                        style = user32.GetWindowLongW(hwnd, GWL_STYLE)
-                        if style & WS_MINIMIZEBOX:
-                            user32.SetWindowLongW(hwnd, GWL_STYLE, style & ~WS_MINIMIZEBOX)
                     except Exception as e:
                         logger.debug(f"SetWindowPos/Style error: {e}")
 
-                    logger.info(f"Locked Firefox window title to '{title}' for stream '{stream_name}' ({stream_id}) (hwnd=0x{hwnd:x})")
+                    logger.info(f"Locked Firefox window (hwnd=0x{hwnd:x}) with title '{title}' for stream '{stream_name}' ({stream_id}) [confidence={score}]")
                     return title
-                else:
-                    logger.debug(f"PID scan target_pids={target_pids} found 0 matching windows so far...")
 
-            # 2. Fallback: search open system window titles and lock HWND (PID linkage broken by launcher)
-            if os.name == "nt":
-                found_fallback: List[tuple] = []
-                def _enum_title_windows(hwnd, lParam):
-                    if user32.IsWindowVisible(hwnd):
-                        buff = ctypes.create_unicode_buffer(512)
-                        user32.GetWindowTextW(hwnd, buff, 512)
-                        val = buff.value.strip()
-                        if val and not any(skip == val.lower() or skip in val.lower() for skip in _FIREFOX_SKIP):
-                            rect = ctypes.wintypes.RECT()
-                            user32.GetClientRect(hwnd, ctypes.byref(rect))
-                            if (rect.right - rect.left) >= 400 and (rect.bottom - rect.top) >= 300:
-                                found_fallback.append((hwnd, val))
-                    return True
-                
-                cb_title = WNDENUMPROC(_enum_title_windows)
-                user32.EnumWindows(cb_title, 0)
-                
-                for hwnd, t in found_fallback:
-                    for matcher in [full_netloc, parsed_domain, stream_name]:
-                        if matcher and matcher.lower() in t.lower():
-                            logger.info(f"Detected open Firefox window for stream '{stream_name}' matching '{matcher}': '{t}' (hwnd=0x{hwnd:x})")
-                            self.window_hwnds[stream_id] = hwnd
-                            self.window_titles[stream_id] = t
-                            try:
-                                GWL_STYLE = -16
-                                WS_THICKFRAME = 0x00040000
-                                WS_MAXIMIZEBOX = 0x00010000
-                                WS_MINIMIZEBOX = 0x00020000
-                                style = user32.GetWindowLongW(hwnd, GWL_STYLE)
-                                if style:
-                                    style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX)
-                                    user32.SetWindowLongW(hwnd, GWL_STYLE, style)
-                                if user32.IsIconic(hwnd):
-                                    user32.ShowWindow(hwnd, 9)
-                                else:
-                                    user32.ShowWindow(hwnd, 5)
-                                user32.SetWindowPos(hwnd, 0, 0, 0, 1280, 758, 0x0067)
-                            except Exception as e:
-                                logger.debug(f"Fallback window setup error: {e}")
-                            return t
             time.sleep(0.5)
 
         fallback = full_netloc if full_netloc else (parsed_domain if parsed_domain else stream_name)
@@ -799,7 +783,8 @@ app:
         hwnd = self.window_hwnds.pop(stream_id, None)
         logger.info(f"close_browser: proc={proc is not None}, hwnd={hwnd}")
 
-        pids_to_kill = set()
+        pids_to_kill = get_stream_pids(stream_id, proc.pid if proc else None)
+
         if os.name == "nt" and hwnd:
             try:
                 from ctypes import wintypes
@@ -810,8 +795,12 @@ app:
             except Exception as e:
                 logger.debug(f"Error reading HWND PID: {e}")
 
-        if proc:
-            pids_to_kill.add(proc.pid)
+            # Try graceful window close first
+            try:
+                WM_CLOSE = 0x0010
+                user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+            except Exception:
+                pass
 
         for pid in pids_to_kill:
             try:
