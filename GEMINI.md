@@ -104,12 +104,11 @@ Connect VLC or RTMP client to `rtmp://127.0.0.1:1935/stream`.
 * **Process Tree Termination**: Call `psutil` or `taskkill /F /T /PID <proc_pid>` to terminate all background browser worker processes cleanly on stop.
 * **Portable Firefox Policies, Extension & State-Aware Hover UI**:
   * Enterprise `policies.json` bypasses Terms of Use / First Run onboarding.
-  * MV2 Extension (`content.js`) dynamically detects whether a video is active vs general browsing/login:
-    * **Browsing / Login Mode**: All website menus, headers, category navigations, and login forms remain 100% visible and interactive.
-    * **Video Playback Mode**: Distracting website headers, footers, and sidebars smoothly fade out (`opacity: 0`).
-    * **Hover / Mouse Movement**: When the mouse moves or hovers, headers, footers, and player controls smoothly fade in (`opacity: 1`), then fade out after 2.5s idle.
-    * **Floating Top Bar (`#cc-floating-nav`)**: Injects Back (`◀`), Forward (`▶`), Reload (`⟳`), and Home (`🏠`) controls at the top of the browser window on hover.
-  * UserChrome / UserContent CSS cleanly integrates full-window player scaling without OS toolbar clutter.
+  * MV2 Extension (`content.js`) overrides Page Visibility API (`document.hidden`, `visibilityState`, `hasFocus`), preventing websites from auto-pausing video/audio when backgrounded.
+  * **Native Header Auto-Hide & Hover Reveal (`userContent.css`)**:
+    * Headers and navigation bars (`[class*='header']`, `[class*='menu']`, `header`, `nav`, `footer`) auto-hide smoothly (`opacity: 0 !important; transition: opacity 0.3s ease-in-out !important;`).
+    * When the user moves or hovers the mouse over the top edge or header area, it immediately reveals (`opacity: 1 !important; pointer-events: auto !important;`) at `z-index: 100001` on top of the full-screen video container.
+  * **Full-Window Video Scaling**: `#full-screen-closed` fills `100vw × 100vh` at `z-index: 99998` with `background: #000;`, eliminating top black bars without clipping or UI distortion.
 * **FFmpeg Titlebar Filter**: `-vf "crop=iw:ih-38:0:38,format=yuv420p"` crops OS titlebar.
 
 ### 10. Web Stream Audio & COM Guardrails — FAILED Approaches (DO NOT RETRY)
@@ -130,6 +129,7 @@ These were tested and confirmed non-working. Do not suggest or re-implement them
 **Working DRM-Compatible Audio Architecture:**
 Uses native Windows `PROCESS_LOOPBACK` capture (`IAudioClient` with `AUDIOCLIENT_ACTIVATION_PARAMS` where `ActivationType = 1` and `ProcessLoopbackMode = 0` / Include Target Process Tree).
 - Implemented via standalone helper binary `bin/app_loopback.exe` (`src/app_loopback.cpp`) managed by `app/audio_router.py`.
+- Employs WASAPI `GetNextPacketSize` packet loop with 20ms silence filler on timeout, achieving 99.9% exact 1:1 real-time packet delivery.
 - Captures audio for each stream's specific Firefox process tree.
 - Audio packets (raw 16-bit PCM 48kHz stereo) are piped directly into FFmpeg `stdin` (`-f s16le -ac 2 -ar 48000 -i pipe:0`).
 - Each web stream receives strictly its own isolated audio with zero crosstalk and zero external speaker playback.
