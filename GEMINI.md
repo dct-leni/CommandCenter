@@ -77,10 +77,13 @@ Connect VLC or RTMP client to `rtmp://127.0.0.1:1935/stream`.
   * **Relay (`mode="relay"`)**: NVENC preset `p5`, VBR 2.8M, `temporal-aq 1`, GOP `60`.
   * **Web (`mode="web"`)**: GDIGrab window capture requires single-pass CBR (`-rc cbr -b:v 2.8M -maxrate 2.8M`) WITHOUT AQ or lookahead buffers to prevent GDI frame queue stalls. Audio uses `192k` AAC with `adelay=350|350`.
 
-### 4. Single Active Web Stream Limit (VB-Audio Hardware Constraint)
-* **Rule**: Only ONE web stream (`stream_type == "web"`) can run at a time across the entire application.
-* **Why**: Windows WASAPI per-app routing directs `firefox.exe` to a single `CABLE Input` VB-Audio virtual cable device. Multiple concurrent web streams would mix audio onto the same device.
-* **Enforcement**: `live_relay_manager.start_stream()` blocks starting a second web stream with HTTP 400 Bad Request error.
+### 4. Multi-Web-Stream Audio Isolation (PROCESS_LOOPBACK Architecture)
+* **Rule**: Multiple web streams (`stream_type == "web"`) run concurrently without audio crossover or speaker leakage.
+* **Architecture**:
+  * CommandCenter activates native Windows `PROCESS_LOOPBACK` (`IAudioClient` with `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK` and `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE`) for each specific `firefox.exe` process tree.
+  * Captures 16-bit 48kHz Stereo PCM buffers directly via dedicated lightweight tool `bin/app_loopback.exe` (compiled from `src/app_loopback.cpp`) and feeds directly into FFmpeg `stdin` (`-f s16le -ac 2 -ar 48000 -i pipe:0`).
+  * 100% process-isolated: Zero virtual cables (`VB-Audio Virtual Cable` dropped), zero external routing tools (`SoundVolumeView.exe` dropped).
+  * Keeps desktop speakers 100% silent while isolating each stream's audio completely.
 
 ### 5. Idempotent Config Saving
 * **Rule**: Compare `old_data == data` before writing `config.yml` to prevent Uvicorn reload loops.
@@ -96,43 +99,41 @@ Connect VLC or RTMP client to `rtmp://127.0.0.1:1935/stream`.
 ### 8. Public Source Protection — No Hardcoded IPs/Domains
 * **Rule**: NEVER hardcode real IPs, domains, or credentials in source code. Use `config.yml` + generic placeholders (`https://example.com/stream`, `rtmp://example.com/live`).
 
-### 9. Web Stream Capture, HWND Lock & Audio Routing
+### 9. Web Stream Capture, HWND Lock & Browser Environment
 * **Direct HWND Capture**: GDIGrab uses `-i hwnd=0x{hwnd:x}` targeting the top-level browser HWND. Avoids `-i title=...` which fails when pages dynamically update titles or contain Unicode emojis (`🥶🇩🇪`).
-* **Process Tree Termination**: Call `taskkill /F /T /PID <proc_pid>` unconditionally at the start of `stop_stream()` to terminate all background browser worker processes cleanly.
-* **In-Memory Audio Routing**: Embed C# `PolicyConfig` COM code in `app/audio_router.py` via PowerShell stdin (`Add-Type`). Routes default system render output to `CABLE Input` (physical speakers silent) while FFmpeg DirectShow captures from `CABLE Output`.
-* **Chromium Flags**: `--disable-gpu --disable-gpu-compositing --disable-direct-composition --block-new-web-contents --disable-notifications`.
-* **FFmpeg Filter**: `-vf "crop=iw:ih-38:0:38,format=yuv420p"` crops OS titlebar.
+* **Process Tree Termination**: Call `psutil` or `taskkill /F /T /PID <proc_pid>` to terminate all background browser worker processes cleanly on stop.
+* **Portable Firefox Policies, Extension & State-Aware Hover UI**:
+  * Enterprise `policies.json` bypasses Terms of Use / First Run onboarding.
+  * MV2 Extension (`content.js`) dynamically detects whether a video is active vs general browsing/login:
+    * **Browsing / Login Mode**: All website menus, headers, category navigations, and login forms remain 100% visible and interactive.
+    * **Video Playback Mode**: Distracting website headers, footers, and sidebars smoothly fade out (`opacity: 0`).
+    * **Hover / Mouse Movement**: When the mouse moves or hovers, headers, footers, and player controls smoothly fade in (`opacity: 1`), then fade out after 2.5s idle.
+    * **Floating Top Bar (`#cc-floating-nav`)**: Injects Back (`◀`), Forward (`▶`), Reload (`⟳`), and Home (`🏠`) controls at the top of the browser window on hover.
+  * UserChrome / UserContent CSS cleanly integrates full-window player scaling without OS toolbar clutter.
+* **FFmpeg Titlebar Filter**: `-vf "crop=iw:ih-38:0:38,format=yuv420p"` crops OS titlebar.
 
-### 10. Web Stream Firefox Audio Routing — FAILED Approaches (DO NOT RETRY)
+### 10. Web Stream Audio & COM Guardrails — FAILED Approaches (DO NOT RETRY)
 
 These were tested and confirmed non-working. Do not suggest or re-implement them.
 
 | Approach | Why it fails |
 |---|---|
-| `SoundVolumeView.exe /SetAppDefault firefox.exe all "CABLE Input"` | Silently returns exit 0 but Windows Volume Mixer still shows "Default". No effect. |
-| `SoundVolumeView.exe /SetAppDefault firefox.exe all "CABLE Input (VB-Audio Virtual Cable)"` | Same result — silently fails on this Windows 11 build. |
-| `SoundVolumeView.exe /SetAppDefault firefox.exe all <device-guid>` | Same result — no routing applied. |
-| `NirCmd setappdefault firefox.exe <role> "CABLE Input"` | Same as SoundVolumeView — no actual routing applied. |
-| Global system default switch via IPolicyConfig COM (C# via PowerShell) | Returns `0x80040154 Class not registered` on 64-bit Windows 11 Build 22631+. |
-| `media.cubeb.output_device` Firefox pref with GUID (`{0.0.0.00000000}.{...}`) | Tried — audio still comes from system speakers, not VB-Cable. GUID format may be wrong for cubeb. |
-| `pycaw` in `run_in_executor` thread without `comtypes.CoInitialize()` | COM not initialized — returns no devices. Fix: wrap all pycaw calls with `_com_init()`/`_com_uninit()`. |
-| Calling `route_to_vb_cable()` BEFORE `launch_browser()` | No firefox.exe WASAPI session exists yet — routing has nothing to attach to. Must call AFTER HWND lock. |
+| DirectShow global capture from `CABLE Output` for multiple web streams | Mixes all audio playing to `CABLE Input` together; destroys multi-stream isolation. |
+| Calling `ActivateAudioInterface` flat C export in `mmdevapi.dll` | Entry point does not exist in `mmdevapi.dll` (only `ActivateAudioInterfaceAsync` is exported). |
+| `comtypes.CoInitialize()` (default STA) on asyncio event loop or background threads without a message pump | Causes cross-apartment WASAPI calls to deadlock the entire Uvicorn server. **Fix**: Always use `comtypes.CoInitializeEx(comtypes.COINIT_MULTITHREADED)` (MTA). |
 | `CREATE_NO_WINDOW` on Firefox `subprocess.Popen` | Hides the window entirely → Firefox suspends all media. Never use on Firefox. Use `DETACHED_PROCESS` instead. |
 | `SW_SHOWNOACTIVATE (4)` to un-minimize window | Does NOT restore minimized windows. Need `IsIconic()` check + `SW_RESTORE (9)`. |
-| `dom.suspend_inactive.enabled: false` pref | Partially helps but Firefox still suspends GDI rendering when minimized to taskbar. Not sufficient alone. |
+| `dom.suspend_inactive.enabled: false` pref alone | Partially helps but Firefox still suspends GDI rendering when minimized to taskbar. Not sufficient alone without un-minimizing. |
 
-### 11. Web Stream Audio — WORKING Approach (DRM Compatible)
+### 11. Web Stream Audio — WORKING Approach (DRM Compatible & Multi-Stream Isolated)
 
-**VB-Cable device IDs (verified on this machine):**
-- `CABLE Input (VB-Audio Virtual Cable)` → `{0.0.0.00000000}.{f99d9ef2-c459-4d24-9adb-4c2b9238b3df}`  
-- `CABLE Output (VB-Audio Virtual Cable)` → `{0.0.1.00000000}.{74be92d7-a80f-4b2a-83b2-47b99fc11212}`
-
-**Working DRM-Compatible Audio Routing Strategy:**
-Uses portable `SoundVolumeView.exe /SetDefault "{0.0.0.00000000}.{f99d9ef2-c459-4d24-9adb-4c2b9238b3df}" <role>` in `app/audio_router.py`.
-- On `launch_browser()`, switches system default render device to `CABLE Input`.
-- Works for ALL browsers, HTML5 players, and DRM-protected media streams (Widevine, EME, DRM videos).
-- On `close_browser()`, restores original system default speakers automatically.
-- FFmpeg captures audio from DirectShow device `"CABLE Output (VB-Audio Virtual Cable)"`.
+**Working DRM-Compatible Audio Architecture:**
+Uses native Windows `PROCESS_LOOPBACK` capture (`IAudioClient` with `AUDIOCLIENT_ACTIVATION_PARAMS` where `ActivationType = 1` and `ProcessLoopbackMode = 0` / Include Target Process Tree).
+- Implemented via standalone helper binary `bin/app_loopback.exe` (`src/app_loopback.cpp`) managed by `app/audio_router.py`.
+- Captures audio for each stream's specific Firefox process tree.
+- Audio packets (raw 16-bit PCM 48kHz stereo) are piped directly into FFmpeg `stdin` (`-f s16le -ac 2 -ar 48000 -i pipe:0`).
+- Each web stream receives strictly its own isolated audio with zero crosstalk and zero external speaker playback.
+- No virtual cables (`VB-Cable`) and no external tools (`SoundVolumeView.exe`) required.
 
 ### 12. Web Stream Video Capture & Smoothness — WHAT MADE THINGS WORSE vs BETTER
 
@@ -204,16 +205,26 @@ When `-use_wallclock_as_timestamps 1` was specified on BOTH Input 0 (GDIGrab) an
   3. `close_browser()` retrieves the HWND, calls `GetWindowThreadProcessId(hwnd)` to get the actual `firefox.exe` PID, then `taskkill /F /T /PID <firefox_pid>`.
 * **Fallback**: If HWND is `None`, `close_browser()` falls back to killing by launcher PID — but launcher may have already exited. Always ensure HWND capture succeeds.
 
-### 16. Audio Restore Thread Safety
-
-* **Rule**: `restore_audio_routing()` calls `subprocess.run()` to invoke `SoundVolumeView.exe /SetAppDefault` — each call MUST have `timeout=5`.
-* **Why**: `restore_audio_routing()` is called from `close_browser()` which runs via `asyncio.to_thread()`. If SVV hangs (COM contention, device busy), the thread pool thread blocks → `to_thread()` never returns → HTTP handler hangs.
-* **Implementation**: Wraps 3 `subprocess.run()` calls in `_async_restore()` daemon thread. Each call uses `timeout=5`, catches `TimeoutExpired`.
+### 16. Pure Python Audio Capture & Teardown
+* **Rule**: Audio capture uses pure Python WASAPI `PROCESS_LOOPBACK` worker threads (`ProcessLoopbackAudioCapture`).
+* **Teardown**: On stream stop, `thread.stop()` signals `kernel32.SetEvent` to wake up the thread immediately and close COM handles and OS pipe descriptors cleanly. No external audio router subprocesses are invoked.
 
 ### 17. Async Safety — No `time.sleep()` in Coroutines
 
 * **Rule**: NEVER call `time.sleep()` inside async coroutines. Use `await asyncio.sleep()`.
 * **Why**: `time.sleep()` blocks the entire event loop thread. `await asyncio.sleep()` yields control.
 * **Affected**: Window-restore block in `_auto_restart_loop` (`live_relay.py`) — uses `await asyncio.sleep(0.3)`.
+
+### 18. Windows COM Apartment Model & Deadlock Prevention (MANDATORY)
+
+* **Rule**: ALWAYS initialize COM on worker threads and background tasks with `comtypes.CoInitializeEx(comtypes.COINIT_MULTITHREADED)` (MTA).
+* **Why**: Python's `comtypes.CoInitialize()` defaults to Single-Threaded Apartment (STA). The asyncio event loop and thread-pool workers do not run a Windows message pump (`GetMessage`/`DispatchMessage`). Calling cross-apartment WASAPI COM methods on an STA thread without a message pump deadlocks the entire Uvicorn process.
+* **Solution**: Wrap all COM device queries with `_com_init()` / `_com_uninit()` using `COINIT_MULTITHREADED` and run them via `asyncio.to_thread` / `run_in_executor`.
+
+### 19. Background Task Error Trapping
+
+* **Rule**: NEVER spawn fire-and-forget `asyncio.create_task()` without exception callbacks.
+* **Why**: Unhandled exceptions in background asyncio tasks fail silently or crash the event loop.
+* **Solution**: Use `safe_create_task(coro, name=...)` in `app/main.py` which automatically logs tracebacks upon task failure.
 
 

@@ -338,6 +338,9 @@ async function scanConverterFolder(path) {
 
 function renderConverterFiles() {
     const container = document.getElementById('converter-file-list');
+    const hasDone = state.converterFiles.some(f => f.status === 'done');
+    const clearBtn = document.getElementById('clear-done-btn');
+    if (clearBtn) clearBtn.style.display = hasDone ? 'inline-flex' : 'none';
 
     if (state.converterFiles.length === 0) {
         container.innerHTML = `
@@ -356,6 +359,7 @@ function renderConverterFiles() {
         switch (file.status) {
             case 'done':
                 statusHtml = '<span class="status-badge done">Done</span>';
+                actionHtml = `<button class="btn btn-sm btn-secondary" onclick="openVideoPreview('/api/converter/file/${encodeURIComponent(file.ts_filename || file.filename)}', '${escapeAttr(file.filename)}')" title="Preview Converted Video"><i class="fa-solid fa-eye"></i></button>`;
                 break;
             case 'converting':
                 const pct = Math.round(file.progress * 100);
@@ -401,7 +405,7 @@ function renderConverterFiles() {
                     <div class="file-meta">${metaDetails}</div>
                     ${notesHtml}
                 </div>
-                <div class="file-actions">
+                <div class="file-actions" style="display:flex; align-items:center; gap:6px;">
                     ${statusHtml}
                     ${actionHtml}
                 </div>
@@ -1613,9 +1617,9 @@ function renderLiveStreams() {
         const isWeb = item.stream_type === 'web';
         let statusBadge = '';
         if (item.status === 'running') {
-            statusBadge = `<span class="livestream-status running"><i class="fa-solid fa-play"></i> Watching</span>`;
+            statusBadge = `<span class="livestream-status running"><i class="fa-solid fa-play"></i> Streaming</span>`;
         } else if (item.status === 'listening') {
-            statusBadge = `<span class="livestream-status listening"><i class="fa-solid fa-spinner"></i> Sleeping</span>`;
+            statusBadge = `<span class="livestream-status listening"><i class="fa-solid fa-spinner"></i> Listening</span>`;
         } else if (item.status === 'browser_ready') {
             statusBadge = `<span class="livestream-status listening" style="background: rgba(0, 240, 255, 0.15); color: var(--accent); border-color: rgba(0, 240, 255, 0.3);"><i class="fa-solid fa-window-restore"></i> Browser Ready</span>`;
         } else if (item.status === 'error') {
@@ -1623,6 +1627,10 @@ function renderLiveStreams() {
         } else {
             statusBadge = `<span class="livestream-status stopped"><i class="fa-solid fa-stop"></i> Stopped</span>`;
         }
+
+        const audioBadge = (isRunning && isWeb)
+            ? `<span class="audio-badge" title="Isolated Process Audio Capture (Speakers Silent)"><i class="fa-solid fa-volume-high pulse-icon"></i> Isolated Audio</span>`
+            : '';
 
         let vpnBadge = '';
         const useVpn = item.use_vpn ?? (item.vpn_mode && item.vpn_mode !== 'none');
@@ -1641,27 +1649,31 @@ function renderLiveStreams() {
 
         const thumbSrc = item.thumbnail_url || `/api/streamer/live_stream/${item.id}/thumbnail?v=0`;
         const thumbHtml = getThumbHtml(thumbSrc, item.has_thumbnail, 'livestream-thumb', 'fa-tower-broadcast');
+        const streamHttpUrl = `http://${window.location.hostname || '127.0.0.1'}:${item.port}/`;
 
         let actionsHtml = '';
         if (isWeb) {
             if (isRunning) {
                 actionsHtml = `
-                    <button class="btn btn-danger" onclick="stopLiveStream('${item.id}')" title="Stop Stream & Close Browser" style="padding: 4px 10px; font-size: 12px; height: 28px;">
+                    <button class="btn btn-secondary btn-sm" onclick="openVideoPreview('${streamHttpUrl}', '${escapeAttr(item.name)}')" title="Preview Stream in In-App Player">
+                        <i class="fa-solid fa-eye"></i> Preview
+                    </button>
+                    <button class="btn btn-danger btn-sm" onclick="stopLiveStream('${item.id}')" title="Stop Stream & Close Browser">
                         <i class="fa-solid fa-stop"></i> Stop
                     </button>
                 `;
             } else if (item.status === 'browser_ready') {
                 actionsHtml = `
-                    <button class="btn btn-emerald" onclick="startLiveStream('${item.id}')" title="Start Streaming Captured Window" style="padding: 4px 10px; font-size: 12px; height: 28px;">
+                    <button class="btn btn-emerald btn-sm" onclick="startLiveStream('${item.id}')" title="Start Streaming Captured Window">
                         <i class="fa-solid fa-play"></i> Stream
                     </button>
-                    <button class="btn btn-danger" onclick="stopLiveStream('${item.id}')" title="Close Browser Window" style="padding: 4px 10px; font-size: 12px; height: 28px;">
+                    <button class="btn btn-danger btn-sm" onclick="stopLiveStream('${item.id}')" title="Close Browser Window">
                         <i class="fa-solid fa-stop"></i> Stop
                     </button>
                 `;
             } else {
                 actionsHtml = `
-                    <button class="btn btn-secondary" onclick="startWebStreamBrowser('${item.id}')" title="Launch Browser Window" style="padding: 4px 10px; font-size: 12px; height: 28px;">
+                    <button class="btn btn-secondary btn-sm" onclick="startWebStreamBrowser('${item.id}')" title="Launch Browser Window">
                         <i class="fa-solid fa-window-restore"></i> Start Browser
                     </button>
                 `;
@@ -1669,13 +1681,16 @@ function renderLiveStreams() {
         } else {
             if (isRunning) {
                 actionsHtml = `
-                    <button class="btn btn-danger" onclick="stopLiveStream('${item.id}')" title="Stop Stream" style="padding: 4px 10px; font-size: 12px; height: 28px;">
+                    <button class="btn btn-secondary btn-sm" onclick="openVideoPreview('${streamHttpUrl}', '${escapeAttr(item.name)}')" title="Preview Stream in In-App Player">
+                        <i class="fa-solid fa-eye"></i> Preview
+                    </button>
+                    <button class="btn btn-danger btn-sm" onclick="stopLiveStream('${item.id}')" title="Stop Stream">
                         <i class="fa-solid fa-stop"></i> Stop
                     </button>
                 `;
             } else {
                 actionsHtml = `
-                    <button class="btn btn-emerald" onclick="startLiveStream('${item.id}')" title="Start Stream" style="padding: 4px 10px; font-size: 12px; height: 28px;">
+                    <button class="btn btn-emerald btn-sm" onclick="startLiveStream('${item.id}')" title="Start Stream">
                         <i class="fa-solid fa-play"></i> Start
                     </button>
                 `;
@@ -1688,14 +1703,18 @@ function renderLiveStreams() {
                     ${thumbHtml}
                     <span class="folder-card-title" style="margin-left: 5px;">${escapeAttr(item.name)}</span>
                     ${statusBadge}
+                    ${audioBadge}
                     ${vpnBadge}
-                    <span class="folder-date-range" style="font-family: 'JetBrains Mono', monospace; font-size: 12px; margin-left: auto;">Port: ${item.port}</span>
-                    <span class="folder-file-count" style="max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 20px;" title="${escapeAttr(item.url)}">${escapeAttr(item.url)}</span>
+                    <span class="folder-date-range" style="font-family: 'JetBrains Mono', monospace; font-size: 12px; margin-left: auto; display: flex; align-items: center; gap: 4px;">
+                        Port: ${item.port}
+                        <i class="fa-solid fa-copy copy-btn-icon" onclick="copyToClipboard('${streamHttpUrl}')" title="Copy Stream URL (${streamHttpUrl})" style="margin-left: 4px;"></i>
+                    </span>
+                    <span class="folder-file-count" style="max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 16px;" title="${escapeAttr(item.url)}">${escapeAttr(item.url)}</span>
                     
-                    <div class="livestream-actions" style="margin-left: 20px; display: flex; align-items: center; gap: 8px;">
+                    <div class="livestream-actions" style="margin-left: 16px; display: flex; align-items: center; gap: 6px;">
                         ${actionsHtml}
-                        <button class="folder-edit-btn" onclick="openEditLiveStreamModal('${item.id}')" title="Edit Stream" style="height: 28px; width: 28px; display: flex; align-items: center; justify-content: center;"><i class="fa-solid fa-pen"></i></button>
-                        <button class="folder-delete-btn" onclick="deleteLiveStream('${item.id}')" title="Delete Stream" style="height: 28px; width: 28px; display: flex; align-items: center; justify-content: center;"><i class="fa-solid fa-trash"></i></button>
+                        <button class="folder-edit-btn" onclick="openEditLiveStreamModal('${item.id}')" title="Edit Stream" style="height: 26px; width: 26px; display: flex; align-items: center; justify-content: center;"><i class="fa-solid fa-pen"></i></button>
+                        <button class="folder-delete-btn" onclick="deleteLiveStream('${item.id}')" title="Delete Stream" style="height: 26px; width: 26px; display: flex; align-items: center; justify-content: center;"><i class="fa-solid fa-trash"></i></button>
                     </div>
                 </div>
             </div>
@@ -1876,6 +1895,88 @@ async function submitWebStream() {
     }
 }
 
+let _activeMpegtsPlayer = null;
+
+function openVideoPreview(url, title = 'Stream Preview') {
+    const modal = document.getElementById('video-preview-modal');
+    const player = document.getElementById('preview-video-player');
+    if (!modal || !player) return;
+
+    closeAllModals();
+
+    if (_activeMpegtsPlayer) {
+        try {
+            _activeMpegtsPlayer.pause();
+            _activeMpegtsPlayer.unload();
+            _activeMpegtsPlayer.detachMediaElement();
+            _activeMpegtsPlayer.destroy();
+        } catch (e) {}
+        _activeMpegtsPlayer = null;
+    }
+
+    const isTsStream = url.includes(':19') || url.endsWith('.ts') || url.includes('/stream');
+    if (window.mpegts && mpegts.isSupported() && isTsStream) {
+        try {
+            _activeMpegtsPlayer = mpegts.createPlayer({
+                type: 'mpegts',
+                isLive: true,
+                url: url
+            }, {
+                enableStashBuffer: false,
+                lazyLoad: false,
+                lazyLoadMaxDuration: 0.2,
+                liveBufferLatencyChasing: true,
+                liveBufferLatencyMaxLatency: 1.5,
+                liveBufferLatencyMinRemain: 0.3,
+                autoCleanupSourceBuffer: true,
+                autoCleanupMaxBackwardDuration: 15,
+                autoCleanupMinBackwardDuration: 5
+            });
+            _activeMpegtsPlayer.attachMediaElement(player);
+            _activeMpegtsPlayer.load();
+            _activeMpegtsPlayer.play().catch(err => {
+                console.warn('Playback error:', err);
+            });
+        } catch (e) {
+            console.warn('mpegts.js init error, falling back to native player:', e);
+            player.src = url;
+            player.load();
+            player.play().catch(() => {});
+        }
+    } else {
+        player.src = url;
+        player.load();
+        player.play().catch(() => {});
+    }
+
+    modal.style.display = 'flex';
+}
+
+function closeVideoPreview() {
+    const modal = document.getElementById('video-preview-modal');
+    const player = document.getElementById('preview-video-player');
+    if (_activeMpegtsPlayer) {
+        try {
+            _activeMpegtsPlayer.pause();
+            _activeMpegtsPlayer.unload();
+            _activeMpegtsPlayer.detachMediaElement();
+            _activeMpegtsPlayer.destroy();
+        } catch (e) {}
+        _activeMpegtsPlayer = null;
+    }
+    if (player) {
+        player.pause();
+        player.src = '';
+    }
+    if (modal) modal.style.display = 'none';
+}
+
+function clearDoneConverterFiles() {
+    state.converterFiles = state.converterFiles.filter(f => f.status !== 'done');
+    renderConverterFiles();
+    showToast('Cleared finished files from list', 'info');
+}
+
 window.onVpnModeChange = onVpnModeChange;
 window.onVpnFileSelected = onVpnFileSelected;
 window.openGlobalVpnModal = openGlobalVpnModal;
@@ -1893,3 +1994,7 @@ window.startWebStreamBrowser = startWebStreamBrowser;
 window.startLiveStream = startLiveStream;
 window.stopLiveStream = stopLiveStream;
 window.deleteLiveStream = deleteLiveStream;
+window.openVideoPreview = openVideoPreview;
+window.closeVideoPreview = closeVideoPreview;
+window.clearDoneConverterFiles = clearDoneConverterFiles;
+window.copyToClipboard = copyToClipboard;

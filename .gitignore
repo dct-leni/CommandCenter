@@ -4,6 +4,7 @@ __pycache__/
 
 # Binaries and downloaded dependencies
 bin/*
+!bin/app_loopback.exe
 !bin/.gitkeep
 mediamtx_*
 

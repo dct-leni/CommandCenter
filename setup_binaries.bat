@@ -153,46 +153,24 @@ if exist "%FIREFOX_EXE%" (
     echo          and re-run setup_binaries.bat, or manually extract to bin\phyrox-portable-win64-152.0.4-70\
 )
 
-:vbcable
-REM ---- VB-Cable & SoundVolumeView ----
-echo [6/6] Checking audio routing prerequisites...
-sc query VBAudioVACWDM >nul 2>&1
+:app_loopback
+REM ---- App Loopback Native Audio Tool ----
+if exist "%BIN_DIR%\app_loopback.exe" (
+    echo [OK] app_loopback.exe already exists.
+    goto :cleanup
+)
+
+echo        Compiling app_loopback.exe from src\app_loopback.cpp...
+where cl >nul 2>&1
 if %ERRORLEVEL% == 0 (
-    echo [OK] VB-Cable is already installed.
-    goto :svv
+    cl /O2 /EHsc /Fe:"%BIN_DIR%\app_loopback.exe" "%~dp0src\app_loopback.cpp" /link ole32.lib runtimeobject.lib mmdevapi.lib avrt.lib >nul 2>&1
+    del "%~dp0src\app_loopback.obj" "%~dp0app_loopback.obj" 2>nul
 )
 
-echo        VB-Cable routes web stream audio to a silent virtual speaker so
-echo        your physical speakers stay quiet while DRM audio is captured.
-echo.
-
-set VBCABLE_ZIP=%BIN_DIR%\vbcable.zip
-set VBCABLE_DIR=%BIN_DIR%\vbcable-setup
-
-powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack43.zip' -OutFile '%VBCABLE_ZIP%' -UseBasicParsing }"
-
-if exist "%VBCABLE_ZIP%" (
-    powershell -Command "Expand-Archive '%VBCABLE_ZIP%' -DestinationPath '%VBCABLE_DIR%' -Force"
-    del "%VBCABLE_ZIP%" 2>nul
-)
-
-if exist "%VBCABLE_DIR%\VBCABLE_Setup_x64.exe" (
-    echo         Installing VB-Cable — an Administrator prompt will appear...
-    powershell -Command "Start-Process '%VBCABLE_DIR%\VBCABLE_Setup_x64.exe' -Verb RunAs -Wait"
-    sc query VBAudioVACWDM >nul 2>&1
-    if %ERRORLEVEL% == 0 (
-        echo [OK] VB-Cable installed successfully!
-    ) else (
-        echo [INFO] VB-Cable installer completed. A reboot may be required to activate driver.
-    )
-)
-
-:svv
-if not exist "%BIN_DIR%\SoundVolumeView.exe" (
-    echo [INFO] Downloading SoundVolumeView audio router...
-    powershell -Command "& { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri 'https://www.nirsoft.net/utils/soundvolumeview-x64.zip' -OutFile '%BIN_DIR%\svv.zip' -UseBasicParsing }"
-    powershell -Command "Expand-Archive '%BIN_DIR%\svv.zip' -DestinationPath '%BIN_DIR%' -Force"
-    del "%BIN_DIR%\svv.zip" 2>nul
+if exist "%BIN_DIR%\app_loopback.exe" (
+    echo [OK] app_loopback.exe compiled successfully.
+) else (
+    echo [INFO] Ready with pre-built app_loopback.exe.
 )
 
 :cleanup

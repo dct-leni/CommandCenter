@@ -148,7 +148,7 @@ class LiveStreamManager:
             url_str = item.get("url", "").lower()
             stype = item.get("stream_type", "http")
             if stype != "web":
-                if item.get("web_url") or any(kw in url_str for kw in ("wtfismyip", "exxen", "netflix", "youtube.com/watch")):
+                if item.get("web_url") or any(kw in url_str for kw in ("wtfismyip", "netflix", "youtube.com/watch")):
                     stype = "web"
 
             d["use_vpn"] = bool(use_vpn)
@@ -223,18 +223,8 @@ class LiveStreamManager:
             raise ValueError(f"Live stream {stream_id} not found in configuration")
 
         url_str = item.get("url", "").lower()
-        is_web = item.get("stream_type") == "web" or bool(item.get("web_url")) or any(kw in url_str for kw in ("wtfismyip", "exxen", "netflix", "youtube.com/watch"))
+        is_web = item.get("stream_type") == "web" or bool(item.get("web_url")) or any(kw in url_str for kw in ("wtfismyip", "netflix", "youtube.com/watch"))
         current_relay = self.active_relays.get(stream_id)
-
-        # Enforce Single Active Web Stream Limit (VB-Audio hardware limitation)
-        if is_web:
-            for active_id, active_r in self.active_relays.items():
-                if active_id != stream_id and active_r.status in ("running", "listening", "browser_ready"):
-                    active_item = next((x for x in cfg.streamer.live_streams if x.get("id") == active_id), {})
-                    active_url = active_item.get("url", "").lower()
-                    active_is_web = active_item.get("stream_type") == "web" or bool(active_item.get("web_url")) or any(kw in active_url for kw in ("wtfismyip", "exxen", "netflix", "youtube.com/watch"))
-                    if active_is_web:
-                        raise ValueError(f"Only ONE web stream can run at a time (VB-Audio limit). Please stop active web stream '{active_r.name}' first.")
 
         # Stage 1 for Web Streams: If browser isn't opened yet (or status is stopped), open default browser first!
         if is_web:
@@ -331,6 +321,15 @@ class LiveStreamManager:
                     pass
                 return
 
+            # Enable TCP_NODELAY on the client connection
+            try:
+                sock = writer.get_extra_info("socket")
+                if sock is not None:
+                    import socket
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except Exception:
+                pass
+
             # Low-latency queue size (128 chunks) prevents burst packet dumps that cause playback stacking
             queue = asyncio.Queue(maxsize=128)
             relay.clients[queue] = writer
@@ -351,12 +350,10 @@ class LiveStreamManager:
                             except asyncio.QueueEmpty:
                                 break
 
-                        # Only call drain() when transport buffer > 64KB to prevent 15-30ms TCP pause stalls
                         try:
-                            if writer.transport and writer.transport.get_write_buffer_size() > 65536:
-                                await writer.drain()
+                            await writer.drain()
                         except Exception:
-                            pass
+                            break
                 except Exception:
                     pass
                 finally:
@@ -371,8 +368,11 @@ class LiveStreamManager:
             write_task = asyncio.create_task(client_write_loop())
             
             try:
-                # Keep socket alive until client disconnects (read returns EOF)
-                await reader.read()
+                # Wait until client socket is closed or write_task finishes
+                while not write_task.done():
+                    chunk = await reader.read(4096)
+                    if not chunk:
+                        break
             except Exception:
                 pass
             finally:
@@ -453,6 +453,8 @@ class LiveStreamManager:
                 logger.error(f"Error terminating relay process {stream_id}: {e}")
 
         relay.process = None
+        from app.audio_router import stop_process_audio_capture
+        stop_process_audio_capture(stream_id)
         from app.vpn_manager import vpn_manager
         vpn_manager.stop_vpn_for_stream(stream_id)
         from app.web_stream import web_stream_manager
@@ -528,9 +530,6 @@ class LiveStreamManager:
         proxy_url = vpn_manager.get_proxy_url_for_stream(stream_item)
         is_web = stream_item.get("stream_type") == "web"
         from app.ffmpeg_setup import probe_source_codec, get_relay_params, get_best_encoder, get_relay_encoding_params, format_ffmpeg_headers
-        from app.audio_router import get_cable_device_ids
-        _, cable_output_device = await asyncio.get_event_loop().run_in_executor(None, get_cable_device_ids)
-        audio_dev = cable_output_device or "CABLE Output (VB-Audio Virtual Cable)"
         if is_web:
             from app.ffmpeg_setup import get_screen_capture_params
             encoder = get_best_encoder()
@@ -555,21 +554,35 @@ class LiveStreamManager:
 
                 cmd = [get_ffmpeg_path()]
 
+                target_pid = None
                 if is_web:
                     from app.web_stream import web_stream_manager
                     hwnd = await asyncio.get_event_loop().run_in_executor(
                         None, web_stream_manager.get_window_hwnd, relay.id, relay.name, relay.url
                     )
-                    gdi_video_args = []
-                    vf_filter = "format=yuv420p"
 
                     if hwnd:
                         input_target = f"hwnd=0x{hwnd:x}"
                         logger.info(f"Web stream '{relay.name}' GDIGrab targeting HWND: {input_target}")
+                        if os.name == "nt":
+                            try:
+                                import ctypes
+                                from ctypes import wintypes
+                                _dw_pid = wintypes.DWORD()
+                                ctypes.windll.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(_dw_pid))
+                                if _dw_pid.value:
+                                    target_pid = _dw_pid.value
+                            except Exception:
+                                pass
                     else:
                         raise RuntimeError(f"Firefox browser window not found for web stream '{relay.name}'. Please click 'Open Browser' first.")
 
-                    logger.info(f"Web stream '{relay.name}': GDIGrab window capture targeting '{input_target}' with audio='{audio_dev}'")
+                    if not target_pid:
+                        browser_proc = web_stream_manager.browser_processes.get(relay.id)
+                        if browser_proc and browser_proc.pid:
+                            target_pid = browser_proc.pid
+
+                    logger.info(f"Web stream '{relay.name}': GDIGrab targeting '{input_target}' with PID={target_pid} (Native Process Loopback)")
 
                     # Restore window if minimized
                     if hwnd:
@@ -590,11 +603,12 @@ class LiveStreamManager:
                         "-framerate", "30",
                         "-draw_mouse", "0",
                         "-i", input_target,
-                        # Audio: DirectShow capture from VB-Cable Output with 20ms low-latency buffer
+                        # Audio: Native PROCESS_LOOPBACK raw s16le PCM via pipe:0 (Input 1)
                         "-thread_queue_size", "1024",
-                        "-audio_buffer_size", "20",
-                        "-f", "dshow",
-                        "-i", f"audio={audio_dev}",
+                        "-f", "s16le",
+                        "-ac", "2",
+                        "-ar", "48000",
+                        "-i", "pipe:0",
                         "-map", "0:v:0",
                         "-map", "1:a:0",
                         "-vf", "crop=iw:ih-38:0:38,format=yuv420p",
@@ -680,17 +694,31 @@ class LiveStreamManager:
                     env["http_proxy"] = proxy_url
                     env["https_proxy"] = proxy_url
 
-                # Web streams use WASAPI loopback for audio — stdin is not needed
+                # Web streams use PROCESS_LOOPBACK raw PCM over native OS pipe:0
+                r_fd, w_fd = None, None
+                if is_web:
+                    r_fd, w_fd = os.pipe()
+
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
-                    stdin=subprocess.DEVNULL,
+                    stdin=r_fd if is_web else subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     limit=1024 * 1024,  # 1 MB — prevents LimitOverrunError on long FFmpeg lines
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                     env=env,
                 )
+                if is_web and r_fd is not None:
+                    try:
+                        os.close(r_fd)
+                    except Exception:
+                        pass
+
                 relay.process = process
+
+                if is_web and w_fd is not None:
+                    from app.audio_router import start_process_audio_capture
+                    start_process_audio_capture(relay.id, target_pid or 0, w_fd)
 
                 if relay.log_task and not relay.log_task.done():
                     relay.log_task.cancel()
@@ -709,6 +737,9 @@ class LiveStreamManager:
                 thumb_loop_task = asyncio.create_task(_periodic_thumb_task(relay.id, relay.port))
 
                 await process.wait()
+                if is_web:
+                    from app.audio_router import stop_process_audio_capture
+                    stop_process_audio_capture(relay.id)
                 if thumb_loop_task and not thumb_loop_task.done():
                     thumb_loop_task.cancel()
 
@@ -739,8 +770,14 @@ class LiveStreamManager:
                         await asyncio.sleep(1.0)
 
             except asyncio.CancelledError:
+                if is_web:
+                    from app.audio_router import stop_process_audio_capture
+                    stop_process_audio_capture(relay.id)
                 break
             except Exception as e:
+                if is_web:
+                    from app.audio_router import stop_process_audio_capture
+                    stop_process_audio_capture(relay.id)
                 logger.error(f"Relay loop error for {relay.name}: {e}")
                 relay.status = "error"
                 relay.error = str(e)

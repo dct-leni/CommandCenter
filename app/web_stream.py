@@ -34,16 +34,16 @@ BROWSER_PROFILES_DIR = _BASE_DIR / "temp" / "firefox_profiles"
 
 # Paths for portable Firefox binary candidates inside bin/
 _FIREFOX_CANDIDATES = [
-    # Phyrox-portable launcher (Portapps portable wrapper)
-    _BASE_DIR / "bin" / "firefox" / "phyrox-portable.exe",
-    _BASE_DIR / "bin" / "phyrox-portable-win64-152.0.4-70" / "phyrox-portable.exe",
-    _BASE_DIR / "bin" / "phyrox-portable.exe",
-    # Direct app binary fallbacks
+    # Direct app binaries (strict multi-process isolation via -no-remote -new-instance)
     _BASE_DIR / "bin" / "firefox" / "app" / "firefox.exe",
     _BASE_DIR / "bin" / "firefox" / "firefox.exe",
     _BASE_DIR / "bin" / "phyrox-portable-win64-152.0.4-70" / "app" / "firefox.exe",
     _BASE_DIR / "bin" / "firefox-win" / "firefox.exe",
     _BASE_DIR / "bin" / "firefox-win" / "app" / "firefox.exe",
+    # Phyrox-portable launcher fallbacks
+    _BASE_DIR / "bin" / "firefox" / "phyrox-portable.exe",
+    _BASE_DIR / "bin" / "phyrox-portable-win64-152.0.4-70" / "phyrox-portable.exe",
+    _BASE_DIR / "bin" / "phyrox-portable.exe",
 ]
 
 
@@ -248,37 +248,76 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         ]
     }
     content_js = r"""
-    Object.defineProperty(document, 'visibilityState', { get: () => 'visible' });
-    Object.defineProperty(document, 'hidden', { get: () => false });
-    window.addEventListener('visibilitychange', e => e.stopImmediatePropagation(), true);
+    (function() {
+        // 1. Override Page Visibility API (Bypasses auto-pause on background tabs / unfocused window)
+        try {
+            Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+            Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
+            window.addEventListener('visibilitychange', e => e.stopImmediatePropagation(), true);
+        } catch(e) {}
 
-    function hideHeaderAndFooter() {
-        const selectors = [
-            'header', 'nav', 'footer', 'aside', '#footer-id', '#header-id',
-            '[id*="footer"]', '[class*="footer"]', '[id*="Footer"]', '[class*="Footer"]',
-            '[id*="header"]', '[class*="header"]', '[id*="Header"]', '[class*="Header"]',
-            '[id*="nav"]', '[class*="nav"]', '[id*="Nav"]', '[class*="Nav"]',
-            '[class*="menu"]', '[class*="Menu"]'
-        ];
-        document.querySelectorAll(selectors.join(', ')).forEach(p => {
-            if (p) {
-                p.style.setProperty('opacity', '0', 'important');
-                p.style.setProperty('pointer-events', 'none', 'important');
-            }
-        });
-        
-        document.querySelectorAll('button, a').forEach(b => {
-            const txt = (b.textContent || '').trim().toLowerCase();
-            if (txt === 'continue' || txt === 'agree' || txt === 'accept' || txt === 'get started') {
-                if (document.body && (document.body.textContent.includes('Welcome to Firefox') || document.body.textContent.includes('Terms of Use'))) {
-                    try { b.click(); } catch(e) {}
+        // 2. Video Playback Detection with 4-second delay
+        let playSeconds = 0;
+        let idleTimer = null;
+
+        function checkVideo() {
+            const videos = Array.from(document.querySelectorAll('video'));
+            let isPlaying = false;
+
+            for (const v of videos) {
+                const rect = v.getBoundingClientRect();
+                if (rect.width > 200 && rect.height > 150 && !v.paused && !v.ended && v.readyState > 2) {
+                    isPlaying = true;
+                    break;
                 }
             }
-        });
-    }
 
-    hideHeaderAndFooter();
-    setInterval(hideHeaderAndFooter, 2000);
+            if (isPlaying) {
+                playSeconds += 1;
+            } else {
+                playSeconds = 0;
+            }
+
+            // Only auto-hide headers after 4 seconds of confirmed continuous playback
+            if (playSeconds >= 4 && document.body) {
+                document.body.classList.add('cc-hide-nav');
+            } else if (document.body) {
+                document.body.classList.remove('cc-hide-nav');
+            }
+        }
+
+        // 3. Mouse Activity: Reveal headers immediately on mouse movement
+        function handleUserActivity() {
+            if (document.body && document.body.classList.contains('cc-hide-nav')) {
+                document.body.classList.remove('cc-hide-nav');
+            }
+            if (idleTimer) clearTimeout(idleTimer);
+            idleTimer = setTimeout(() => {
+                if (playSeconds >= 4 && document.body) {
+                    document.body.classList.add('cc-hide-nav');
+                }
+            }, 3500);
+        }
+
+        window.addEventListener('mousemove', handleUserActivity, { passive: true });
+        window.addEventListener('mousedown', handleUserActivity, { passive: true });
+        window.addEventListener('keydown', handleUserActivity, { passive: true });
+
+        // 4. Auto-accept First Run / Onboarding Dialogs
+        function autoAcceptPrompts() {
+            document.querySelectorAll('button, a').forEach(b => {
+                const txt = (b.textContent || '').trim().toLowerCase();
+                if (txt === 'continue' || txt === 'agree' || txt === 'accept' || txt === 'get started') {
+                    if (document.body && (document.body.textContent.includes('Welcome to Firefox') || document.body.textContent.includes('Terms of Use'))) {
+                        try { b.click(); } catch(e) {}
+                    }
+                }
+            });
+        }
+
+        setInterval(checkVideo, 1000);
+        setInterval(autoAcceptPrompts, 2000);
+    })();
     """
     
     with zipfile.ZipFile(ext_path, 'w') as zf:
@@ -291,145 +330,91 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         # --- Media autoplay & audio sink selection always allowed ---
         'user_pref("media.autoplay.default", 0);',
         'user_pref("media.autoplay.blocking_policy", 0);',
-        'user_pref("media.navigator.permission.disabled", true);',
-        'user_pref("media.setsinkid.enabled", true);',
+        'user_pref("media.autoplay.allow-muted", true);',
+        'user_pref("media.autoplay.enabled.user-gestures-needed", false);',
+        'user_pref("permissions.default.autoplay-media", 1);',
 
-        # --- Keep media playing when Firefox is minimized / background / unfocused ---
-        'user_pref("media.block-autoplay-until-in-foreground", false);',
-        'user_pref("dom.suspend_inactive.enabled", false);',
-        'user_pref("media.block-play-during-focus-change", false);',
-        'user_pref("dom.webnotifications.enabled", false);',
-        'user_pref("browser.tabs.remote.force-enable", false);',
-        'user_pref("dom.disable_window_move_resize", true);',
-        
-        # --- Prevent web players from triggering OS full-screen (breaks GDIGrab window capture bounds) ---
-        'user_pref("full-screen-api.enabled", false);',
-
-        # --- HTML5 Video Read-ahead Buffer (prevents 1-second network fetch pauses) ---
-        'user_pref("media.cache_readahead_limit", 7200);',
-        'user_pref("media.cache_resume_threshold", 3600);',
-
-        # --- Enable Extensions & userChrome/userContent.css stylesheet ---
-        'user_pref("extensions.autoDisableScopes", 0);',
-        'user_pref("extensions.enabledScopes", 15);',
-        'user_pref("xpinstall.signatures.required", false);',
-        'user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);',
-
-        # --- Skip Terms of Use / first-run flow entirely ---
+        # --- Disable First Run / Welcome / Onboarding Pages ---
+        'user_pref("browser.aboutwelcome.enabled", false);',
+        'user_pref("browser.startup.homepage_override.mstone", "ignore");',
+        'user_pref("startup.homepage_welcome_url", "");',
+        'user_pref("startup.homepage_welcome_url.additional", "");',
+        'user_pref("browser.onboarding.enabled", false);',
+        'user_pref("browser.onboarding.hidden", true);',
+        'user_pref("browser.onboarding.notification.finished", true);',
+        'user_pref("browser.uitour.enabled", false);',
+        'user_pref("datareporting.policy.dataSubmissionPolicyAcceptedVersion", 999);',
+        'user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification", true);',
+        'user_pref("datareporting.policy.firstRunURL", "");',
         'user_pref("browser.rights.3.shown", true);',
         'user_pref("browser.rights.override", "show");',
         'user_pref("browser.rights.silence", true);',
         'user_pref("browser.tos.accepted", true);',
         'user_pref("browser.tos.shown", true);',
-        'user_pref("browser.onboarding.enabled", false);',
-        'user_pref("browser.onboarding.hidden", true);',
-        'user_pref("privacy.privacyState.migration", 2);',
-        'user_pref("messaging-system.rcc.enabled", false);',
-        'user_pref("browser.messaging-system.whatsNewPanel.enabled", false);',
-        'user_pref("browser.newtabpage.activity-stream.asrouter.userprefs.cfr.addons", false);',
-        'user_pref("browser.newtabpage.activity-stream.asrouter.userprefs.cfr.features", false);',
-        'user_pref("trailhead.firstrun.branches", "nofirstrun-noop");',
-        'user_pref("browser.startup.homepage_override.mstone", "ignore");',
-        'user_pref("datareporting.policy.firstRunURL", "");',
-        'user_pref("datareporting.policy.currentPolicyVersion", 999);',
-        'user_pref("datareporting.policy.minimumPolicyVersion", 0);',
-        'user_pref("datareporting.policy.notifiedUserVersions", 999);',
-        'user_pref("datareporting.policy.dataSubmissionEnabled", false);',
-        'user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);',
-        'user_pref("toolkit.telemetry.enabled", false);',
-        'user_pref("toolkit.telemetry.unified", false);',
-        'user_pref("app.normandy.firstRun", false);',
-        'user_pref("app.normandy.enabled", false);',
-        'user_pref("app.shield.optoutstudies.enabled", false);',
-        'user_pref("browser.aboutwelcome.enabled", false);',
-        'user_pref("browser.startup.firstrunSkipsHomepage", true);',
-        'user_pref("browser.uitour.enabled", false);',
-        'user_pref("startup.homepage_welcome_url", "about:blank");',
-        'user_pref("startup.homepage_welcome_url.additional", "");',
-        'user_pref("browser.shell.checkDefaultBrowser", false);',
-        'user_pref("browser.startup.homepage", "about:blank");',
-        'user_pref("browser.newtabpage.enabled", false);',
-        'user_pref("browser.newtabpage.activity-stream.showSponsored", false);',
-        'user_pref("browser.newtabpage.activity-stream.showSponsoredTopSites", false);',
+        'user_pref("browser.newtabpage.introShown", true);',
+        'user_pref("trailhead.firstrun.didSeeAboutWelcome", true);',
 
-        # --- Block popups & force new links into active tab ---
-        'user_pref("dom.disable_open_during_load", true);',
-        'user_pref("privacy.popups.policy", 1);',
-        'user_pref("dom.popup_maximum", 0);',
-        'user_pref("browser.link.open_newwindow", 1);',
-        'user_pref("browser.link.open_newwindow.restriction", 0);',
+        # --- Enable unsigned extensions & stylesheet customization ---
+        'user_pref("xpinstall.signatures.required", false);',
+        'user_pref("extensions.experiments.enabled", true);',
+        'user_pref("toolkit.legacyUserProfileCustomizations.stylesheets", true);',
 
-        # --- Software WebRender GDI Compositor (Eliminates Hardware Fallback Loop) ---
+        # --- Optimize for background rendering and GDI capture ---
+        'user_pref("dom.suspend_inactive.enabled", false);',
+        'user_pref("dom.timeout.enable_budget_timer_throttling", false);',
+        'user_pref("widget.windows.window_occlusion_tracking.enabled", false);',
+        'user_pref("dom.ipc.processPriorityManager.backgroundUsesEcoQoS", false);',
+        'user_pref("network.http.throttle.enable", false);',
+        'user_pref("media.block-autoplay-until-in-foreground", false);',
+
+        # --- Force Software WebRender (Direct GDI window compatibility) ---
         'user_pref("gfx.webrender.all", false);',
         'user_pref("gfx.webrender.software", true);',
-        'user_pref("gfx.webrender.software.opengl", false);',
-        'user_pref("media.hardware-video-decoding.enabled", true);',
         'user_pref("layers.acceleration.disabled", true);',
-        'user_pref("gfx.direct2d.disabled", true);',
 
-        # --- Low-latency HTML5 video decoding & render sync ---
-        'user_pref("media.hardware-video-decoding.failed", false);',
-        'user_pref("image.mem.shared", true);',
-
-        # --- Disable background network & timer throttling & Windows 11 EcoQoS Efficiency Mode ---
-        'user_pref("widget.windows.window_occlusion_tracking.enabled", false);',
-        'user_pref("dom.timeout.enable_budget_timer_throttling", false);',
-        'user_pref("network.http.throttle.enable", false);',
-        'user_pref("dom.min_background_timeout_value", 10);',
-        'user_pref("dom.ipc.processPriorityManager.backgroundUsesEcoQoS", false);',
-        'user_pref("media.suspend-bkgnd-video.enabled", false);',
-        'user_pref("media.dormant-on-pause-timeout-ms", -1);',
-
-        # --- Auto-accept cookie banners & allow cross-site streaming cookies ---
+        # --- Cookie / Banner handling ---
         'user_pref("cookiebanners.service.mode", 2);',
         'user_pref("cookiebanners.service.mode.privateBrowsing", 2);',
-        'user_pref("cookiebanners.ui.desktop.enabled", false);',
-        'user_pref("privacy.consent-banner.mode", 2);',
-        'user_pref("privacy.globalprivacycontrol.enabled", true);',
-        'user_pref("network.cookie.cookieBehavior", 0);',
-        'user_pref("privacy.partition.always_partition_third_party_non_cookie_storage", false);',
-        'user_pref("security.mixed_content.block_active_content", false);',
+        'user_pref("privacy.donottrackheader.enabled", true);',
+
+        # --- Disable popups & notifications ---
+        'user_pref("dom.disable_open_during_load", true);',
+        'user_pref("permissions.default.desktop-notification", 2);',
+        'user_pref("dom.webnotifications.enabled", false);',
 
         # --- Disable crash prompts ---
         'user_pref("browser.crashReports.unsubmittedCheck.enabled", false);',
         'user_pref("browser.crashReports.unsubmittedCheck.autoSubmit2", false);',
-        # --- Enable DRM / Widevine CDM (Required for Exxen, Netflix, etc.) ---
         'user_pref("media.eme.enabled", true);',
         'user_pref("media.gmp-widevinecdm.enabled", true);',
         'user_pref("media.gmp-widevinecdm.visible", true);',
-        'user_pref("media.gmp-widevinecdm.autoupdate", true);',
-        'user_pref("media.gmp-manager.updateEnabled", true);',
 
-        # --- Anti-Tracking / Region Spoofing (Bypass IP Leaks & Locale Checks) ---
+        # --- WebRTC / Network Prefs ---
         'user_pref("media.peerconnection.enabled", false);',  # Disable WebRTC (prevents STUN/TURN IP leaks)
         'user_pref("intl.accept_languages", "tr-TR, tr, en-US, en");',
         'user_pref("javascript.use_us_english_locale", false);',
 
         # --- Force Reliable TCP over SOCKS5 (Fixes Secure Connection Failed) ---
-        'user_pref("network.http.http3.enable", false);',  # Disable QUIC/UDP (prevents SOCKS5 UDP Associate drops)
-        'user_pref("network.dns.disableIPv6", true);',     # Force IPv4 (matches WireGuard AllowedIPs)
-        'user_pref("network.dns.echconfig.enabled", false);', # Disable ECH to prevent TLS handshake aborts
-        'user_pref("network.trr.mode", 5);',               # Disable DoH (prevents proxy DNS conflicts)
+        'user_pref("network.http.http3.enable", false);',  # Disable QUIC/UDP (prevents SOCKS5 UDP Associate failure)
+        'user_pref("network.http.spdy.enabled.http2", true);',
+        'user_pref("network.dns.disableIPv6", true);',  # Disable IPv6 (SOCKS5 tunnels often fail IPv6)
     ]
 
-    # --- Apply Proxy Settings ---
+    # --- Proxy Configuration (SOCKS5 or HTTP) ---
     if proxy_url:
-        from urllib.parse import urlparse
+        import urllib.parse
         try:
-            p = urlparse(proxy_url)
-            host = p.hostname or "127.0.0.1"
-            port = p.port or 8080
-            
-            # network.proxy.type = 1 (Manual proxy configuration)
-            prefs.extend([
-                'user_pref("network.proxy.type", 1);',
-            ])
-            
-            if p.scheme.startswith("socks"):
+            parsed = urllib.parse.urlparse(proxy_url)
+            scheme = parsed.scheme.lower()
+            host = parsed.hostname
+            port = parsed.port or 1080
+
+            if scheme in ("socks5", "socks5h"):
                 prefs.extend([
+                    'user_pref("network.proxy.type", 1);',
                     f'user_pref("network.proxy.socks", "{host}");',
                     f'user_pref("network.proxy.socks_port", {port});',
-                    f'user_pref("network.proxy.socks_version", {5 if "5" in p.scheme else 4});',
+                    'user_pref("network.proxy.socks_version", 5);',
                     'user_pref("network.proxy.socks_remote_dns", true);',
                 ])
             else:
@@ -438,12 +423,12 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
                     f'user_pref("network.proxy.http_port", {port});',
                     f'user_pref("network.proxy.ssl", "{host}");',
                     f'user_pref("network.proxy.ssl_port", {port});',
+                    'user_pref("network.proxy.type", 1);',
                 ])
             logger.info(f"Applied Firefox proxy settings for {proxy_url}")
         except Exception as e:
             logger.warning(f"Failed to parse proxy_url {proxy_url}: {e}")
     else:
-        # network.proxy.type = 0 (Direct connection, no proxy)
         prefs.append('user_pref("network.proxy.type", 0);')
 
     user_js.write_text("\n".join(prefs), encoding="utf-8")
@@ -459,7 +444,7 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         encoding="utf-8"
     )
 
-    # --- Write userContent.css to natively hide website headers/navbars/footers globally ---
+    # --- Write userContent.css to natively manage video player full-window & hover UI ---
     (chrome_dir / "userContent.css").write_text(
         "/* Hide Radiant Media Player ad overlays and Google IMA iframe containers */\n"
         ".rmp-ad-container, .ima-ad-container, [id*='google_ads_iframe'] {\n"
@@ -468,24 +453,6 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         "    pointer-events: none !important;\n"
         "    width: 0 !important;\n"
         "    height: 0 !important;\n"
-        "}\n"
-        "\n"
-        "/* Auto-hide headers and footers, reveal on mouse hover for navigation */\n"
-        "header, nav, footer, aside, #footer-id, #header-id,\n"
-        "[id*='footer'], [class*='footer'], [id*='Footer'], [class*='Footer'],\n"
-        "[id*='header'], [class*='header'], [id*='Header'], [class*='Header'],\n"
-        "[id*='nav'], [class*='nav'], [id*='Nav'], [class*='Nav'],\n"
-        "[class*='menu'], [class*='Menu'] {\n"
-        "    opacity: 0 !important;\n"
-        "    transition: opacity 0.3s ease-in-out !important;\n"
-        "}\n"
-        "\n"
-        "header:hover, nav:hover, footer:hover, aside:hover, #footer-id:hover, #header-id:hover,\n"
-        "[id*='footer']:hover, [class*='footer']:hover, [id*='Footer']:hover, [class*='Footer']:hover,\n"
-        "[id*='header']:hover, [class*='header']:hover, [id*='Header']:hover, [class*='Header']:hover,\n"
-        "[id*='nav']:hover, [class*='nav']:hover, [id*='Nav']:hover, [class*='Nav']:hover,\n"
-        "[class*='menu']:hover, [class*='Menu']:hover {\n"
-        "    opacity: 1 !important;\n"
         "}\n"
         "\n"
         "/* Eliminate the 96px top margin on Exxen's main content wrapper to remove top black bar */\n"
@@ -504,8 +471,7 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         "    display: none !important;\n"
         "}\n"
         "\n"
-        "/* Make the video player fill the entire browser window. GDIGrab captures only\n"
-        "   the Firefox HWND, so full-window in-browser = full-window in the stream. */\n"
+        "/* Make the video player fill the entire browser window */\n"
         "#full-screen-closed {\n"
         "    position: fixed !important;\n"
         "    top: 0 !important;\n"
@@ -525,17 +491,32 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         "    object-fit: contain !important;\n"
         "    background: #000 !important;\n"
         "}\n"
-        "/* The site header is already position:fixed (inline). Raise its z-index above\n"
-        "   the fixed player layer so hovering the top edge reveals the back navigation\n"
-        "   (the hide+reveal opacity rules above still apply). z-index only — do NOT\n"
-        "   re-pin position/width here or the page layout breaks. */\n"
-        "header, nav, [class*='header'], [class*='nav'] {\n"
+        "\n"
+        "/* Site header stays above the video player so hovering top reveals it */\n"
+        "header, nav, [class*='header'], [class*='nav'], [class*='menu'] {\n"
         "    z-index: 100001 !important;\n"
+        "}\n"
+        "\n"
+        "/* Auto-hide headers and footers natively, reveal on mouse hover */\n"
+        "header, nav, footer, aside, #footer-id, #header-id,\n"
+        "[id*='footer'], [class*='footer'], [id*='Footer'], [class*='Footer'],\n"
+        "[id*='header'], [class*='header'], [id*='Header'], [class*='Header'],\n"
+        "[id*='nav'], [class*='nav'], [id*='Nav'], [class*='Nav'],\n"
+        "[class*='menu'], [class*='Menu'] {\n"
+        "    opacity: 0 !important;\n"
+        "    transition: opacity 0.3s ease-in-out !important;\n"
+        "}\n"
+        "\n"
+        "header:hover, nav:hover, footer:hover, aside:hover, #footer-id:hover, #header-id:hover,\n"
+        "[id*='footer']:hover, [class*='footer']:hover, [id*='Footer']:hover, [class*='Footer']:hover,\n"
+        "[id*='header']:hover, [class*='header']:hover, [id*='Header']:hover, [class*='Header']:hover,\n"
+        "[id*='nav']:hover, [class*='nav']:hover, [id*='Nav']:hover, [class*='Nav']:hover,\n"
+        "[class*='menu']:hover, [class*='Menu']:hover {\n"
+        "    opacity: 1 !important;\n"
+        "    pointer-events: auto !important;\n"
         "}\n",
         encoding="utf-8"
     )
-
-
 
 
 class WebStreamManager:
@@ -568,7 +549,7 @@ class WebStreamManager:
   app_path: ""
 app:
   profile: "{stream_id}"
-  multiple_instances: false
+  multiple_instances: true
   disable_telemetry: true
   disable_firefox_studies: true
   disable_crash_reporter: true
@@ -730,14 +711,6 @@ app:
                         logger.debug(f"SetWindowPos/Style error: {e}")
 
                     logger.info(f"Locked Firefox window title to '{title}' for stream '{stream_name}' ({stream_id}) (hwnd=0x{hwnd:x})")
-
-                    # Route firefox.exe to CABLE Input AFTER its WASAPI audio session exists in Windows Volume Mixer
-                    try:
-                        from app.audio_router import route_to_vb_cable
-                        route_to_vb_cable()
-                    except Exception as e:
-                        logger.debug(f"route_to_vb_cable error: {e}")
-
                     return title
                 else:
                     logger.debug(f"PID scan target_pids={target_pids} found 0 matching windows so far...")
@@ -780,8 +753,6 @@ app:
                                 else:
                                     user32.ShowWindow(hwnd, 5)
                                 user32.SetWindowPos(hwnd, 0, 0, 0, 1280, 758, 0x0067)
-                                from app.audio_router import route_to_vb_cable
-                                route_to_vb_cable()
                             except Exception as e:
                                 logger.debug(f"Fallback window setup error: {e}")
                             return t
@@ -853,12 +824,6 @@ app:
                 )
             except Exception:
                 pass
-
-        try:
-            from app.audio_router import restore_audio_routing
-            restore_audio_routing()
-        except Exception as e:
-            logger.debug(f"audio_router restore_audio_routing error: {e}")
 
     def purge_all(self):
         """Purge all browser processes and temporary profiles in BROWSER_PROFILES_DIR."""

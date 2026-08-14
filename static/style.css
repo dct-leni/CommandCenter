@@ -979,6 +979,94 @@ body {
     gap: 8px;
 }
 
+/* Audio Indicator Badge */
+.audio-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--emerald);
+    background: rgba(22, 163, 74, 0.12);
+    border: 1px solid rgba(22, 163, 74, 0.3);
+    padding: 2px 7px;
+    border-radius: 4px;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+.pulse-icon {
+    animation: audioPulse 1.4s ease-in-out infinite alternate;
+}
+
+@keyframes audioPulse {
+    0% { opacity: 0.4; transform: scale(0.9); }
+    100% { opacity: 1; transform: scale(1.1); color: #4ade80; }
+}
+
+.copy-btn-icon {
+    cursor: pointer;
+    transition: color 0.15s ease, transform 0.15s ease;
+}
+.copy-btn-icon:hover {
+    color: var(--accent);
+    transform: scale(1.15);
+}
+
+.btn-sm {
+    padding: 3px 8px;
+    font-size: 11px;
+    height: 26px;
+}
+
+/* Minimalist Video Popup Modal */
+.video-popup-container {
+    position: relative;
+    max-width: 960px;
+    width: 90vw;
+    background: #000;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 25px 60px rgba(0, 0, 0, 0.85), 0 0 0 1px rgba(255, 255, 255, 0.1);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.video-popup-player {
+    width: 100%;
+    max-height: 80vh;
+    display: block;
+    background: #000;
+    outline: none;
+}
+
+.video-popup-close {
+    position: absolute;
+    top: 14px;
+    right: 14px;
+    width: 36px;
+    height: 36px;
+    background: rgba(0, 0, 0, 0.65);
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 50%;
+    color: #fff;
+    font-size: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    z-index: 100;
+    transition: all 0.2s ease;
+}
+
+.video-popup-close:hover {
+    background: rgba(239, 68, 68, 0.85);
+    border-color: rgba(239, 68, 68, 1);
+    transform: scale(1.1);
+}
+
 @media (max-width: 960px) {
     .app-main { grid-template-columns: 1fr; }
 }
+

@@ -1,190 +1,122 @@
 """
-app/audio_router.py — Virtual Audio Router for CommandCenter Web Streams.
+Process Loopback Audio Capture Module for CommandCenter.
 
-Routes ONLY 'firefox.exe' audio output to CABLE Input using SoundVolumeView.exe during web streams,
-leaving system default audio untouched on user speakers.
-Restores firefox.exe audio output to Default when all web streams end.
+Captures isolated PCM audio directly from target Firefox process trees
+using native Windows Core Audio AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK via bin/app_loopback.exe.
+100% process-isolated with zero virtual cables and zero speaker leakage.
 """
 
 import os
+import sys
+import time
 import subprocess
+import threading
 import logging
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, Optional, Union, Any
 
 logger = logging.getLogger(__name__)
 
-_CABLE_INPUT_NAME_FALLBACK = "CABLE Input (VB-Audio Virtual Cable)"
-_CABLE_OUTPUT_NAME_FALLBACK = "CABLE Output (VB-Audio Virtual Cable)"
-
-_ACTIVE_WEB_STREAMS_COUNT = 0
+_BASE_DIR = Path(__file__).resolve().parent.parent
+_APP_LOOPBACK_EXE = _BASE_DIR / "bin" / "app_loopback.exe"
 
 
-def _com_init():
-    """Initialize COM on current thread as MTA to avoid message pump deadlocks."""
-    try:
-        import comtypes
-        comtypes.CoInitializeEx(0, comtypes.COINIT_MULTITHREADED)
-    except Exception:
-        pass
-
-
-def _com_uninit():
-    """Uninitialize COM on current thread."""
-    try:
-        import comtypes
-        comtypes.CoUninitialize()
-    except Exception:
-        pass
-
-
-def get_soundvolumeview_path() -> Path:
-    """Return path to bin/SoundVolumeView.exe."""
-    base_dir = Path(__file__).resolve().parent.parent
-    return base_dir / "bin" / "SoundVolumeView.exe"
-
-def get_cable_device_ids() -> Tuple[Optional[str], Optional[str]]:
-    """Return (cable_input_name, cable_output_name) friendly device names."""
-    cable_input_name = None
-    cable_output_name = None
-    _com_init()
-    try:
-        from pycaw.pycaw import AudioUtilities
-        for device in AudioUtilities.GetAllDevices():
-            fname = device.FriendlyName or ""
-            if "cable input" in fname.lower() and not cable_input_name:
-                cable_input_name = fname
-            elif "cable output" in fname.lower() and not cable_output_name:
-                cable_output_name = fname
-    except Exception:
-        pass
-    finally:
-        _com_uninit()
-
-    return (
-        cable_input_name or _CABLE_INPUT_NAME_FALLBACK,
-        cable_output_name or _CABLE_OUTPUT_NAME_FALLBACK,
-    )
-
-
-import threading
-import time
-import json
-
-def route_to_vb_cable() -> bool:
+class ProcessLoopbackAudioCapture:
     """
-    Switch ONLY 'firefox.exe' audio output to CABLE Input using SoundVolumeView.
-    This runs asynchronously and polls until the Firefox audio session is initialized.
-    Leaves global system default audio untouched on user speakers.
+    Spawns and manages bin/app_loopback.exe for a specific target browser PID tree
+    and feeds continuous 16-bit 48kHz Stereo PCM audio directly into FFmpeg stdin.
     """
-    global _ACTIVE_WEB_STREAMS_COUNT
-    _ACTIVE_WEB_STREAMS_COUNT += 1
+    def __init__(self, stream_id: str, target_pid: int, pipe_fd: Union[int, Any]):
+        self.stream_id = stream_id
+        self.target_pid = target_pid
+        self.pipe_fd = pipe_fd
+        self._proc: Optional[subprocess.Popen] = None
+        self._running = False
+        self._thread: Optional[threading.Thread] = None
 
-    svv_exe = get_soundvolumeview_path()
-    if not svv_exe.exists():
-        logger.warning(f"SoundVolumeView.exe missing at {svv_exe}")
-        return False
+    def start(self):
+        if not _APP_LOOPBACK_EXE.exists():
+            logger.error(f"[{self.stream_id}] app_loopback.exe not found at {_APP_LOOPBACK_EXE}")
+            return
 
-    def _poll_and_route():
-        logger.info("Polling SoundVolumeView to dynamically resolve CABLE Input and route firefox.exe ...")
-        for _ in range(60):  # Poll for up to 30 seconds
-            try:
-                base_dir = Path(__file__).resolve().parent.parent
-                temp_json = base_dir / "temp" / "svv.json"
-                temp_json.parent.mkdir(parents=True, exist_ok=True)
-                
-                subprocess.run(
-                    [str(svv_exe), "/sjson", str(temp_json)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                )
-                
-                if temp_json.exists():
-                    with open(temp_json, "r", encoding="utf-16") as f:
-                        data = json.load(f)
-                    
-                    # 1. Dynamically find the VB-Cable Input Item ID on this specific PC
-                    cable_target_id = None
-                    for item in data:
-                        name = (item.get("Name") or "").lower()
-                        if "cable input" in name:
-                            # Use Item ID if available, otherwise Command-Line Friendly ID
-                            cable_target_id = item.get("Item ID") or item.get("Command-Line Friendly ID")
-                            break
-                            
-                    if not cable_target_id:
-                        # Fallback if somehow not listed
-                        cable_target_id = "CABLE Input (VB-Audio Virtual Cable)"
-                        
-                    # 2. Find Firefox and route it
-                    found = False
-                    for item in data:
-                        proc_path = item.get("Process Path", "")
-                        if proc_path and "firefox.exe" in proc_path.lower():
-                            # Found the audio session! Route it explicitly.
-                            proc_id = str(item.get("Process ID", "firefox.exe"))
-                            for role in (0, 1, 2):
-                                subprocess.run(
-                                    [str(svv_exe), "/SetAppDefault", cable_target_id, str(role), proc_id],
-                                    stdin=subprocess.DEVNULL,
-                                    stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL,
-                                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                                )
-                            found = True
-                            
-                    if found:
-                        logger.info(f"Successfully routed Firefox audio session to VB-Cable ID: {cable_target_id}")
-                        return
-            except Exception as e:
-                logger.warning(f"Error during audio routing poll: {e}")
-                
-            time.sleep(0.5)
-            
-        logger.warning("Timed out waiting for Firefox audio session to appear in SoundVolumeView.")
+        self._running = True
+        self._thread = threading.Thread(target=self._run, name=f"app_loopback_{self.stream_id}", daemon=True)
+        self._thread.start()
 
-    try:
-        t = threading.Thread(target=_poll_and_route, daemon=True)
-        t.start()
-        return True
-    except Exception as e:
-        logger.error(f"Failed to start audio routing thread: {e}")
-        return False
-
-
-def restore_audio_routing() -> None:
-    """Reset firefox.exe application-level audio output back to Default when all web streams stop."""
-    global _ACTIVE_WEB_STREAMS_COUNT
-    if _ACTIVE_WEB_STREAMS_COUNT > 0:
-        _ACTIVE_WEB_STREAMS_COUNT -= 1
-
-    if _ACTIVE_WEB_STREAMS_COUNT > 0:
-        logger.info(f"Web streams still active ({_ACTIVE_WEB_STREAMS_COUNT}), keeping firefox.exe audio routing")
-        return
-
-    svv_exe = get_soundvolumeview_path()
-    if not svv_exe.exists():
-        return
-
-    def _async_restore():
+    def _run(self):
+        logger.info(f"[{self.stream_id}] Starting app_loopback.exe for PID {self.target_pid} (48000Hz PCM)")
         try:
-            # Reset per-app routing for all firefox.exe processes
-            for role in (0, 1, 2):
+            self._proc = subprocess.Popen(
+                [str(_APP_LOOPBACK_EXE), str(self.target_pid), "48000"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            )
+
+            # Background thread to log stderr from app_loopback.exe
+            def _log_stderr():
                 try:
-                    subprocess.run(
-                        [str(svv_exe), "/SetAppDefault", "", str(role), "firefox.exe"],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=5,
-                        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                    )
-                except subprocess.TimeoutExpired:
-                    logger.warning(f"SoundVolumeView /SetAppDefault timed out for role {role}")
+                    for line in iter(self._proc.stderr.readline, b""):
+                        line_str = line.decode(errors="replace").strip()
+                        if line_str:
+                            logger.info(f"[{self.stream_id}] [app_loopback] {line_str}")
                 except Exception:
                     pass
-            logger.info("Reset application-level audio output of 'firefox.exe' to Default via SoundVolumeView")
-        except Exception as e:
-            logger.error(f"Error resetting firefox.exe audio routing: {e}")
+            threading.Thread(target=_log_stderr, daemon=True).start()
 
-    threading.Thread(target=_async_restore, daemon=True).start()
+            # Stream stdout chunks into FFmpeg pipe_fd
+            is_fd_int = isinstance(self.pipe_fd, int)
+            raw_stdout = getattr(self._proc.stdout, "raw", self._proc.stdout)
+
+            while self._running and self._proc.poll() is None:
+                data = raw_stdout.read(4096)
+                if not data:
+                    break
+                if is_fd_int:
+                    os.write(self.pipe_fd, data)
+                else:
+                    self.pipe_fd.write(data)
+                    self.pipe_fd.flush()
+
+        except (BrokenPipeError, OSError) as e:
+            logger.debug(f"[{self.stream_id}] Audio pipe closed: {e}")
+        except Exception as e:
+            logger.error(f"[{self.stream_id}] Audio capture worker error: {e}", exc_info=True)
+        finally:
+            self.stop()
+
+    def stop(self):
+        self._running = False
+        if self._proc:
+            try:
+                self._proc.terminate()
+                self._proc.wait(timeout=1.0)
+            except Exception:
+                try:
+                    self._proc.kill()
+                except Exception:
+                    pass
+            self._proc = None
+        logger.info(f"[{self.stream_id}] Stopped app_loopback audio capture for PID {self.target_pid}")
+
+
+_ACTIVE_CAPTURE_THREADS: Dict[str, ProcessLoopbackAudioCapture] = {}
+_CAPTURE_LOCK = threading.Lock()
+
+
+def start_process_audio_capture(stream_id: str, target_pid: int, pipe_fd: Union[int, Any]) -> Optional[ProcessLoopbackAudioCapture]:
+    """Start and register an isolated PROCESS_LOOPBACK capture thread for a stream."""
+    stop_process_audio_capture(stream_id)
+    with _CAPTURE_LOCK:
+        thread = ProcessLoopbackAudioCapture(stream_id, target_pid, pipe_fd)
+        thread.start()
+        _ACTIVE_CAPTURE_THREADS[stream_id] = thread
+        return thread
+
+
+def stop_process_audio_capture(stream_id: str):
+    """Stop and unregister an active PROCESS_LOOPBACK capture thread."""
+    with _CAPTURE_LOCK:
+        thread = _ACTIVE_CAPTURE_THREADS.pop(stream_id, None)
+        if thread:
+            thread.stop()

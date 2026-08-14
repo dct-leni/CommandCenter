@@ -79,6 +79,9 @@
                     <button class="btn btn-primary" id="convert-all-btn" disabled>
                         Convert All
                     </button>
+                    <button class="btn btn-secondary" id="clear-done-btn" onclick="clearDoneConverterFiles()" style="display: none;" title="Clear finished files from list">
+                        <i class="fa-solid fa-broom"></i> Clear Done
+                    </button>
                     <span class="file-counter" id="converter-counter">No files</span>
                 </div>
             </div>
@@ -436,6 +439,16 @@
         </div>
     </div>
 
+    <!-- In-App Video Preview Modal -->
+    <div class="modal-overlay" id="video-preview-modal" style="display: none;" onclick="if (event.target === this) closeVideoPreview();">
+        <div class="video-popup-container">
+            <button class="video-popup-close" onclick="closeVideoPreview()" title="Close Preview"><i class="fa-solid fa-xmark"></i></button>
+            <video id="preview-video-player" controls autoplay playsinline class="video-popup-player"></video>
+        </div>
+    </div>
+
+    <!-- MPEG-TS In-Browser MSE Demuxer -->
+    <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
     <script src="/static/app.js"></script>
 </body>
 

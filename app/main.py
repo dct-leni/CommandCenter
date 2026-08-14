@@ -960,6 +960,24 @@ async def stop_live_stream(stream_id: str):
     return {"status": "success", "live_stream": res}
 
 
+@app.get("/api/streamer/live_stream/{stream_id}/logs")
+async def get_live_stream_logs(stream_id: str):
+    """Retrieve runtime stderr logs and error state for a live relay stream."""
+    relay = live_relay_manager.active_relays.get(stream_id)
+    if not relay:
+        return {"id": stream_id, "status": "not_active", "error": None, "logs": []}
+    return {
+        "id": stream_id,
+        "name": relay.name,
+        "status": relay.status,
+        "error": relay.error,
+        "fps": relay.fps,
+        "bitrate": relay.bitrate,
+        "client_count": len(relay.clients),
+        "logs": relay.last_logs[-30:],
+    }
+
+
 # ──────────────────────────────────────────────
 #  Browse filesystem (for folder selection)
 # ──────────────────────────────────────────────
