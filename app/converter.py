@@ -428,6 +428,28 @@ class Converter:
                 self._queue.pop(0)
                 continue
 
+            # Disk-space guard: .ts output can exceed source size (bitrate-capped
+            # transcode); require free space >= 1.2x source, re-checked per file.
+            try:
+                import shutil as _shutil
+                out_dir = Path(info.filepath).parent
+                free_bytes = _shutil.disk_usage(str(out_dir)).free
+                needed = Path(info.filepath).stat().st_size + 512 * 1024 * 1024
+                if free_bytes < needed:
+                    logger.error(
+                        f"Skipping {filename}: insufficient disk space "
+                        f"(free {free_bytes / 1e9:.1f} GB, need ~{needed / 1e9:.1f} GB)"
+                    )
+                    info.status = ConversionStatus.ERROR
+                    info.error = (
+                        f"Insufficient disk space on {str(out_dir.drive)} — "
+                        f"need ~{needed / 1e9:.1f} GB, {free_bytes / 1e9:.1f} GB free"
+                    )
+                    self._queue.pop(0)
+                    continue
+            except OSError:
+                pass  # cannot stat — let the conversion attempt proceed
+
             info.status = ConversionStatus.CONVERTING
             info.progress = 0.0
             info.error = ""

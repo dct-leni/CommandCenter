@@ -94,6 +94,7 @@ async function updateConfigSetting(updates, rescan = false) {
         showToast('Settings saved', 'success');
     } catch (err) {
         console.error(err);
+        showToast(`Failed to save settings: ${err.message}`, 'error');
     }
 }
 
@@ -217,6 +218,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         if (state.config?.streamer && !isNaN(val)) state.config.streamer.port_range_end = val;
         updateConfigSetting({ streamer: { port_range_end: val } }, true);
     });
+    document.getElementById('auto-start-boot').addEventListener('change', (e) => {
+        if (state.config?.server) state.config.server.auto_start = e.target.checked;
+        updateConfigSetting({ server: { auto_start: e.target.checked } });
+        showToast(e.target.checked ? 'Auto-start enabled (starts with Windows, visible window)' : 'Auto-start disabled', 'info');
+    });
 });
 
 function applyConfig() {
@@ -238,6 +244,9 @@ function applyConfig() {
     if (streamer?.protocol) {
         document.getElementById('stream-protocol').value = streamer.protocol;
     }
+    if (server) {
+        document.getElementById('auto-start-boot').checked = Boolean(server.auto_start);
+    }
 }
 
 // ──────────────────────────────────────────────
@@ -247,86 +256,110 @@ function applyConfig() {
 async function checkSystemStatus() {
     try {
         state.systemStatus = await api('GET', '/system/status');
-        const ffmpegDot = document.getElementById('ffmpeg-dot');
-        const mediamtxDot = document.getElementById('mediamtx-dot');
-        const codecLabel = document.getElementById('codec-status-label');
-        const vpnDot = document.getElementById('vpn-dot');
-        const vpnLabel = document.getElementById('vpn-status-label');
-
-        if (ffmpegDot) ffmpegDot.className = `status-dot ${state.systemStatus.ffmpeg ? 'ok' : 'error'}`;
-        if (mediamtxDot) mediamtxDot.className = `status-dot ${state.systemStatus.mediamtx ? 'ok' : 'error'}`;
-        if (codecLabel && state.systemStatus.best_encoder) {
-            codecLabel.textContent = `Codec: ${state.systemStatus.best_encoder}`;
-        }
-
-        if (vpnDot && vpnLabel && state.systemStatus.vpn) {
-            const v = state.systemStatus.vpn;
-            if (v.mode === 'none' || v.status === 'disabled') {
-                vpnDot.className = 'status-dot';
-                vpnLabel.textContent = 'VPN: Off';
-            } else if (v.active) {
-                vpnDot.className = 'status-dot ok';
-                vpnLabel.textContent = v.mode === 'wireguard' ? 'VPN: WireGuard' : 'VPN: SOCKS5';
-            } else {
-                vpnDot.className = 'status-dot warning';
-                vpnLabel.textContent = 'VPN: Inactive';
-            }
-        }
+        renderSystemStatus();
     } catch (e) {
         console.error('System status check failed:', e);
     }
 }
 
-// ──────────────────────────────────────────────
-//  Polling
-// ──────────────────────────────────────────────
+function renderSystemStatus() {
+    const s = state.systemStatus;
+    if (!s) return;
+    const ffmpegDot = document.getElementById('ffmpeg-dot');
+    const mediamtxDot = document.getElementById('mediamtx-dot');
+    const codecLabel = document.getElementById('codec-status-label');
+    const vpnDot = document.getElementById('vpn-dot');
+    const vpnLabel = document.getElementById('vpn-status-label');
 
-let pollCount = 0;
-function startPolling() {
-    if (state.pollingInterval) clearInterval(state.pollingInterval);
-    state.pollingInterval = setInterval(async () => {
-        await pollConverterStatus();
-        await pollStreamStatus();
+    if (ffmpegDot) ffmpegDot.className = `status-dot ${s.ffmpeg ? 'ok' : 'error'}`;
+    if (mediamtxDot) mediamtxDot.className = `status-dot ${s.mediamtx ? 'ok' : 'error'}`;
+    if (codecLabel && s.best_encoder) {
+        codecLabel.textContent = `Codec: ${s.best_encoder}`;
+    }
 
-        pollCount++;
-        if (pollCount % 5 === 0) {
-            await checkSystemStatus();
+    if (vpnDot && vpnLabel && s.vpn) {
+        const v = s.vpn;
+        if (v.mode === 'none' || v.status === 'disabled') {
+            vpnDot.className = 'status-dot';
+            vpnLabel.textContent = 'VPN: Off';
+        } else if (v.active) {
+            vpnDot.className = 'status-dot ok';
+            vpnLabel.textContent = v.mode === 'wireguard' ? 'VPN: WireGuard' : 'VPN: SOCKS5';
+        } else {
+            vpnDot.className = 'status-dot warning';
+            vpnLabel.textContent = 'VPN: Inactive';
         }
-    }, 2000);
-}
-
-async function pollConverterStatus() {
-    if (state.converterFiles.length === 0) return;
-
-    try {
-        const data = await api('GET', '/converter/status');
-        state.converterFiles = data.files;
-        renderConverterFiles();
-    } catch (e) {
-        // Silent fail on poll
     }
 }
 
-async function pollStreamStatus() {
-    try {
-        const data = await api('GET', '/streamer/status');
-        state.streamStatus = data;
+// ──────────────────────────────────────────────
+//  Status WebSocket (server pushes full snapshot every 1s)
+// ──────────────────────────────────────────────
+
+let _statusWs = null;
+let _statusWsGen = 0;
+let _statusWsRetryMs = 0;
+
+function applyStatusPayload(msg) {
+    if (!msg) return;
+    if (msg.system) {
+        state.systemStatus = Object.assign({}, msg.system, msg.vpn ? { vpn: msg.vpn } : {});
+        renderSystemStatus();
+    }
+    if (msg.converter && Array.isArray(msg.converter.files)) {
+        const sig = JSON.stringify(msg.converter.files);
+        if (sig !== applyStatusPayload._convSig) {
+            applyStatusPayload._convSig = sig;
+            state.converterFiles = msg.converter.files;
+            renderConverterFiles();
+        }
+    }
+    if (msg.streamer) {
+        state.streamStatus = msg.streamer;
         updateStreamUI();
-        const lsData = await api('GET', '/streamer/live_streams');
-        state.liveStreams = lsData.live_streams || [];
-        renderLiveStreams();
-    } catch (e) {
-        // Silent fail on poll
     }
+    if (Array.isArray(msg.live_streams)) {
+        const sig = JSON.stringify(msg.live_streams);
+        if (sig !== applyStatusPayload._liveSig) {
+            applyStatusPayload._liveSig = sig;
+            state.liveStreams = msg.live_streams;
+            renderLiveStreams();
+        }
+    }
+}
+
+function connectStatusSocket() {
+    const gen = ++_statusWsGen;
+    try { if (_statusWs) _statusWs.close(); } catch (e) {}
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    _statusWs = new WebSocket(`${proto}://${location.host}/ws/status`);
+    _statusWs.onopen = () => { _statusWsRetryMs = 0; };
+    _statusWs.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch (e) { return; }
+        applyStatusPayload(msg);
+    };
+    _statusWs.onclose = () => {
+        if (gen !== _statusWsGen) return; // superseded by a newer connection
+        _statusWsRetryMs = Math.min(_statusWsRetryMs ? _statusWsRetryMs * 2 : 1000, 10000);
+        setTimeout(connectStatusSocket, _statusWsRetryMs);
+    };
+}
+
+function startPolling() {
+    connectStatusSocket();
 }
 
 // ──────────────────────────────────────────────
 //  Converter
 // ──────────────────────────────────────────────
 
+let _convScanToken = 0;
 async function scanConverterFolder(path) {
+    const tok = ++_convScanToken;
     try {
         const data = await api('POST', '/converter/scan', { path });
+        if (tok !== _convScanToken) return; // superseded by a newer scan
         state.converterFiles = data.files;
         renderConverterFiles();
         updateConverterCounter();
@@ -359,7 +392,7 @@ function renderConverterFiles() {
         switch (file.status) {
             case 'done':
                 statusHtml = '<span class="status-badge done">Done</span>';
-                actionHtml = `<button class="btn btn-sm btn-secondary" onclick="openVideoPreview('/api/converter/file/${encodeURIComponent(file.ts_filename || file.filename)}', '${escapeAttr(file.filename)}')" title="Preview Converted Video"><i class="fa-solid fa-eye"></i></button>`;
+                actionHtml = `<button class="btn btn-sm btn-secondary" data-action="preview" data-url="/api/converter/file/${encodeURIComponent(file.ts_filename || file.filename)}" data-title="${escapeHtml(file.filename)}" title="Preview Converted Video"><i class="fa-solid fa-eye"></i></button>`;
                 break;
             case 'converting':
                 const pct = Math.round(file.progress * 100);
@@ -376,7 +409,7 @@ function renderConverterFiles() {
                 break;
             case 'pending':
             default:
-                actionHtml = `<button class="btn btn-sm btn-primary" onclick="convertFile('${escapeHtml(file.filename)}')">Convert</button>`;
+                actionHtml = `<button class="btn btn-sm btn-primary" data-action="convert" data-filename="${escapeHtml(file.filename)}">Convert</button>`;
                 break;
         }
 
@@ -512,9 +545,12 @@ async function setStreamerFoldersAndRefresh(folders) {
     renderStreamerFolders();
 }
 
+let _streamScanToken = 0;
 async function scanStreamerFolder(path) {
+    const tok = ++_streamScanToken;
     try {
         const data = await api('POST', '/streamer/scan', { path });
+        if (tok !== _streamScanToken) return; // superseded by a newer scan
         await setStreamerFoldersAndRefresh(data.folders);
         document.getElementById('stream-start-btn').disabled = false;
     } catch (e) {
@@ -548,14 +584,14 @@ function renderStreamerFolders() {
                  ondragover="handleDragOver(event)"
                  ondragleave="handleDragLeave(event)"
                  ondrop="handleDrop(event, '${escapeAttr(folder.name)}')">
-                <div class="folder-card-header" onclick="toggleFolder('${folder.name}')">
+                <div class="folder-card-header" data-action="toggle-folder" data-name="${escapeHtml(folder.name)}">
                     <span class="folder-icon"><i class="fa-regular fa-folder"></i></span>
                     <span class="folder-card-title">${folder.name}</span>
                     ${isActive ? '<span class="folder-active-tag">Active</span>' : ''}
                     <span class="folder-date-range">${folder.display_range}</span>
                     <span class="folder-file-count">${folder.file_count} files</span>
-                    <button class="folder-edit-btn" onclick="openModifyFolderModal(event, '${escapeAttr(folder.name)}')" title="Modify Date Range"><i class="fa-solid fa-pen"></i></button>
-                    ${!isActive ? `<button class="folder-delete-btn" onclick="deleteFolder(event, '${escapeAttr(folder.name)}')" title="Remove Folder (Moves videos back to Input)"><i class="fa-solid fa-trash"></i></button>` : ''}
+                    <button class="folder-edit-btn" data-action="edit-folder" data-name="${escapeHtml(folder.name)}" title="Modify Date Range"><i class="fa-solid fa-pen"></i></button>
+                    ${!isActive ? `<button class="folder-delete-btn" data-action="delete-folder" data-name="${escapeHtml(folder.name)}" title="Remove Folder (Moves videos back to Input)"><i class="fa-solid fa-trash"></i></button>` : ''}
                     <i class="fa-solid fa-chevron-right folder-chevron ${isExpanded ? 'open' : ''}"></i>
                 </div>
                 <div class="folder-card-body ${isExpanded ? 'open' : ''}" id="folder-body-${folder.name}">
@@ -605,7 +641,7 @@ function renderFolderFiles(folder) {
                             <span class="slot-port-badge" style="border-style:dashed; color:var(--text-muted);">+ New Port :${port}</span>
                             <span style="font-size:12px; color:var(--text-muted);">Drag & drop video here or click "+ Add File" to create port :${port}</span>
                         </div>
-                        <button class="slot-add-btn" onclick="openAddFileModal('${escapeAttr(folder.name)}', ${port})">+ Add File</button>
+                        <button class="slot-add-btn" data-action="add-file" data-name="${escapeHtml(folder.name)}" data-port="${port}">+ Add File</button>
                     </div>
                 </div>
             `;
@@ -648,7 +684,7 @@ function renderFolderFiles(folder) {
             if (displayUrl.includes('127.0.0.1') || displayUrl.includes('localhost')) {
                 displayUrl = displayUrl.replace(/127\.0\.0\.1|localhost/g, extIp);
             }
-            urlHtml = `<div class="slot-url" onclick="copyToClipboard('${escapeAttr(displayUrl)}'); event.stopPropagation();" title="Click to copy playback link (${protocol})">
+            urlHtml = `<div class="slot-url" data-action="copy-url" data-url="${escapeHtml(displayUrl)}" title="Click to copy playback link (${protocol})">
                 <i class="fa-solid fa-link"></i> ${escapeHtml(displayUrl)} <span style="opacity:0.75; font-size:10px;">[${protocol}]</span>
             </div>`;
         }
@@ -677,10 +713,10 @@ function renderFolderFiles(folder) {
                     </div>
                     ${isCurrent ? '<span class="slot-playing-badge"><i class="fa-solid fa-play"></i> Playing</span>' : ''}
                     <div class="slot-reorder-buttons" style="display:flex; gap:2px; flex-shrink:0;">
-                        <button class="slot-reorder-btn" onclick="moveFileInSlot(event, '${escapeAttr(folder.name)}', ${port}, ${fi}, -1)" title="Move Up" ${fi === 0 ? 'disabled' : ''}><i class="fa-solid fa-caret-up"></i></button>
-                        <button class="slot-reorder-btn" onclick="moveFileInSlot(event, '${escapeAttr(folder.name)}', ${port}, ${fi}, 1)" title="Move Down" ${fi === files.length - 1 ? 'disabled' : ''}><i class="fa-solid fa-caret-down"></i></button>
+                        <button class="slot-reorder-btn" data-action="move-file" data-name="${escapeHtml(folder.name)}" data-port="${port}" data-index="${fi}" data-dir="-1" title="Move Up" ${fi === 0 ? 'disabled' : ''}><i class="fa-solid fa-caret-up"></i></button>
+                        <button class="slot-reorder-btn" data-action="move-file" data-name="${escapeHtml(folder.name)}" data-port="${port}" data-index="${fi}" data-dir="1" title="Move Down" ${fi === files.length - 1 ? 'disabled' : ''}><i class="fa-solid fa-caret-down"></i></button>
                     </div>
-                    <button class="slot-remove-btn" onclick="removeFileFromSlot(event, '${escapeAttr(folder.name)}', ${port}, '${escapeAttr(fname)}')" title="Remove"><i class="fa-solid fa-xmark"></i></button>
+                    <button class="slot-remove-btn" data-action="remove-file" data-name="${escapeHtml(folder.name)}" data-port="${port}" data-filename="${escapeHtml(fname)}" title="Remove"><i class="fa-solid fa-xmark"></i></button>
                 </div>
             `;
         }).join('');
@@ -692,7 +728,7 @@ function renderFolderFiles(folder) {
                     ${viewerBadge}
                     <span class="slot-file-count">${files.length} file${files.length !== 1 ? 's' : ''}</span>
                     ${urlHtml}
-                    <button class="slot-add-btn" onclick="openAddFileModal('${escapeAttr(folder.name)}', ${port})">+ Add File</button>
+                    <button class="slot-add-btn" data-action="add-file" data-name="${escapeHtml(folder.name)}" data-port="${port}">+ Add File</button>
                 </div>
                 ${progressHtml}
                 <div class="slot-file-list">
@@ -772,7 +808,7 @@ async function openAddFileModal(folderName, port) {
             const thumbHtml = getThumbHtml(thumbSrc, true, 'slot-file-thumb');
 
             return `
-                <div class="file-picker-item ${added ? 'added' : ''}" onclick="${added ? '' : `addFileToSlot('${escapeAttr(folderName)}', ${port}, '${escapeAttr(fname)}')`}">
+                <div class="file-picker-item ${added ? 'added' : ''}" ${added ? '' : `data-action="pick-file" data-folder="${escapeHtml(folderName)}" data-port="${port}" data-filename="${escapeHtml(fname)}"`}>
                     ${thumbHtml}
                     <div class="slot-file-info">
                         <span class="slot-file-name">${escapeHtml(fname)}</span>
@@ -945,9 +981,15 @@ function updateStreamUI() {
         errorsEl.style.display = 'none';
     }
 
-    // Re-render folder list to update port indicators
+    // Re-render folder list to update port indicators — skip when nothing
+    // changed, full DOM rebuild kills hover/drag state mid-interaction.
     if (state.streamerFolders.length > 0) {
-        renderStreamerFolders();
+        const sig = JSON.stringify([state.streamStatus.is_running,
+            state.streamStatus.active_streams || [], state.streamerFolders]);
+        if (sig !== updateStreamUI._lastSig) {
+            updateStreamUI._lastSig = sig;
+            renderStreamerFolders();
+        }
     }
 }
 
@@ -1069,14 +1111,14 @@ function renderBreadcrumb(currentPath, parentPath) {
     let accumulated = '';
     const items = [];
 
-    items.push(`<span class="breadcrumb-item" onclick="browseTo('')"><i class="fa-solid fa-laptop"></i></span>`);
+    items.push(`<span class="breadcrumb-item" data-action="browse" data-path=""><i class="fa-solid fa-laptop"></i></span>`);
 
     parts.forEach((part, i) => {
         accumulated += part + '/';
         const clickPath = accumulated.replace(/\/$/, '');
         if (i < parts.length - 1) {
             items.push(`<span class="breadcrumb-sep">/</span>`);
-            items.push(`<span class="breadcrumb-item" onclick="browseTo('${escapeAttr(clickPath)}')">${escapeHtml(part)}</span>`);
+            items.push(`<span class="breadcrumb-item" data-action="browse" data-path="${escapeHtml(clickPath)}">${escapeHtml(part)}</span>`);
         } else {
             items.push(`<span class="breadcrumb-sep">/</span>`);
             items.push(`<span style="color:var(--text-primary)">${escapeHtml(part)}</span>`);
@@ -1099,7 +1141,7 @@ function renderBrowserEntries(entries, currentPath) {
 
     body.innerHTML = dirs.map(entry => {
         return `
-            <div class="modal-dir-item" ondblclick="browseTo('${escapeAttr(entry.path)}')" onclick="selectBrowserItem(this, '${escapeAttr(entry.path)}')">
+            <div class="modal-dir-item" data-dblaction="browse" data-path="${escapeHtml(entry.path)}" data-action="select-dir">
                 <span class="modal-dir-icon"><i class="fa-regular fa-folder"></i></span>
                 <span class="modal-dir-name">${escapeHtml(entry.name)}</span>
             </div>
@@ -1320,12 +1362,15 @@ function formatBitrate(bitrate) {
 
 function escapeHtml(str) {
     if (!str) return '';
-    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// ponytail: JS-string escaper for inline onclick args — fragile pattern;
+// replace call sites with data-* attrs + event delegation if it bites again.
 function escapeAttr(str) {
     if (!str) return '';
-    return str.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    return String(str).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
 }
 
 function copyToClipboard(text) {
@@ -1657,25 +1702,25 @@ function renderLiveStreams() {
         if (isWeb) {
             if (isRunning) {
                 actionsHtml = `
-                    <button class="btn btn-secondary btn-sm" onclick="openVideoPreview('${streamHttpUrl}', '${escapeAttr(item.name)}')" title="Preview Stream in In-App Player">
+                    <button class="btn btn-secondary btn-sm" data-action="preview" data-url="${escapeHtml(streamHttpUrl)}" data-title="${escapeHtml(item.name)}" title="Preview Stream in In-App Player">
                         <i class="fa-solid fa-eye"></i> Preview
                     </button>
-                    <button class="btn btn-danger btn-sm" onclick="stopLiveStream('${item.id}')" title="Stop Stream & Close Browser">
+                    <button class="btn btn-danger btn-sm" data-action="stream-stop" data-id="${escapeHtml(item.id)}" title="Stop Stream & Close Browser">
                         <i class="fa-solid fa-stop"></i> Stop
                     </button>
                 `;
             } else if (item.status === 'browser_ready') {
                 actionsHtml = `
-                    <button class="btn btn-emerald btn-sm" onclick="startLiveStream('${item.id}')" title="Start Streaming Captured Window">
+                    <button class="btn btn-emerald btn-sm" data-action="stream-start" data-id="${escapeHtml(item.id)}" title="Start Streaming Captured Window">
                         <i class="fa-solid fa-play"></i> Stream
                     </button>
-                    <button class="btn btn-danger btn-sm" onclick="stopLiveStream('${item.id}')" title="Close Browser Window">
+                    <button class="btn btn-danger btn-sm" data-action="stream-stop" data-id="${escapeHtml(item.id)}" title="Close Browser Window">
                         <i class="fa-solid fa-stop"></i> Stop
                     </button>
                 `;
             } else {
                 actionsHtml = `
-                    <button class="btn btn-secondary btn-sm" onclick="startWebStreamBrowser('${item.id}')" title="Launch Browser Window">
+                    <button class="btn btn-secondary btn-sm" data-action="stream-browser" data-id="${escapeHtml(item.id)}" title="Launch Browser Window">
                         <i class="fa-solid fa-window-restore"></i> Start Browser
                     </button>
                 `;
@@ -1683,16 +1728,16 @@ function renderLiveStreams() {
         } else {
             if (isRunning) {
                 actionsHtml = `
-                    <button class="btn btn-secondary btn-sm" onclick="openVideoPreview('${streamHttpUrl}', '${escapeAttr(item.name)}')" title="Preview Stream in In-App Player">
+                    <button class="btn btn-secondary btn-sm" data-action="preview" data-url="${escapeHtml(streamHttpUrl)}" data-title="${escapeHtml(item.name)}" title="Preview Stream in In-App Player">
                         <i class="fa-solid fa-eye"></i> Preview
                     </button>
-                    <button class="btn btn-danger btn-sm" onclick="stopLiveStream('${item.id}')" title="Stop Stream">
+                    <button class="btn btn-danger btn-sm" data-action="stream-stop" data-id="${escapeHtml(item.id)}" title="Stop Stream">
                         <i class="fa-solid fa-stop"></i> Stop
                     </button>
                 `;
             } else {
                 actionsHtml = `
-                    <button class="btn btn-emerald btn-sm" onclick="startLiveStream('${item.id}')" title="Start Stream">
+                    <button class="btn btn-emerald btn-sm" data-action="stream-start" data-id="${escapeHtml(item.id)}" title="Start Stream">
                         <i class="fa-solid fa-play"></i> Start
                     </button>
                 `;
@@ -1714,14 +1759,14 @@ function renderLiveStreams() {
                     ${vpnBadge}
                     <span class="folder-date-range" style="font-family: 'JetBrains Mono', monospace; font-size: 12px; margin-left: auto; display: flex; align-items: center; gap: 4px;">
                         Port: ${item.port}
-                        <i class="fa-solid fa-copy copy-btn-icon" onclick="copyToClipboard('${streamHttpUrl}')" title="Copy Stream URL (${streamHttpUrl})" style="margin-left: 4px;"></i>
+                        <i class="fa-solid fa-copy copy-btn-icon" data-action="copy-url" data-url="${escapeHtml(streamHttpUrl)}" title="Copy Stream URL (${streamHttpUrl})" style="margin-left: 4px;"></i>
                     </span>
                     <span class="folder-file-count" style="max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 16px;" title="${escapeAttr(item.url)}">${escapeAttr(item.url)}</span>
                     
                     <div class="livestream-actions" style="margin-left: 16px; display: flex; align-items: center; gap: 6px;">
                         ${actionsHtml}
-                        <button class="folder-edit-btn" onclick="openEditLiveStreamModal('${item.id}')" title="Edit Stream" style="height: 26px; width: 26px; display: flex; align-items: center; justify-content: center;"><i class="fa-solid fa-pen"></i></button>
-                        <button class="folder-delete-btn" onclick="deleteLiveStream('${item.id}')" title="Delete Stream" style="height: 26px; width: 26px; display: flex; align-items: center; justify-content: center;"><i class="fa-solid fa-trash"></i></button>
+                        <button class="folder-edit-btn" data-action="stream-edit" data-id="${escapeHtml(item.id)}" title="Edit Stream" style="height: 26px; width: 26px; display: flex; align-items: center; justify-content: center;"><i class="fa-solid fa-pen"></i></button>
+                        <button class="folder-delete-btn" data-action="stream-delete" data-id="${escapeHtml(item.id)}" title="Delete Stream" style="height: 26px; width: 26px; display: flex; align-items: center; justify-content: center;"><i class="fa-solid fa-trash"></i></button>
                     </div>
                 </div>
             </div>
@@ -1736,16 +1781,61 @@ function renderLiveStreams() {
     `;
 }
 
-function openCreateLiveStreamModal() {
+// Shared create/edit/submit logic for the two stream modals (HTTP vs Web).
+const _STREAM_MODAL_DEFS = {
+    http: { prefix: 'livestream', modalId: 'livestream-modal', type: 'http',
+            createTitle: 'Create Live HTTP Stream', editTitle: 'Edit Live HTTP Stream',
+            defPort: 1913, label: 'Live stream' },
+    web:  { prefix: 'webstream', modalId: 'webstream-modal', type: 'web',
+            createTitle: 'Create Web Browser Stream', editTitle: 'Edit Web Browser Stream',
+            defPort: 1916, label: 'Web stream' },
+};
+
+function _openStreamModal(kind, item) {
+    const d = _STREAM_MODAL_DEFS[kind];
     closeAllModals();
-    document.getElementById('livestream-modal-title').textContent = 'Create Live HTTP Stream';
-    document.getElementById('livestream-id').value = '';
-    document.getElementById('livestream-name').value = '';
-    document.getElementById('livestream-url').value = '';
-    document.getElementById('livestream-port').value = '1913';
-    document.getElementById('livestream-use-vpn').checked = false;
-    document.getElementById('livestream-save-btn').textContent = 'Create';
-    document.getElementById('livestream-modal').style.display = 'flex';
+    document.getElementById(`${d.prefix}-modal-title`).textContent = item ? d.editTitle : d.createTitle;
+    document.getElementById(`${d.prefix}-id`).value = item ? item.id : '';
+    document.getElementById(`${d.prefix}-name`).value = item ? (item.name || '') : '';
+    document.getElementById(`${d.prefix}-url`).value = item ? (item.url || '') : '';
+    document.getElementById(`${d.prefix}-port`).value = item ? (item.port || d.defPort) : d.defPort;
+    const useVpn = item ? Boolean(item.use_vpn ?? (item.vpn_mode && item.vpn_mode !== 'none')) : false;
+    document.getElementById(`${d.prefix}-use-vpn`).checked = useVpn;
+    document.getElementById(`${d.prefix}-save-btn`).textContent = item ? 'Save' : 'Create';
+    document.getElementById(d.modalId).style.display = 'flex';
+}
+
+async function _submitStreamForm(kind) {
+    const d = _STREAM_MODAL_DEFS[kind];
+    const streamId = document.getElementById(`${d.prefix}-id`).value;
+    const name = document.getElementById(`${d.prefix}-name`).value.trim();
+    const url = document.getElementById(`${d.prefix}-url`).value.trim();
+    const port = parseInt(document.getElementById(`${d.prefix}-port`).value, 10);
+    const use_vpn = document.getElementById(`${d.prefix}-use-vpn`).checked;
+
+    if (!name || !url || isNaN(port)) {
+        showToast('Please enter valid Name, URL, and Port', 'error');
+        return;
+    }
+
+    try {
+        const payload = { name, url, port, use_vpn, stream_type: d.type };
+        if (streamId) {
+            await api('PUT', `/streamer/live_stream/${streamId}`, payload);
+            showToast(`${d.label} updated`, 'success');
+        } else {
+            await api('POST', '/streamer/live_stream', payload);
+            showToast(`${d.label} created`, 'success');
+        }
+        document.getElementById(d.modalId).style.display = 'none';
+        await fetchLiveStreams();
+    } catch (e) {
+        showToast(`Error saving ${d.label.toLowerCase()}: ${e.message}`, 'error');
+    }
+}
+
+function openCreateLiveStreamModal() {
+    _openStreamModal('http', null);
 }
 
 function openEditLiveStreamModal(streamId) {
@@ -1755,49 +1845,15 @@ function openEditLiveStreamModal(streamId) {
         openEditWebStreamModal(streamId);
         return;
     }
-    closeAllModals();
-    document.getElementById('livestream-modal-title').textContent = 'Edit Live HTTP Stream';
-    document.getElementById('livestream-id').value = item.id;
-    document.getElementById('livestream-name').value = item.name || '';
-    document.getElementById('livestream-url').value = item.url || '';
-    document.getElementById('livestream-port').value = item.port || 1913;
-    const useVpn = item.use_vpn ?? (item.vpn_mode && item.vpn_mode !== 'none');
-    document.getElementById('livestream-use-vpn').checked = Boolean(useVpn);
-    document.getElementById('livestream-save-btn').textContent = 'Save';
-    document.getElementById('livestream-modal').style.display = 'flex';
+    _openStreamModal('http', item);
 }
 
 function closeLiveStreamModal() {
     document.getElementById('livestream-modal').style.display = 'none';
 }
 
-async function submitLiveStream() {
-    const streamId = document.getElementById('livestream-id').value;
-    const name = document.getElementById('livestream-name').value.trim();
-    const url = document.getElementById('livestream-url').value.trim();
-    const port = parseInt(document.getElementById('livestream-port').value, 10);
-    const use_vpn = document.getElementById('livestream-use-vpn').checked;
-
-    if (!name || !url || isNaN(port)) {
-        showToast('Please enter valid Name, URL, and Port', 'error');
-        return;
-    }
-
-    try {
-        const payload = { name, url, port, use_vpn };
-        if (streamId) {
-            await api('PUT', `/streamer/live_stream/${streamId}`, payload);
-            showToast('Live stream updated', 'success');
-        } else {
-            payload.stream_type = 'http';
-            await api('POST', '/streamer/live_stream', payload);
-            showToast('Live stream created', 'success');
-        }
-        closeLiveStreamModal();
-        await fetchLiveStreams();
-    } catch (e) {
-        showToast(`Error saving live stream: ${e.message}`, 'error');
-    }
+function submitLiveStream() {
+    return _submitStreamForm('http');
 }
 
 async function startLiveStream(streamId) {
@@ -1844,62 +1900,21 @@ async function startWebStreamBrowser(streamId) {
 }
 
 function openCreateWebStreamModal() {
-    closeAllModals();
-    document.getElementById('webstream-modal-title').textContent = 'Create Web Browser Stream';
-    document.getElementById('webstream-id').value = '';
-    document.getElementById('webstream-name').value = '';
-    document.getElementById('webstream-url').value = '';
-    document.getElementById('webstream-port').value = '1916';
-    document.getElementById('webstream-use-vpn').checked = false;
-    document.getElementById('webstream-save-btn').textContent = 'Create';
-    document.getElementById('webstream-modal').style.display = 'flex';
+    _openStreamModal('web', null);
 }
 
 function openEditWebStreamModal(streamId) {
     const item = state.liveStreams.find(x => x.id === streamId);
     if (!item) return;
-    closeAllModals();
-    document.getElementById('webstream-modal-title').textContent = 'Edit Web Browser Stream';
-    document.getElementById('webstream-id').value = item.id;
-    document.getElementById('webstream-name').value = item.name || '';
-    document.getElementById('webstream-url').value = item.url || '';
-    document.getElementById('webstream-port').value = item.port || 1916;
-    const useVpn = item.use_vpn ?? (item.vpn_mode && item.vpn_mode !== 'none');
-    document.getElementById('webstream-use-vpn').checked = Boolean(useVpn);
-    document.getElementById('webstream-save-btn').textContent = 'Save';
-    document.getElementById('webstream-modal').style.display = 'flex';
+    _openStreamModal('web', item);
 }
 
 function closeWebStreamModal() {
     document.getElementById('webstream-modal').style.display = 'none';
 }
 
-async function submitWebStream() {
-    const streamId = document.getElementById('webstream-id').value;
-    const name = document.getElementById('webstream-name').value.trim();
-    const url = document.getElementById('webstream-url').value.trim();
-    const port = parseInt(document.getElementById('webstream-port').value, 10);
-    const use_vpn = document.getElementById('webstream-use-vpn').checked;
-
-    if (!name || !url || isNaN(port)) {
-        showToast('Please enter valid Name, Web URL, and Port', 'error');
-        return;
-    }
-
-    try {
-        const payload = { name, url, port, use_vpn, stream_type: 'web' };
-        if (streamId) {
-            await api('PUT', `/streamer/live_stream/${streamId}`, payload);
-            showToast('Web stream updated', 'success');
-        } else {
-            await api('POST', '/streamer/live_stream', payload);
-            showToast('Web stream created', 'success');
-        }
-        closeWebStreamModal();
-        await fetchLiveStreams();
-    } catch (e) {
-        showToast(`Error saving web stream: ${e.message}`, 'error');
-    }
+function submitWebStream() {
+    return _submitStreamForm('web');
 }
 
 let _activeMpegtsPlayer = null;
@@ -1978,11 +1993,50 @@ function closeVideoPreview() {
     if (modal) modal.style.display = 'none';
 }
 
-function clearDoneConverterFiles() {
-    state.converterFiles = state.converterFiles.filter(f => f.status !== 'done');
-    renderConverterFiles();
-    showToast('Cleared finished files from list', 'info');
+async function clearDoneConverterFiles() {
+    try {
+        await api('POST', '/converter/clear-done');
+        state.converterFiles = state.converterFiles.filter(f => f.status !== 'done');
+        renderConverterFiles();
+        showToast('Cleared finished files from list', 'info');
+    } catch (e) {
+        showToast(`Failed to clear finished files: ${e.message}`, 'error');
+    }
 }
+
+// ──────────────────────────────────────────────
+//  Event delegation — single click/dblclick dispatch for data-action elements
+// ──────────────────────────────────────────────
+
+document.addEventListener('click', (e) => {
+    const el = e.target.closest('[data-action]');
+    if (!el || el.disabled) return;
+    const a = el.dataset;
+    switch (a.action) {
+        case 'preview':       openVideoPreview(a.url, a.title || 'Stream Preview'); break;
+        case 'convert':       convertFile(a.filename); break;
+        case 'toggle-folder': toggleFolder(a.name); break;
+        case 'edit-folder':   openModifyFolderModal(e, a.name); break;
+        case 'delete-folder': deleteFolder(e, a.name); break;
+        case 'add-file':      openAddFileModal(a.name, Number(a.port)); break;
+        case 'copy-url':      copyToClipboard(a.url); e.stopPropagation(); break;
+        case 'move-file':     moveFileInSlot(e, a.name, Number(a.port), Number(a.index), Number(a.dir)); break;
+        case 'remove-file':   removeFileFromSlot(e, a.name, Number(a.port), a.filename); break;
+        case 'pick-file':     addFileToSlot(a.folder, Number(a.port), a.filename); break;
+        case 'browse':        browseTo(a.path || ''); break;
+        case 'select-dir':    selectBrowserItem(el, a.path); break;
+        case 'stream-start':   startLiveStream(a.id); break;
+        case 'stream-stop':    stopLiveStream(a.id); break;
+        case 'stream-browser': startWebStreamBrowser(a.id); break;
+        case 'stream-edit':    openEditLiveStreamModal(a.id); break;
+        case 'stream-delete':  deleteLiveStream(a.id); break;
+    }
+});
+
+document.addEventListener('dblclick', (e) => {
+    const el = e.target.closest('[data-dblaction="browse"]');
+    if (el) browseTo(el.dataset.path || '');
+});
 
 window.onVpnModeChange = onVpnModeChange;
 window.onVpnFileSelected = onVpnFileSelected;

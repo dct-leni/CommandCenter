@@ -8,7 +8,10 @@ CommandCenter app built. Video converter (.ts) + continuous RTMP streamer.
    Run `setup_binaries.bat`. Downloads portable **FFmpeg 8.1** + MediaMTX to `bin/`. Stable FFmpeg release ensures max GPU driver compatibility.
 
 2. **Start Application**
-   Run `start.bat`. Installs Python deps (`fastapi`, `uvicorn`, `pyyaml`), launches FastAPI server, opens UI on `http://localhost:8080`. Header shows readiness (**FFmpeg**, **MediaMTX**, **Auto-detected Codec** e.g. `Codec: h264_nvenc`).
+   Run `start.bat`. Installs Python deps (`requirements.txt`: fastapi, uvicorn[standard], pyyaml, python-multipart, httpx, aiohttp, psutil, comtypes + pycaw on Windows), launches FastAPI server, opens UI on `http://localhost:8080`. Header shows readiness (**FFmpeg**, **MediaMTX**, **Auto-detected Codec** e.g. `Codec: h264_nvenc`).
+
+3. **Network Access**
+   Server binds `0.0.0.0:8080` but an IP allowlist middleware only serves loopback (`127.*`, `::1`) and private/LAN ranges (`192.168.*`, `10.*`, `172.16-31.*`, link-local). Public internet addresses get `403 Forbidden`.
 
 ## Features Built
 
@@ -109,7 +112,7 @@ Connect VLC or RTMP client to `rtmp://127.0.0.1:1935/stream`.
     * Headers and navigation bars (`[class*='header']`, `[class*='menu']`, `header`, `nav`, `footer`) auto-hide smoothly (`opacity: 0 !important; transition: opacity 0.3s ease-in-out !important;`).
     * When the user moves or hovers the mouse over the top edge or header area, it immediately reveals (`opacity: 1 !important; pointer-events: auto !important;`) at `z-index: 100001` on top of the full-screen video container.
   * **Universal Full-Window Video Scaling**: `.cc-full-window-player`, `#video__wrapper`, `.video-js`, `#videoPlayer`, `#full-screen-closed` fill `100vw × 100vh` at `z-index: 99990` with `background: #000;`, eliminating top black bars, resetting `.vjs-fluid` padding-top, and centering video with `object-fit: contain`. In-player controls auto-hide during playback and reveal on hover.
-  * **Widevine DRM Support**: Automatically copies `gmp-widevinecdm` into portable Firefox profiles and configures EME prefs for DRM stream playback (S Sport Plus, Tabii, Exxen).
+  * **Widevine DRM Support**: Automatically copies `gmp-widevinecdm` into portable Firefox profiles and configures EME prefs for DRM stream
 * **FFmpeg Titlebar Filter**: `-vf "crop=iw:ih-38:0:38,format=yuv420p"` crops OS titlebar.
 
 ### 10. Web Stream Audio & COM Guardrails — FAILED Approaches (DO NOT RETRY)
@@ -227,4 +230,22 @@ When `-use_wallclock_as_timestamps 1` was specified on BOTH Input 0 (GDIGrab) an
 * **Why**: Unhandled exceptions in background asyncio tasks fail silently or crash the event loop.
 * **Solution**: Use `safe_create_task(coro, name=...)` in `app/main.py` which automatically logs tracebacks upon task failure.
 
+### 20. API Architecture & Security
 
+* **Router split**: `app/main.py` is a slim entry point (~250 lines: lifespan, middleware, static mount, uvicorn). All endpoints live in `app/routers/`:
+  * `system.py` — config GET/PUT, `/api/system/status`, `/ws/status` WebSocket, `/api/browse`
+  * `converter.py` — scan/status/convert/stop/clear-done/upload/thumbnail/move
+  * `streamer.py` — folders/slots/EPG/streaming scheduler
+  * `live.py` — live relay CRUD/start/stop/logs/browser + global VPN
+  * `common.py` — port-conflict validation helpers shared by config/streamer/live routes
+* **LAN-only guard**: ASGI middleware allows loopback + private/link-local IP ranges only (`ipaddress.is_loopback / is_private / is_link_local`); public addresses get 403.
+* **Blocking-call hygiene**: sync work (thumbnail generation via `subprocess.run`, folder rescans) is wrapped in `run_in_executor` inside async endpoints so the event loop never stalls.
+* **Upload hardening**: uploaded filenames are reduced to their basename before joining the target folder (path-traversal safe).
+
+### 21. Frontend Status Channel & UI Robustness
+
+* **Single WebSocket**: The UI subscribes once to `/ws/status` (server pushes a full snapshot every 1s: system, VPN, converter files, streamer status, live relays). No HTTP polling timers.
+* **Signature-gated re-renders**: Converter file list, folder/slot list, and live-stream list re-render only when the payload actually changes — hover/drag state survives background updates.
+* **Event delegation**: Rendered cards use `data-action` attributes dispatched by one document-level click/dblclick listener instead of inline `onclick="fn('...')"` string handlers — eliminates the XSS sink from disk/user-supplied names in template strings.
+* **Server-side clear-done**: `POST /api/converter/clear-done` removes completed entries from the converter's in-memory list (the old client-side-only filter fought the refresh loop).
+* **Scan race guard**: Monotonic tokens discard stale scan responses when rapid re-scans overlap.

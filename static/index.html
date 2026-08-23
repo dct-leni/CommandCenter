@@ -25,7 +25,7 @@
                 <h1>CommandCenter</h1>
                 <span class="panel-subtitle">VIDEO & STREAMING</span>
             </div>
-            <span class="version-badge">V0.2</span>
+            <span class="version-badge">V0.3</span>
         </div>
         <div class="header-right">
             <div class="system-status" id="system-status">
@@ -45,6 +45,13 @@
                 <div class="status-indicator divider-left">
                     <i class="fa-solid fa-microchip status-icon"></i>
                     <span class="status-label" id="codec-status-label">Codec: detecting...</span>
+                </div>
+                <div class="status-indicator divider-left" title="Start CommandCenter automatically at Windows logon (visible window, same as start.bat)">
+                    <label class="cc-switch">
+                        <input type="checkbox" id="auto-start-boot">
+                        <span class="cc-slider"></span>
+                    </label>
+                    <span class="status-label">Auto-start</span>
                 </div>
             </div>
         </div>

@@ -295,9 +295,8 @@ body {
 }
 
 .btn-icon { font-size: 14px; }
-.btn-sm { padding: 4px 8px; font-size: 12px; }
 
-.action-row, .port-range-row { 
+.action-row {
     display: flex; 
     align-items: center; 
     gap: 8px; 
@@ -363,7 +362,7 @@ body {
 }
 
 /* File & Folder Lists */
-.file-list, .folder-list { 
+.file-list {
     flex: 1; 
     overflow-y: auto; 
     display: flex; 
@@ -906,44 +905,6 @@ body {
     border-color: var(--emerald);
     box-shadow: 0 0 16px rgba(16, 185, 129, 0.12);
 }
-.livestream-card-header {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 14px 16px;
-}
-.livestream-icon {
-    color: var(--accent);
-    font-size: 16px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-.livestream-title {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--text-primary);
-}
-.livestream-url {
-    font-size: 12px;
-    color: var(--text-secondary);
-    font-family: 'JetBrains Mono', monospace;
-    flex: 1;
-    min-width: 0;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-.livestream-port-badge {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--accent);
-    background: var(--accent-glow);
-    border: 1px solid rgba(217, 119, 6, 0.3);
-    border-radius: 4px;
-    padding: 2px 8px;
-    font-family: 'JetBrains Mono', monospace;
-}
 .livestream-status {
     font-size: 11px;
     font-weight: 700;
@@ -1072,3 +1033,46 @@ body {
     .app-main { grid-template-columns: 1fr; }
 }
 
+
+/* -- Auto-start toggle switch (header, matches theme) -- */
+.cc-switch {
+    position: relative;
+    display: inline-block;
+    width: 36px;
+    height: 20px;
+    flex-shrink: 0;
+}
+.cc-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+.cc-slider {
+    position: absolute;
+    cursor: pointer;
+    inset: 0;
+    background: var(--bg-input);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    transition: all 0.25s ease-in-out;
+}
+.cc-slider::before {
+    content: "";
+    position: absolute;
+    height: 14px;
+    width: 14px;
+    left: 2px;
+    top: 50%;
+    transform: translateY(-50%);
+    background: var(--text-muted);
+    border-radius: 50%;
+    transition: all 0.25s ease-in-out;
+}
+.cc-switch input:checked + .cc-slider {
+    background: var(--accent-dim);
+    border-color: var(--accent);
+}
+.cc-switch input:checked + .cc-slider::before {
+    transform: translate(16px, -50%);
+    background: var(--text-primary);
+}

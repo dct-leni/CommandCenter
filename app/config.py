@@ -55,6 +55,7 @@ class StreamerConfig:
 class ServerConfig:
     host: str = "0.0.0.0"
     port: int = 8080
+    auto_start: bool = False  # register/unregister Windows Run-key entry (start on boot)
 
 
 @dataclass

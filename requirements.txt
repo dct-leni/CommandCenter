@@ -7,5 +7,4 @@ aiohttp>=3.9.0
 comtypes>=1.4.0; sys_platform=="win32"
 psutil>=5.9.0
 pycaw>=20230407; sys_platform=="win32"
-
-
+pydantic>=2.13.4
