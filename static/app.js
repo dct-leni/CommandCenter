@@ -441,6 +441,7 @@ function renderConverterFiles() {
                 <div class="file-actions" style="display:flex; align-items:center; gap:6px;">
                     ${statusHtml}
                     ${actionHtml}
+                    ${file.status !== 'converting' ? `<button class="folder-delete-btn" data-action="delete-file" data-filename="${escapeHtml(file.filename)}" title="Delete from input folder (also removes its converted .ts if present)" style="height: 26px; width: 26px; display: flex; align-items: center; justify-content: center;"><i class="fa-solid fa-trash"></i></button>` : ''}
                 </div>
             </div>
         `;
@@ -1993,6 +1994,18 @@ function closeVideoPreview() {
     if (modal) modal.style.display = 'none';
 }
 
+async function deleteConverterFile(filename) {
+    if (!confirm(`Delete "${filename}" from the input folder?\nIts converted .ts file (if any) is removed too.`)) return;
+    try {
+        await api('DELETE', '/converter/file', { filename });
+        state.converterFiles = state.converterFiles.filter(f => f.filename !== filename);
+        renderConverterFiles();
+        showToast(`Deleted ${filename}`, 'success');
+    } catch (e) {
+        showToast(`Failed to delete: ${e.message}`, 'error');
+    }
+}
+
 async function clearDoneConverterFiles() {
     try {
         await api('POST', '/converter/clear-done');
@@ -2015,6 +2028,7 @@ document.addEventListener('click', (e) => {
     switch (a.action) {
         case 'preview':       openVideoPreview(a.url, a.title || 'Stream Preview'); break;
         case 'convert':       convertFile(a.filename); break;
+        case 'delete-file':   deleteConverterFile(a.filename); break;
         case 'toggle-folder': toggleFolder(a.name); break;
         case 'edit-folder':   openModifyFolderModal(e, a.name); break;
         case 'delete-folder': deleteFolder(e, a.name); break;

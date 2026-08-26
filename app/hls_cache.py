@@ -11,10 +11,12 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 class HlsCacheManager:
-    def __init__(self, max_size: int = 300, m3u8_ttl: float = 1.0):
+    def __init__(self, max_size: int = 300, max_bytes: int = 512 * 1024 * 1024, m3u8_ttl: float = 1.0):
         self.max_size = max_size
+        self.max_bytes = max_bytes  # Default 512 MB RAM ceiling
         self.m3u8_ttl = m3u8_ttl
         self._cache: Dict[str, Tuple[float, bytes, str]] = {}
+        self._total_bytes: int = 0
         self._locks: Dict[str, asyncio.Event] = {}
         self.client: Optional[httpx.AsyncClient] = None
         self._runners: Dict[int, web.AppRunner] = {}
@@ -34,12 +36,12 @@ class HlsCacheManager:
             # Enable follow_redirects=True to handle MediaMTX 302 redirects
             self.client = httpx.AsyncClient(timeout=5.0, follow_redirects=True)
 
-    def _evict_if_needed(self):
-        if len(self._cache) > self.max_size:
-            items_to_remove = max(1, int(self.max_size * 0.1))
-            keys_to_remove = list(self._cache.keys())[:items_to_remove]
-            for k in keys_to_remove:
-                self._cache.pop(k, None)
+    def _evict_if_needed(self, new_bytes: int = 0):
+        while self._cache and (len(self._cache) >= self.max_size or (self._total_bytes + new_bytes) > self.max_bytes):
+            oldest_key = next(iter(self._cache))
+            popped = self._cache.pop(oldest_key, None)
+            if popped:
+                self._total_bytes = max(0, self._total_bytes - len(popped[1]))
 
     async def get_file(self, base_url: str, filename_with_qs: str) -> Optional[Tuple[bytes, str]]:
         if not self.client:
@@ -81,8 +83,11 @@ class HlsCacheManager:
             if response.status_code == 200:
                 data = response.content
                 media_type = response.headers.get("content-type", "application/octet-stream")
-                self._evict_if_needed()
+                self._evict_if_needed(len(data))
+                if cache_key in self._cache:
+                    self._total_bytes = max(0, self._total_bytes - len(self._cache[cache_key][1]))
                 self._cache[cache_key] = (time.time(), data, media_type)
+                self._total_bytes += len(data)
                 return data, media_type
             elif response.status_code == 401 and "main_stream.m3u8" in filename_with_qs:
                 # Session is dead! Auto-recover by fetching index.m3u8 to get the valid session ID
@@ -97,10 +102,13 @@ class HlsCacheManager:
                         if new_resp.status_code == 200:
                             data = new_resp.content
                             media_type = new_resp.headers.get("content-type", "application/octet-stream")
-                            self._evict_if_needed()
+                            self._evict_if_needed(len(data))
                             # Cache the successful NEW data under the OLD cache key
                             # This completely hides the session reset from the stale video player!
+                            if cache_key in self._cache:
+                                self._total_bytes = max(0, self._total_bytes - len(self._cache[cache_key][1]))
                             self._cache[cache_key] = (time.time(), data, media_type)
+                            self._total_bytes += len(data)
                             return data, media_type
                 return None
             else:

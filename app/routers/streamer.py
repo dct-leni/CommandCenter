@@ -125,8 +125,16 @@ async def streamer_delete_folder(folder_name: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def generate_epg_for_folder(folder_name: str) -> Optional[str]:
+_EPG_CACHE: dict = {}  # folder_name -> (timestamp, output_path)
+
+def generate_epg_for_folder(folder_name: str, force: bool = False) -> Optional[str]:
     """Helper to generate EPG for a folder and return its output path."""
+    import time
+    if not force and folder_name in _EPG_CACHE:
+        ts, cached_path = _EPG_CACHE[folder_name]
+        if time.time() - ts < 60.0 and Path(cached_path).exists():
+            return cached_path
+
     folder = streamer._find_folder(folder_name)
     if not folder:
         logger.warning(f"Could not generate EPG: folder '{folder_name}' not found")
@@ -196,6 +204,9 @@ def generate_epg_for_folder(folder_name: str) -> Optional[str]:
             timezone_str=timezone_str,
             port_range_start=cfg.streamer.port_range_start,
         )
+        if output_path:
+            import time
+            _EPG_CACHE[folder_name] = (time.time(), output_path)
         return output_path
     except Exception as e:
         logger.error(f"Failed to generate EPG for folder {folder_name}: {e}")
@@ -219,7 +230,7 @@ async def streamer_update_slot(folder_name: str, body: SlotUpdate):
     ok = streamer.update_slot(folder_name, body.port, body.files)
 
     # Auto-generate EPG on slot configuration changes
-    generate_epg_for_folder(folder_name)
+    generate_epg_for_folder(folder_name, force=True)
 
     # Restart the active stream dynamically to apply new order
     if streamer.is_running and body.port in streamer.active_streams:

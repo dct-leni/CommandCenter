@@ -78,7 +78,8 @@ def _get_ffprobe_path() -> str:
         if guess.exists():
             return str(guess)
     return "ffprobe"
- 
+
+_PROBE_STREAMS_CACHE: dict = {}
  
 async def probe_streams(input_path: str) -> dict:
     """
@@ -87,7 +88,17 @@ async def probe_streams(input_path: str) -> dict:
         "video": {"index": int, "width": int, "height": int} | None,
         "audio": [{"index": int, "language": str, "title": str}, ...],
       }
+    Cached in memory based on file path, mtime, and size.
     """
+    cache_key = ""
+    try:
+        stat = os.stat(input_path)
+        cache_key = f"{input_path}:{stat.st_mtime}:{stat.st_size}"
+        if cache_key in _PROBE_STREAMS_CACHE:
+            return _PROBE_STREAMS_CACHE[cache_key]
+    except Exception:
+        pass
+
     ffprobe = _get_ffprobe_path()
     cmd = [
         ffprobe, "-v", "quiet",
@@ -125,6 +136,9 @@ async def probe_streams(input_path: str) -> dict:
             codec_name = (stream.get("codec_name") or "").lower()
             result["audio"].append({"index": idx, "language": language, "title": title, "codec": codec_name})
  
+    if cache_key:
+        _PROBE_STREAMS_CACHE[cache_key] = result
+
     return result
  
  
@@ -181,7 +195,10 @@ class Converter:
         self.source_folder: str = ""
         self._active_processes: Dict[str, subprocess.Popen] = {}
         self._queue: List[str] = []
-        self._queue_worker_task: Optional[asyncio.Task] = None
+        self._queue_workers: list = []
+        # ponytail: fixed 2-slot worker pool (2 NVENC sessions) — leaves the 3rd
+        # RTX-2070 session free for live streams; make configurable if that changes.
+        self.MAX_CONCURRENT_CONVERSIONS = 2
         # Every directory we've ever seen a thumbnail written into, so we can
         # still find + remove orphans even if every file in a folder vanished
         # in one go (in which case this scan has zero "valid" thumbnails to
@@ -210,6 +227,10 @@ class Converter:
             if not f.is_file():
                 continue
  
+            # Clean up or ignore temporary .tmp.ts files
+            if f.name.endswith(".tmp.ts"):
+                continue
+
             ext = f.suffix.lower()
  
             # Check if this is an already-converted .ts file
@@ -374,20 +395,35 @@ class Converter:
         # 1. Clear the queue
         self._queue.clear()
 
-        # 2. Cancel the queue worker task
-        if self._queue_worker_task and not self._queue_worker_task.done():
-            self._queue_worker_task.cancel()
-            self._queue_worker_task = None
+        # 2. Cancel the queue workers and WAIT for them — cancellation is what
+        # kills their ffmpeg children; deleting files before that completes
+        # races the still-open handles (WinError 32).
+        for worker in self._queue_workers:
+            if not worker.done():
+                worker.cancel()
+        if self._queue_workers:
+            await asyncio.gather(*self._queue_workers, return_exceptions=True)
+        self._queue_workers.clear()
 
-        # 3. Terminate all active processes
-        active_filenames = list(self._active_processes.keys())
-        for filename in active_filenames:
+        # 3. Belt-and-braces: terminate anything still alive, await real exit
+        for filename in list(self._active_processes.keys()):
             process = self._active_processes.get(filename)
-            if process:
+            if process and process.returncode is None:
                 try:
                     process.terminate()
                 except Exception as e:
                     logger.warning(f"Error terminating process for {filename}: {e}")
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=3.0)
+                except asyncio.TimeoutError:
+                    try:
+                        process.kill()
+                        await process.wait()
+                    except Exception as e:
+                        logger.error(f"Failed to kill ffmpeg for {filename}: {e}")
+                except Exception as e:
+                    logger.warning(f"Error waiting for process {filename}: {e}")
+            self._active_processes.pop(filename, None)
 
         # Let the OS clean up processes
         await asyncio.sleep(0.5)
@@ -398,38 +434,50 @@ class Converter:
                 info.status = ConversionStatus.PENDING
                 info.progress = 0.0
                 info.error = ""
-                # Delete the incomplete .ts file
-                try:
-                    output_path = Path(info.filepath).parent / info.ts_filename
-                    if output_path.exists():
-                        output_path.unlink(missing_ok=True)
-                        logger.info(f"Deleted incomplete file: {output_path}")
-                except Exception as e:
-                    logger.warning(f"Could not delete incomplete file for {fname}: {e}")
+                # Delete incomplete .ts and .tmp.ts files (retry — handle release can lag)
+                parent_dir = Path(info.filepath).parent
+                output_path = parent_dir / info.ts_filename
+                tmp_path = parent_dir / f"{info.ts_filename}.tmp.ts"
+                for target in (tmp_path, output_path):
+                    if target.exists():
+                        for attempt in range(8):
+                            try:
+                                target.unlink(missing_ok=True)
+                                logger.info(f"Deleted incomplete file: {target}")
+                                break
+                            except OSError as e:
+                                if attempt == 7:
+                                    logger.warning(f"Could not delete incomplete file {target}: {e}")
+                                else:
+                                    await asyncio.sleep(0.3)
 
         # Rescan the directory to ensure state is clean
         self.scan_folder(self.source_folder)
         return True
 
     def _start_queue_worker(self):
-        if self._queue_worker_task is None or self._queue_worker_task.done():
-            self._queue_worker_task = asyncio.create_task(self._process_queue())
+        # Top up the worker pool: one task per queued file, capped at
+        # MAX_CONCURRENT_CONVERSIONS (2 NVENC sessions; 3rd kept for streams).
+        self._queue_workers = [t for t in self._queue_workers if not t.done()]
+        while len(self._queue_workers) < min(self.MAX_CONCURRENT_CONVERSIONS, len(self._queue)):
+            self._queue_workers.append(asyncio.create_task(self._process_queue()))
 
     async def _process_queue(self):
         logger.info("Starting queue worker loop")
-        while self._queue:
-            filename = self._queue[0]
+        while True:
+            # Atomic claim — pop before any await (single event loop, no lock needed)
+            if not self._queue:
+                break
+            filename = self._queue.pop(0)
             info = self.files.get(filename)
             if not info:
-                self._queue.pop(0)
                 continue
 
             if info.status == ConversionStatus.DONE:
-                self._queue.pop(0)
                 continue
 
             # Disk-space guard: .ts output can exceed source size (bitrate-capped
-            # transcode); require free space >= 1.2x source, re-checked per file.
+            # transcode); require free space >= source + 512 MB, re-checked per file.
             try:
                 import shutil as _shutil
                 out_dir = Path(info.filepath).parent
@@ -445,7 +493,6 @@ class Converter:
                         f"Insufficient disk space on {str(out_dir.drive)} — "
                         f"need ~{needed / 1e9:.1f} GB, {free_bytes / 1e9:.1f} GB free"
                     )
-                    self._queue.pop(0)
                     continue
             except OSError:
                 pass  # cannot stat — let the conversion attempt proceed
@@ -456,13 +503,12 @@ class Converter:
 
             try:
                 await self._run_conversion(filename)
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.error(f"Error running conversion for {filename}: {e}")
                 info.status = ConversionStatus.ERROR
                 info.error = str(e)
-            finally:
-                if self._queue and self._queue[0] == filename:
-                    self._queue.pop(0)
 
         logger.info("Queue worker loop finished (queue empty)")
  
@@ -471,57 +517,68 @@ class Converter:
         info = self.files[filename]
         input_path = info.filepath
         output_path = str(Path(input_path).parent / info.ts_filename)
- 
+        tmp_output_path = str(Path(input_path).parent / f"{info.ts_filename}.tmp.ts")
+
         try:
+            # Clean up any leftover partial .tmp.ts file before starting
+            Path(tmp_output_path).unlink(missing_ok=True)
+
             # Probe the file so we know which audio track(s) to keep and
             # whether the video needs to be scaled down to HD.
             streams = await probe_streams(input_path)
- 
+
             cfg = load_config()
             languages = cfg.converter.languages or ["tur", "tr", "trk"]
- 
+
             audio_indices, audio_note = _select_audio_by_language(streams["audio"], languages)
             info.audio_note = audio_note
             logger.info(f"{filename}: {audio_note}")
- 
+
             target_size = None
             if streams["video"]:
                 target_size = _compute_target_size(streams["video"]["width"], streams["video"]["height"])
- 
+
             needs_scale = target_size is not None
             info.scaled_note = (
                 f"downscaling to {target_size[0]}x{target_size[1]} (HD cap)"
                 if needs_scale else "no scaling needed (already HD or smaller)"
             )
             logger.info(f"{filename}: {info.scaled_note}")
- 
+
             video_stream_index = streams["video"]["index"] if streams["video"] else None
             success = False
- 
+
             # Try hardware encoding if supported
             from app.ffmpeg_setup import get_best_encoder
             best_encoder = get_best_encoder()
             if best_encoder in ("h264_nvenc", "h264_qsv"):
                 logger.info(f"Re-encoding with hardware ({best_encoder}) for {filename}...")
                 success = await self._ffmpeg_convert(
-                    input_path, output_path, filename, strategy="hardware",
+                    input_path, tmp_output_path, filename, strategy="hardware",
                     video_stream_index=video_stream_index,
                     audio_indices=audio_indices,
                     target_size=target_size,
                 )
- 
+
             # CPU fallback
             if not success:
                 logger.info(f"Re-encoding with CPU (libx264) for {filename}...")
                 info.progress = 0.0
                 success = await self._ffmpeg_convert(
-                    input_path, output_path, filename, strategy="cpu",
+                    input_path, tmp_output_path, filename, strategy="cpu",
                     video_stream_index=video_stream_index,
                     audio_indices=audio_indices,
                     target_size=target_size,
                 )
- 
-            if success:
+
+            if success and Path(tmp_output_path).exists():
+                # Atomic rename of complete .tmp.ts to final .ts
+                try:
+                    os.replace(tmp_output_path, output_path)
+                except Exception as e:
+                    logger.warning(f"os.replace failed ({e}), falling back to shutil.move")
+                    shutil.move(tmp_output_path, output_path)
+
                 info.status = ConversionStatus.DONE
                 info.progress = 1.0
                 # Move original file to 'original' subfolder
@@ -533,21 +590,23 @@ class Converter:
                     info.filepath = str(original_path)
                 except Exception as e:
                     logger.warning(f"Could not move original file: {e}")
- 
+
                 # Update metadata for the new .ts file (thumbnails generated via stream snapshots every 10min)
                 info.metadata = get_video_metadata(output_path)
                 if Path(output_path).exists():
                     info.size = Path(output_path).stat().st_size
- 
+
                 logger.info(f"Conversion complete: {filename} → {info.ts_filename}")
             else:
                 info.status = ConversionStatus.ERROR
                 # Clean up partial output
+                Path(tmp_output_path).unlink(missing_ok=True)
                 Path(output_path).unlink(missing_ok=True)
- 
+
         except Exception as e:
             info.status = ConversionStatus.ERROR
             info.error = str(e)
+            Path(tmp_output_path).unlink(missing_ok=True)
             logger.error(f"Conversion failed for {filename}: {e}")
         finally:
             self._active_processes.pop(filename, None)
@@ -628,6 +687,9 @@ class Converter:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             info.ffmpeg_process = process
+            # Register for stop_conversion() — without this the STOP button
+            # iterates an empty dict and ffmpeg keeps running, locking the .ts.
+            self._active_processes[filename] = process
 
             buffer = ""
             stderr_data = []
@@ -652,14 +714,25 @@ class Converter:
                             info.progress = min(current_sec / duration, 0.99)
  
             await process.wait()
- 
+
             if process.returncode == 0 and Path(output_path).exists():
                 return True
             else:
                 stderr_text = "".join(stderr_data)
                 info.error = stderr_text[-300:]
                 return False
- 
+
+        except asyncio.CancelledError:
+            # STOP pressed / worker cancelled: kill ffmpeg so the partial .ts
+            # handle is released and can be deleted.
+            proc = self._active_processes.get(filename) or getattr(info, "ffmpeg_process", None)
+            if proc is not None and proc.returncode is None:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception as e:
+                    logger.warning(f"Failed to kill ffmpeg for {filename}: {e}")
+            raise
         except Exception as e:
             info.error = str(e)
             return False

@@ -619,6 +619,12 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         'user_pref("network.http.throttle.enable", false);',
         'user_pref("media.block-autoplay-until-in-foreground", false);',
 
+        # --- Memory-Only Caching (Zero Disk Accumulation on 24/7 streams) ---
+        'user_pref("browser.cache.disk.enable", false);',
+        'user_pref("browser.cache.memory.enable", true);',
+        'user_pref("browser.cache.memory.capacity", 65536);',
+        'user_pref("browser.sessionhistory.max_entries", 2);',
+
         # --- Force Software WebRender (Direct GDI window compatibility) ---
         'user_pref("gfx.webrender.all", false);',
         'user_pref("gfx.webrender.software", true);',

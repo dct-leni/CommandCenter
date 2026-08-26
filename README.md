@@ -10,17 +10,22 @@ CommandCenter app built. Video converter (.ts) + continuous RTMP streamer.
 2. **Start Application**
    Run `start.bat`. Installs Python deps (`requirements.txt`: fastapi, uvicorn[standard], pyyaml, python-multipart, httpx, aiohttp, psutil, comtypes + pycaw on Windows), launches FastAPI server, opens UI on `http://localhost:8080`. Header shows readiness (**FFmpeg**, **MediaMTX**, **Auto-detected Codec** e.g. `Codec: h264_nvenc`).
 
-3. **Network Access**
+3. **Run Unit Tests**
+   Run `python -m pytest` from the root directory. Executes the 35-test unit suite covering config roundtrips, converter pool concurrency, stream probing, EPG XMLTV generation, HLS cache byte eviction, port conflict validation, and VPN management.
+
+4. **Network Access**
    Server binds `0.0.0.0:8080` but an IP allowlist middleware only serves loopback (`127.*`, `::1`) and private/LAN ranges (`192.168.*`, `10.*`, `172.16-31.*`, link-local). Public internet addresses get `403 Forbidden`.
 
 ## Features Built
 
 ### 1. Converter Panel (Left Side)
 - Click **Browse** select video folder (`.mp4`, `.mkv`, `.avi`).
-- **Auto-Scanning:** Detects videos, pulls metadata, extracts preview thumbnail via FFmpeg.
-- **Conversion:** Click "Convert All" or individual "Convert". Processes sequentially. Transcodes to optimize bitrate (~2.8 Mbps), GOP (`-g 60`), audio (AAC stereo). High-motion/dark scenes optimized via **Spatial/Temporal AQ** (NVENC), **Lookahead** (QSV), **CRF 21 VBV** (CPU).
+- **Auto-Scanning & Cached Probing:** Detects videos, pulls metadata, extracts preview thumbnails via FFmpeg. Probing results cached in-memory (`_PROBE_STREAMS_CACHE`) to eliminate redundant disk accesses.
+- **Parallel Worker Pool:** Queue processes up to 2 concurrent hardware/CPU conversion workers (`MAX_CONCURRENT_CONVERSIONS = 2`), reserving GPU capacity for live streaming.
+- **Atomic File Writing:** Transcoding writes directly to temporary `.tmp.ts` and atomically replaces to final `.ts` upon return code `0`. Incomplete/aborted `.tmp.ts` files are automatically cleaned up on cancellation or folder rescans.
+- **Transcoding Optimization:** Optimizes bitrate (~2.8 Mbps), GOP (`-g 60`), audio (AAC stereo). High-motion/dark scenes optimized via **Spatial/Temporal AQ** (NVENC), **Lookahead** (QSV), **CRF 21 VBV** (CPU).
 - **Cleanup:** Source file moves to `original/` subfolder post-conversion.
-- **Stop Conversion:** Click **Stop Convert** to cancel queue, kill FFmpeg transcode, delete incomplete `.ts`.
+- **Stop Conversion:** Click **Stop Convert** to cancel queue, gracefully terminate active FFmpeg workers, and delete incomplete `.tmp.ts` / `.ts` files.
 
 ### 2. Streamer Panel (Right Side) & Slot System
 - **Folder & Slot Discovery:** Select root with `DDMM_DDMM` subdirectories. Shows **Port Slots** (`:1935`, `:1936`).
@@ -32,10 +37,11 @@ CommandCenter app built. Video converter (.ts) + continuous RTMP streamer.
   - Assign slot moves `.ts` to `streams/DDMM_DDMM/`.
   - Remove **✕** checks remaining usage. If unused, moves `.ts` back to Converter input.
   - Unassigned `.ts` files inside date-range folder auto-returned to input folder.
-- **Automated EPG Generation**: Auto-regenerates EPG XML (`salon.xml`) inside active date-range folder when files change. Skipped if non-active or empty.
+- **Automated EPG Generation & Caching**: Auto-regenerates XMLTV EPG (`salon.xml`) inside active date-range folder with 60-second in-memory caching (`_EPG_CACHE`) to serve external IPTV player polls instantly. Auto-invalidates on slot changes.
 
 ### 3. Rich Metadata & Reliable Layout
 - **Video Specs:** Displays duration (`H:MM:SS`), resolution (`1920×1080`), codec (`H264_NVENC`), fps (`30fps`), bitrate (`6.2 Mbps`).
+- **Live Active Viewer Badge:** Real-time viewer badge (`👁️ X viewers`) dynamically updated via HLS proxy client counting (`get_active_viewer_count`).
 - **Notes & Probing:** Probes converted `.ts` files. Shows downscaling/audio notes under items.
 - **Layout:** Slot entries (`.slot-file-entry`) fixed height + fallback thumbnail (`🎬`).
 
@@ -44,6 +50,7 @@ CommandCenter app built. Video converter (.ts) + continuous RTMP streamer.
 - **Idempotent Config Saving & Boot Resilience:** `save_config` writes only on change (`old_data == data`) to prevent Uvicorn reload loop. `lifespan` restores active streams on boot.
 - **Missing Config Auto-Populate:** `load_config()` appends missing default keys (`live_streams`, `playlists`, etc.) to `config.yml` while preserving user values.
 - **Ultra-Fast Folder Opening:** Metadata cached (`_METADATA_CACHE` / `metadata_cache.json`) + non-blocking thumbnails (`get_thumbnail_path.exists()`), dropping load time <5ms.
+- **Byte-Bounded HLS Memory Limit:** `HlsCacheManager` caps segment RAM usage at 512 MB (`max_bytes`) with automatic byte-aware eviction.
 
 ## Testing Stream
 Connect VLC or RTMP client to `rtmp://127.0.0.1:1935/stream`.

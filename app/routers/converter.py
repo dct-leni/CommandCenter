@@ -30,6 +30,48 @@ class MoveFileRequest(BaseModel):
     target_folder: str
 
 
+class FileDeleteRequest(BaseModel):
+    filename: str
+
+
+@router.delete("/api/converter/file")
+async def converter_delete_file(body: FileDeleteRequest):
+    """Delete a source video (and its converted .ts, if any) from the input folder."""
+    if body.filename not in converter.files:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    info = converter.files[body.filename]
+    if info.status in ("converting", "queued"):
+        raise HTTPException(status_code=409, detail="File is being converted — stop conversion first")
+
+    src = Path(info.filepath).resolve()
+    root = Path(converter.source_folder).resolve()
+    if not src.is_relative_to(root):
+        raise HTTPException(status_code=400, detail="Refusing to delete outside the input folder")
+
+    targets = [src]
+    if info.ts_filename:
+        ts = src.parent / info.ts_filename
+        if ts.is_relative_to(root):
+            targets.append(ts)
+
+    deleted = []
+    errors = []
+    for p in targets:
+        try:
+            if p.exists():
+                await asyncio.get_running_loop().run_in_executor(None, p.unlink)
+                deleted.append(p.name)
+        except Exception as e:
+            errors.append(f"{p.name}: {e}")
+
+    if errors:
+        raise HTTPException(status_code=500, detail="; ".join(errors))
+
+    del converter.files[body.filename]
+    return {"status": "ok", "deleted": deleted}
+
+
 @router.post("/api/converter/scan")
 async def converter_scan(body: FolderPath):
     """Scan a folder for video files."""

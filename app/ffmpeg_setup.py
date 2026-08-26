@@ -187,7 +187,7 @@ def get_encoding_params(
     buf_b_str    = _format_rate(buf_b_bps)
 
     if encoder == "h264_nvenc":
-        preset = "p4" if mode == "web" else "p5"
+        preset = "p4" if mode in ("web", "relay") else "p5"
         params = [
             "-c:v", "h264_nvenc",
             "-preset", preset,
@@ -202,9 +202,16 @@ def get_encoding_params(
             # Using -bf 0 (No B-Frames) cuts GPU Video Engine load by ~40% and reduces encoding latency.
             params.extend(["-rc", "cbr", "-bf", "0"])
         elif mode == "converter":
-            params.extend(["-rc", "vbr", "-cq", "24", "-spatial-aq", "1", "-temporal-aq", "1"])
+            # Turing+ extras (RTX 20xx): two-pass analysis, lookahead and
+            # B-frames-as-references are offline-only quality wins.
+            params.extend([
+                "-rc", "vbr", "-cq", "24", "-spatial-aq", "1", "-temporal-aq", "1",
+                "-multipass", "fullres", "-rc-lookahead", "20", "-b_ref_mode", "middle",
+            ])
         elif mode == "relay":
-            params.extend(["-rc", "vbr", "-temporal-aq", "1"])
+            # p4: negligible quality delta at capped VBR, more headroom for
+            # concurrent streams; -bf 0 trims one segment of encode latency.
+            params.extend(["-rc", "vbr", "-temporal-aq", "1", "-bf", "0"])
         return params
 
     elif encoder == "h264_qsv":
@@ -217,8 +224,23 @@ def get_encoding_params(
             "-bufsize", buf_b_str,
             "-g", "60",
         ]
-        if mode == "converter":
-            params.extend(["-look_ahead", "1", "-look_ahead_depth", "15"])
+        if mode == "web":
+            # Same rationale as the NVENC web branch: screen/window capture needs
+            # single-pass CBR without lookahead/B-frames to prevent frame stalls
+            # and keep latency flat. `-rc cbr`/`-bf 0` behave identically on
+            # Windows MSDK and Linux oneVPL.
+            params.extend(["-rc", "cbr", "-bf", "0"])
+        elif mode == "relay":
+            # Live relay: explicit VBR + no B-frames for lower latency.
+            params.extend(["-rc", "vbr", "-bf", "0"])
+        elif mode == "converter":
+            if os.name == "nt":
+                # Lookahead is stable on Windows MSDK drivers.
+                params.extend(["-look_ahead", "1", "-look_ahead_depth", "15"])
+            else:
+                # look_ahead on Linux oneVPL (Gen12 iGPU / N100) is driver-flaky;
+                # plain explicit VBR is the stable path there.
+                params.extend(["-rc", "vbr"])
         return params
 
     elif encoder == "libx264":
