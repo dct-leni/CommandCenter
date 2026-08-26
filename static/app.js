@@ -602,18 +602,7 @@ function renderStreamerFolders() {
         `;
     }).join('');
 
-    const newFolderBtnHtml = `
-        <div style="display: flex; justify-content: center; gap: 10px; margin: 20px 0;">
-            <button class="btn btn-secondary" onclick="openCreateFolderModal()" style="padding: 8px 16px;">
-                + New Folder
-            </button>
-            <button class="btn btn-secondary" onclick="openCreateLiveStreamModal()" style="padding: 8px 16px;">
-                + New Stream
-            </button>
-        </div>
-    `;
-
-    container.innerHTML = cardsHtml + newFolderBtnHtml;
+    container.innerHTML = cardsHtml;
 }
 
 function renderFolderFiles(folder) {
@@ -704,6 +693,7 @@ function renderFolderFiles(folder) {
             const metaBadge = formatMetaBadge(detail.metadata);
             const thumbSrc = `/api/streamer/folder/${encodeURIComponent(folder.name)}/thumbnail/${encodeURIComponent(fname)}`;
             const thumbHtml = getThumbHtml(thumbSrc, detail.has_thumbnail, 'slot-file-thumb');
+            const filePreviewUrl = `/api/streamer/folder/${encodeURIComponent(folder.name)}/file/${encodeURIComponent(fname)}`;
 
             return `
                 <div class="slot-file-entry ${isCurrent ? 'is-playing' : ''}" draggable="true" ondragstart="handleSlotFileDragStart(event, '${escapeAttr(folder.name)}', ${port}, '${escapeAttr(fname)}')" ondragend="handleSlotFileDragEnd(event)">
@@ -714,6 +704,7 @@ function renderFolderFiles(folder) {
                     </div>
                     ${isCurrent ? '<span class="slot-playing-badge"><i class="fa-solid fa-play"></i> Playing</span>' : ''}
                     <div class="slot-reorder-buttons" style="display:flex; gap:2px; flex-shrink:0;">
+                        <button class="slot-reorder-btn" data-action="preview" data-url="${filePreviewUrl}" data-title="${escapeHtml(fname)}" title="Preview Video File"><i class="fa-solid fa-eye"></i></button>
                         <button class="slot-reorder-btn" data-action="move-file" data-name="${escapeHtml(folder.name)}" data-port="${port}" data-index="${fi}" data-dir="-1" title="Move Up" ${fi === 0 ? 'disabled' : ''}><i class="fa-solid fa-caret-up"></i></button>
                         <button class="slot-reorder-btn" data-action="move-file" data-name="${escapeHtml(folder.name)}" data-port="${port}" data-index="${fi}" data-dir="1" title="Move Down" ${fi === files.length - 1 ? 'disabled' : ''}><i class="fa-solid fa-caret-down"></i></button>
                     </div>
@@ -722,6 +713,16 @@ function renderFolderFiles(folder) {
             `;
         }).join('');
 
+        const slotStreamHttpUrl = (protocol === 'HLS')
+            ? `http://${window.location.hostname || '127.0.0.1'}:${port}/stream/index.m3u8`
+            : `http://${window.location.hostname || '127.0.0.1'}:${port}/`;
+
+        const previewSlotBtn = isLive ? `
+            <button class="slot-preview-btn btn btn-secondary btn-sm" data-action="preview" data-url="${escapeHtml(slotStreamHttpUrl)}" data-title="Slot :${port} (${escapeHtml(currentFile || folder.name)})" title="Preview Stream in In-App Player">
+                <i class="fa-solid fa-eye"></i> Preview
+            </button>
+        ` : '';
+
         return `
             <div class="slot-card" id="slot-${folder.name}-${port}" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleSlotDrop(event, '${escapeAttr(folder.name)}', ${port})">
                 <div class="slot-header">
@@ -729,6 +730,7 @@ function renderFolderFiles(folder) {
                     ${viewerBadge}
                     <span class="slot-file-count">${files.length} file${files.length !== 1 ? 's' : ''}</span>
                     ${urlHtml}
+                    ${previewSlotBtn}
                     <button class="slot-add-btn" data-action="add-file" data-name="${escapeHtml(folder.name)}" data-port="${port}">+ Add File</button>
                 </div>
                 ${progressHtml}
@@ -1919,11 +1921,15 @@ function submitWebStream() {
 }
 
 let _activeMpegtsPlayer = null;
+let _activeHlsPlayer = null;
 
 function openVideoPreview(url, title = 'Stream Preview') {
     const modal = document.getElementById('video-preview-modal');
     const player = document.getElementById('preview-video-player');
+    const titleEl = document.getElementById('video-preview-title');
     if (!modal || !player) return;
+
+    if (titleEl) titleEl.textContent = title;
 
     closeAllModals();
 
@@ -1937,12 +1943,47 @@ function openVideoPreview(url, title = 'Stream Preview') {
         _activeMpegtsPlayer = null;
     }
 
-    const isTsStream = url.includes(':19') || url.endsWith('.ts') || url.includes('/stream');
-    if (window.mpegts && mpegts.isSupported() && isTsStream) {
+    if (_activeHlsPlayer) {
+        try {
+            _activeHlsPlayer.stopLoad();
+            _activeHlsPlayer.detachMedia();
+            _activeHlsPlayer.destroy();
+        } catch (e) {}
+        _activeHlsPlayer = null;
+    }
+
+    const isHlsStream = url.includes('.m3u8');
+    const isTsStream = !isHlsStream && (url.endsWith('.ts') || url.includes('/file/') || url.includes(':19') || url.includes('/stream'));
+
+    if (window.Hls && Hls.isSupported() && isHlsStream) {
+        try {
+            _activeHlsPlayer = new Hls({
+                enableWorker: true,
+                lowLatencyMode: true,
+                liveSyncDurationCount: 3,
+                liveMaxLatencyDurationCount: 5,
+            });
+            _activeHlsPlayer.loadSource(url);
+            _activeHlsPlayer.attachMedia(player);
+            _activeHlsPlayer.on(Hls.Events.MANIFEST_PARSED, function() {
+                player.play().catch(() => {});
+            });
+            _activeHlsPlayer.on(Hls.Events.ERROR, function(event, data) {
+                if (data.fatal) {
+                    console.warn('HLS fatal error:', data);
+                }
+            });
+        } catch (e) {
+            console.warn('Hls.js init error, falling back to native player:', e);
+            player.src = url;
+            player.load();
+            player.play().catch(() => {});
+        }
+    } else if (window.mpegts && mpegts.isSupported() && isTsStream) {
         try {
             _activeMpegtsPlayer = mpegts.createPlayer({
                 type: 'mpegts',
-                isLive: true,
+                isLive: !url.includes('/file/'),
                 url: url
             }, {
                 enableStashBuffer: false,
@@ -1986,6 +2027,14 @@ function closeVideoPreview() {
             _activeMpegtsPlayer.destroy();
         } catch (e) {}
         _activeMpegtsPlayer = null;
+    }
+    if (_activeHlsPlayer) {
+        try {
+            _activeHlsPlayer.stopLoad();
+            _activeHlsPlayer.detachMedia();
+            _activeHlsPlayer.destroy();
+        } catch (e) {}
+        _activeHlsPlayer = null;
     }
     if (player) {
         player.pause();

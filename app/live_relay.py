@@ -297,7 +297,19 @@ class LiveStreamManager:
         async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
             try:
                 # Read HTTP request headers to satisfy client handshake
-                await reader.readuntil(b"\r\n\r\n")
+                req_bytes = await reader.readuntil(b"\r\n\r\n")
+                if req_bytes.startswith(b"OPTIONS"):
+                    options_resp = (
+                        "HTTP/1.1 204 No Content\r\n"
+                        "Access-Control-Allow-Origin: *\r\n"
+                        "Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n"
+                        "Access-Control-Allow-Headers: *\r\n"
+                        "Connection: close\r\n\r\n"
+                    )
+                    writer.write(options_resp.encode("utf-8"))
+                    await writer.drain()
+                    writer.close()
+                    return
             except Exception:
                 try:
                     writer.close()
@@ -310,6 +322,8 @@ class LiveStreamManager:
                 "Content-Type: video/mp2t\r\n"
                 "Connection: close\r\n"
                 "Access-Control-Allow-Origin: *\r\n"
+                "Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n"
+                "Access-Control-Allow-Headers: *\r\n"
                 "\r\n"
             )
             try:
@@ -542,6 +556,12 @@ class LiveStreamManager:
             source_codec = await asyncio.get_event_loop().run_in_executor(
                 None, probe_source_codec, relay.url, 8, proxy_url
             )
+            if source_codec in ("404 Not Found", "403 Forbidden", "401 Unauthorized", "Connection refused") or "404" in source_codec or "not found" in source_codec.lower():
+                logger.warning(f"Stream '{relay.name}' source is unavailable: {source_codec}")
+                relay.status = "error"
+                relay.error = source_codec
+                return
+
             if source_codec == "h264":
                 video_params = get_relay_params()   # stream copy — 0 GPU
                 logger.info(f"Source is H.264 — using stream copy for '{relay.name}'")
@@ -754,15 +774,25 @@ class LiveStreamManager:
                         # Inspect last logs for error reason
                         error_detail = "Check input stream URL or network connection."
                         if relay.last_logs:
-                            keywords = ["error", "refused", "invalid", "timeout", "not found", "cannot", "failed", "unable", "denied"]
+                            keywords = ["404", "not found", "refused", "forbidden", "unauthorized", "invalid", "timeout", "cannot", "failed", "unable", "denied", "error"]
                             important_lines = [line for line in relay.last_logs if any(kw in line.lower() for kw in keywords)]
                             if important_lines:
-                                error_detail = important_lines[-1]
+                                line = important_lines[-1]
+                                if "404" in line or "not found" in line.lower():
+                                    error_detail = "404 Not Found"
+                                elif "403" in line or "forbidden" in line.lower():
+                                    error_detail = "403 Forbidden"
+                                elif "401" in line or "unauthorized" in line.lower():
+                                    error_detail = "401 Unauthorized"
+                                elif "refused" in line.lower():
+                                    error_detail = "Connection refused"
+                                else:
+                                    error_detail = line
                             else:
                                 error_detail = relay.last_logs[-1]
 
                         relay.status = "error"
-                        relay.error = f"FFmpeg error ({process.returncode}): {error_detail}"
+                        relay.error = error_detail if any(err in error_detail for err in ("404", "403", "401", "refused")) else f"FFmpeg error ({process.returncode}): {error_detail}"
                         if is_web:
                             from app.web_stream import web_stream_manager
                             asyncio.create_task(asyncio.to_thread(web_stream_manager.close_browser, relay.id))

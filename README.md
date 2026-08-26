@@ -11,7 +11,7 @@ CommandCenter app built. Video converter (.ts) + continuous RTMP streamer.
    Run `start.bat`. Installs Python deps (`requirements.txt`: fastapi, uvicorn[standard], pyyaml, python-multipart, httpx, aiohttp, psutil, comtypes + pycaw on Windows), launches FastAPI server, opens UI on `http://localhost:8080`. Header shows readiness (**FFmpeg**, **MediaMTX**, **Auto-detected Codec** e.g. `Codec: h264_nvenc`).
 
 3. **Run Unit Tests**
-   Run `python -m pytest` from the root directory. Executes the 35-test unit suite covering config roundtrips, converter pool concurrency, stream probing, EPG XMLTV generation, HLS cache byte eviction, port conflict validation, and VPN management.
+   Run `python -m pytest` from the root directory. Executes the 37-test unit suite covering config roundtrips, converter pool concurrency, stream probing, EPG XMLTV generation, HLS cache byte eviction, port conflict validation, video file streaming preview routes, and VPN management.
 
 4. **Network Access**
    Server binds `0.0.0.0:8080` but an IP allowlist middleware only serves loopback (`127.*`, `::1`) and private/LAN ranges (`192.168.*`, `10.*`, `172.16-31.*`, link-local). Public internet addresses get `403 Forbidden`.
@@ -21,6 +21,7 @@ CommandCenter app built. Video converter (.ts) + continuous RTMP streamer.
 ### 1. Converter Panel (Left Side)
 - Click **Browse** select video folder (`.mp4`, `.mkv`, `.avi`).
 - **Auto-Scanning & Cached Probing:** Detects videos, pulls metadata, extracts preview thumbnails via FFmpeg. Probing results cached in-memory (`_PROBE_STREAMS_CACHE`) to eliminate redundant disk accesses.
+- **In-App Video Preview:** Click the preview eye icon to instantly preview source videos and converted `.ts` files inside the in-app player via HLS.js / mpegts.js MSE demuxers without external players.
 - **Parallel Worker Pool:** Queue processes up to 2 concurrent hardware/CPU conversion workers (`MAX_CONCURRENT_CONVERSIONS = 2`), reserving GPU capacity for live streaming.
 - **Atomic File Writing:** Transcoding writes directly to temporary `.tmp.ts` and atomically replaces to final `.ts` upon return code `0`. Incomplete/aborted `.tmp.ts` files are automatically cleaned up on cancellation or folder rescans.
 - **Transcoding Optimization:** Optimizes bitrate (~2.8 Mbps), GOP (`-g 60`), audio (AAC stereo). High-motion/dark scenes optimized via **Spatial/Temporal AQ** (NVENC), **Lookahead** (QSV), **CRF 21 VBV** (CPU).
@@ -30,6 +31,9 @@ CommandCenter app built. Video converter (.ts) + continuous RTMP streamer.
 ### 2. Streamer Panel (Right Side) & Slot System
 - **Folder & Slot Discovery:** Select root with `DDMM_DDMM` subdirectories. Shows **Port Slots** (`:1935`, `:1936`).
 - **Round-Robin Multi-Video Playlists:** Assign videos to port slot. Plays sequentially in loop.
+- **Live Slot Stream & File Preview:**
+  - Active slot streams display a **Preview** button in the slot header with 1-click in-app playback for HLS (`.m3u8`) and MPEG-TS live feeds.
+  - Slot file entries have preview buttons to check any individual assigned video directly in the browser.
 - **Drag & Drop & "+ Add File":**
   - Drag Converter videos to Port Slot (`:1935`, `:1936`) to move `.ts` file into stream dir + assign playlist.
   - Click **+ Add File** to select converted `.ts` videos.
@@ -256,3 +260,25 @@ When `-use_wallclock_as_timestamps 1` was specified on BOTH Input 0 (GDIGrab) an
 * **Event delegation**: Rendered cards use `data-action` attributes dispatched by one document-level click/dblclick listener instead of inline `onclick="fn('...')"` string handlers — eliminates the XSS sink from disk/user-supplied names in template strings.
 * **Server-side clear-done**: `POST /api/converter/clear-done` removes completed entries from the converter's in-memory list (the old client-side-only filter fought the refresh loop).
 * **Scan race guard**: Monotonic tokens discard stale scan responses when rapid re-scans overlap.
+
+### 22. In-App Video Preview & CORS Demuxer Architecture
+
+* **Dual-Engine Player Demuxing**:
+  * **HLS Playlists (`.m3u8`)**: Routed to **Hls.js** (`lowLatencyMode: true`, `liveSyncDurationCount: 3`) for folder slot streams in HLS mode (`http://127.0.0.1:{port}/stream/index.m3u8`).
+  * **Continuous MPEG-TS Streams & Videos**: Routed to **mpegts.js** (`type: 'mpegts'`, `isLive: true/false`) for live relays, web streams (`http://127.0.0.1:{port}/`), and local video file previews (`/api/streamer/.../file/...`, `/api/converter/file/...`).
+  * **Native HTML5 Video Fallback**: Standard MP4 playback when MSE demuxers are not required.
+* **Cross-Origin Resource Sharing (CORS) & OPTIONS Preflight**:
+  * Because the main Web UI runs on `:8080` while stream ports run on separate ports (`:1913`, `:1918`, `:1923`, etc.), all stream listeners MUST return standard CORS response headers:
+    * `Access-Control-Allow-Origin: *`
+    * `Access-Control-Allow-Methods: GET, HEAD, OPTIONS`
+    * `Access-Control-Allow-Headers: *`
+  * Preflight `OPTIONS` requests must immediately return `204 No Content` / `200 OK` to prevent browser CORS blocks.
+
+### 23. Dead Stream & 404 Immediate Error Halt
+
+* **Rule**: NEVER attempt to re-encode or loop on unreachable, dead, or HTTP 404/403/401/refused streams.
+* **Architecture**:
+  * `probe_source_codec()` in `app/ffmpeg_setup.py` parses `ffprobe` stderr. If the remote server returns `404 Not Found`, `403 Forbidden`, `401 Unauthorized`, or `Connection refused`, it returns the exact error string rather than `"unknown"`.
+  * `_auto_restart_loop()` in `app/live_relay.py` intercepts this status, marks `relay.status = "error"` with the exact message, and immediately exits without starting FFmpeg or burning CPU/GPU cycles on dead endpoints.
+  * When FFmpeg exits with error, the last log lines are scanned for HTTP status codes to surface clean error reasons (`404 Not Found`) directly to the UI.
+

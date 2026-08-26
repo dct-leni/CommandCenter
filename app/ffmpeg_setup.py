@@ -378,6 +378,15 @@ def probe_source_codec(url: str, timeout: int = 8, proxy_url: Optional[str] = No
         if res.returncode != 0:
             err_msg = res.stderr.decode("utf-8", errors="replace").strip()
             logger.warning(f"ffprobe returned code {res.returncode} for {url}: {err_msg}")
+            if "404" in err_msg or "not found" in err_msg.lower():
+                return "404 Not Found"
+            if "403" in err_msg or "forbidden" in err_msg.lower():
+                return "403 Forbidden"
+            if "401" in err_msg or "unauthorized" in err_msg.lower():
+                return "401 Unauthorized"
+            if "connection refused" in err_msg.lower():
+                return "Connection refused"
+            return "unknown"
 
         codec = res.stdout.decode("utf-8", errors="replace").strip()
         codec = codec.splitlines()[0].strip().lower() if codec else "unknown"

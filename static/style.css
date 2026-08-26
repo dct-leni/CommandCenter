@@ -995,6 +995,32 @@ body {
     align-items: center;
 }
 
+.video-popup-header {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    padding: 12px 18px;
+    background: linear-gradient(to bottom, rgba(0, 0, 0, 0.85) 0%, rgba(0, 0, 0, 0) 100%);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    z-index: 100;
+    pointer-events: none;
+}
+
+.video-popup-title {
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    font-family: 'Outfit', sans-serif;
+    text-shadow: 0 1px 4px rgba(0, 0, 0, 0.9);
+    max-width: 80%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .video-popup-player {
     width: 100%;
     max-height: 80vh;
@@ -1004,22 +1030,20 @@ body {
 }
 
 .video-popup-close {
-    position: absolute;
-    top: 14px;
-    right: 14px;
-    width: 36px;
-    height: 36px;
+    pointer-events: auto;
+    width: 32px;
+    height: 32px;
     background: rgba(0, 0, 0, 0.65);
     backdrop-filter: blur(8px);
     border: 1px solid rgba(255, 255, 255, 0.2);
     border-radius: 50%;
     color: #fff;
-    font-size: 16px;
+    font-size: 14px;
     display: flex;
     align-items: center;
     justify-content: center;
     cursor: pointer;
-    z-index: 100;
+    z-index: 101;
     transition: all 0.2s ease;
 }
 
@@ -1027,6 +1051,27 @@ body {
     background: rgba(239, 68, 68, 0.85);
     border-color: rgba(239, 68, 68, 1);
     transform: scale(1.1);
+}
+
+.slot-preview-btn {
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    transition: all 0.15s ease;
+}
+
+.slot-preview-btn:hover {
+    background: rgba(0, 240, 255, 0.15);
+    border-color: var(--accent);
+    color: var(--accent);
 }
 
 @media (max-width: 960px) {

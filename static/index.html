@@ -449,12 +449,16 @@
     <!-- In-App Video Preview Modal -->
     <div class="modal-overlay" id="video-preview-modal" style="display: none;" onclick="if (event.target === this) closeVideoPreview();">
         <div class="video-popup-container">
-            <button class="video-popup-close" onclick="closeVideoPreview()" title="Close Preview"><i class="fa-solid fa-xmark"></i></button>
+            <div class="video-popup-header">
+                <span id="video-preview-title" class="video-popup-title">Stream Preview</span>
+                <button class="video-popup-close" onclick="closeVideoPreview()" title="Close Preview"><i class="fa-solid fa-xmark"></i></button>
+            </div>
             <video id="preview-video-player" controls autoplay playsinline class="video-popup-player"></video>
         </div>
     </div>
 
-    <!-- MPEG-TS In-Browser MSE Demuxer -->
+    <!-- HLS.js & MPEG-TS In-Browser MSE Demuxers -->
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
     <script src="/static/app.js"></script>
 </body>

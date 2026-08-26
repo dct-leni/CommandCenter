@@ -131,7 +131,16 @@ class HlsCacheManager:
 
         base_url = f"http://127.0.0.1:{internal_mediamtx_port}"
 
+        cors_headers = {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        }
+
         async def handle_request(request: web.Request):
+            if request.method == "OPTIONS":
+                return web.Response(headers=cors_headers)
+
             client_ip = request.remote or "127.0.0.1"
             if public_port not in self._active_clients:
                 self._active_clients[public_port] = {}
@@ -143,7 +152,7 @@ class HlsCacheManager:
             if path == "" or path.startswith("?"):
                 result = await self.get_file(base_url, "stream/index.m3u8")
                 if not result:
-                    return web.Response(status=404, text="File not found")
+                    return web.Response(status=404, text="File not found", headers=cors_headers)
                 data, media_type = result
                 
                 # Rewrite relative URLs in the master playlist to absolute URLs
@@ -158,18 +167,27 @@ class HlsCacheManager:
                             line = f"{host_url}/stream/{line}"
                     rewritten_lines.append(line)
                 
-                return web.Response(body="\n".join(rewritten_lines).encode("utf-8"), content_type=media_type)
+                return web.Response(body="\n".join(rewritten_lines).encode("utf-8"), content_type=media_type, headers=cors_headers)
 
             # For all other paths (which will now correctly include 'stream/' thanks to the rewrite above)
             result = await self.get_file(base_url, path)
             if not result:
-                return web.Response(status=404, text="File not found")
+                return web.Response(status=404, text="File not found", headers=cors_headers)
             data, media_type = result
-            return web.Response(body=data, content_type=media_type)
+            return web.Response(body=data, content_type=media_type, headers=cors_headers)
 
-        app = web.Application()
-        # Route all paths to the proxy handler
-        app.router.add_get("/{path:.*}", handle_request)
+        @web.middleware
+        async def cors_middleware(request, handler):
+            if request.method == "OPTIONS":
+                return web.Response(headers=cors_headers)
+            response = await handler(request)
+            for k, v in cors_headers.items():
+                response.headers[k] = v
+            return response
+
+        app = web.Application(middlewares=[cors_middleware])
+        # Route all HTTP methods (GET, HEAD, OPTIONS) to the proxy handler
+        app.router.add_route("*", "/{path:.*}", handle_request)
         
         # Disable aiohttp access log spam since HLS generates 10s of requests per second
         runner = web.AppRunner(app, access_log=None)

@@ -205,6 +205,28 @@ async def converter_thumbnail(filename: str):
     return FileResponse(thumb, media_type="image/jpeg")
 
 
+@router.get("/api/converter/file/{filename}")
+async def converter_stream_file(filename: str):
+    """Stream or preview a video file from the converter folder."""
+    if not converter.source_folder:
+        raise HTTPException(status_code=400, detail="Converter folder not set")
+
+    source_root = Path(converter.source_folder).resolve()
+    target_path = (source_root / filename).resolve()
+
+    # Also check original/ subfolder if file was converted and archived
+    if not target_path.exists():
+        orig_path = (source_root / "original" / filename).resolve()
+        if orig_path.exists() and orig_path.is_relative_to(source_root):
+            target_path = orig_path
+
+    if not target_path.is_relative_to(source_root) or not target_path.exists() or not target_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    media_type = "video/mp2t" if target_path.suffix.lower() == ".ts" else "video/mp4"
+    return FileResponse(str(target_path), media_type=media_type, filename=target_path.name)
+
+
 @router.post("/api/converter/move")
 async def converter_move(body: MoveFileRequest):
     """Move a file from the converter folder to a streamer folder."""

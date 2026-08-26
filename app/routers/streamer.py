@@ -321,6 +321,22 @@ async def streamer_thumbnail(folder_name: str, filename: str):
     return FileResponse(thumb, media_type="image/jpeg")
 
 
+@router.get("/api/streamer/folder/{folder_name}/file/{filename}")
+async def streamer_stream_file(folder_name: str, filename: str):
+    """Stream or preview a video file from a streamer folder."""
+    folder = streamer._find_folder(folder_name)
+    if not folder:
+        raise HTTPException(status_code=404, detail="Folder not found")
+
+    folder_path = Path(folder.path).resolve()
+    target_path = (folder_path / filename).resolve()
+    if not target_path.is_relative_to(folder_path) or not target_path.exists() or not target_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    media_type = "video/mp2t" if target_path.suffix.lower() == ".ts" else "video/mp4"
+    return FileResponse(str(target_path), media_type=media_type, filename=target_path.name)
+
+
 @router.post("/api/streamer/start")
 async def streamer_start(body: StreamStartRequest):
     """Start the streaming scheduler."""

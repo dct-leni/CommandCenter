@@ -1,5 +1,6 @@
 # Environment
 __pycache__/
+.pytest_cache/
 *.pyc
 
 # Binaries and downloaded dependencies
