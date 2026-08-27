@@ -1968,6 +1968,8 @@ function resolveStreamUrlForPreview(url) {
     return { url, isHls: false, isFile: false };
 }
 
+let _previewDiagnosticInterval = null;
+
 function openVideoPreview(url, title = 'Stream Preview') {
     const modal = document.getElementById('video-preview-modal');
     const player = document.getElementById('preview-video-player');
@@ -2002,7 +2004,30 @@ function openVideoPreview(url, title = 'Stream Preview') {
         _activeHlsPlayer = null;
     }
 
+    if (_previewDiagnosticInterval) {
+        clearInterval(_previewDiagnosticInterval);
+        _previewDiagnosticInterval = null;
+    }
+
     const { url: targetUrl, isHls, isFile } = resolveStreamUrlForPreview(url);
+    console.log('[Preview] Opening URL:', targetUrl, '| Engine:', isHls ? 'HLS.js' : (window.mpegts ? 'mpegts.js' : 'Native'), '| isFile:', isFile);
+
+    // Diagnostics helper to format buffered ranges
+    const getRanges = (buf) => {
+        const ranges = [];
+        for (let i = 0; i < (buf ? buf.length : 0); i++) {
+            ranges.push(`[${buf.start(i).toFixed(3)} - ${buf.end(i).toFixed(3)}]`);
+        }
+        return ranges.join(', ') || 'none';
+    };
+
+    const logEvent = (name) => {
+        console.log(`[VideoEvent: ${name}] paused: ${player.paused}, currentTime: ${player.currentTime ? player.currentTime.toFixed(3) : 0}, readyState: ${player.readyState}, buffered: ${getRanges(player.buffered)}, videoSize: ${player.videoWidth}x${player.videoHeight}`);
+    };
+
+    ['loadstart', 'loadedmetadata', 'loadeddata', 'canplay', 'playing', 'pause', 'waiting', 'stalled', 'seeking', 'seeked', 'error'].forEach(evt => {
+        player.addEventListener(evt, () => logEvent(evt));
+    });
 
     if (window.Hls && Hls.isSupported() && isHls) {
         try {
@@ -2016,12 +2041,12 @@ function openVideoPreview(url, title = 'Stream Preview') {
             _activeHlsPlayer.attachMedia(player);
             _activeHlsPlayer.on(Hls.Events.MANIFEST_PARSED, function() {
                 player.play().catch(err => {
-                    if (err.name !== 'AbortError') console.warn('HLS play error:', err);
+                    if (err.name !== 'AbortError') console.warn('[HLS] Play error:', err);
                 });
             });
             _activeHlsPlayer.on(Hls.Events.ERROR, function(event, data) {
                 if (data.fatal) {
-                    console.warn('HLS fatal error:', data.type, data.details);
+                    console.warn('[HLS FATAL ERROR]', data.type, data.details);
                     switch (data.type) {
                         case Hls.ErrorTypes.NETWORK_ERROR:
                             _activeHlsPlayer.startLoad();
@@ -2036,7 +2061,7 @@ function openVideoPreview(url, title = 'Stream Preview') {
                 }
             });
         } catch (e) {
-            console.warn('Hls.js init error, falling back to native player:', e);
+            console.warn('[Hls.js init error, falling back to native player]:', e);
             player.src = targetUrl;
             player.load();
             player.play().catch(() => {});
@@ -2060,6 +2085,18 @@ function openVideoPreview(url, title = 'Stream Preview') {
                 url: targetUrl
             }, playerConfig);
 
+            _activeMpegtsPlayer.on(mpegts.Events.ERROR, (type, details, data) => {
+                console.warn('[mpegts ERROR]', type, details, data);
+            });
+
+            _activeMpegtsPlayer.on(mpegts.Events.MEDIA_INFO, (info) => {
+                console.log('[mpegts MEDIA_INFO]', info);
+            });
+
+            _activeMpegtsPlayer.on(mpegts.Events.STATISTICS_INFO, (stat) => {
+                console.log(`[mpegts STATS] speed: ${(stat.speed || 0).toFixed(1)} KB/s, decoded: ${stat.decodedFrames || 0} frames, dropped: ${stat.droppedFrames || 0}`);
+            });
+
             _activeMpegtsPlayer.attachMediaElement(player);
             _activeMpegtsPlayer.load();
 
@@ -2067,7 +2104,7 @@ function openVideoPreview(url, title = 'Stream Preview') {
             const tryPlay = () => {
                 if (player.paused && player.readyState >= 2) {
                     player.play().catch(err => {
-                        if (err.name !== 'AbortError') console.warn('Play retry error:', err);
+                        if (err.name !== 'AbortError') console.warn('[Play retry error]:', err);
                     });
                 }
             };
@@ -2079,11 +2116,11 @@ function openVideoPreview(url, title = 'Stream Preview') {
 
             _activeMpegtsPlayer.play().catch(err => {
                 if (err.name !== 'AbortError') {
-                    console.warn('Playback error:', err);
+                    console.warn('[Initial playback error]:', err);
                 }
             });
         } catch (e) {
-            console.warn('mpegts.js init error, falling back to native player:', e);
+            console.warn('[mpegts.js init error, falling back to native player]:', e);
             player.src = targetUrl;
             player.load();
             player.play().catch(() => {});
@@ -2094,12 +2131,26 @@ function openVideoPreview(url, title = 'Stream Preview') {
         player.play().catch(() => {});
     }
 
+    // 1-second interval heartbeat monitor to log live status
+    _previewDiagnosticInterval = setInterval(() => {
+        if (!modal || modal.style.display === 'none') {
+            clearInterval(_previewDiagnosticInterval);
+            _previewDiagnosticInterval = null;
+            return;
+        }
+        console.log(`[Preview Heartbeat] paused: ${player.paused}, currentTime: ${player.currentTime ? player.currentTime.toFixed(3) : 0}, readyState: ${player.readyState}, buffered: ${getRanges(player.buffered)}`);
+    }, 1000);
+
     modal.style.display = 'flex';
 }
 
 function closeVideoPreview() {
     const modal = document.getElementById('video-preview-modal');
     const player = document.getElementById('preview-video-player');
+    if (_previewDiagnosticInterval) {
+        clearInterval(_previewDiagnosticInterval);
+        _previewDiagnosticInterval = null;
+    }
     if (_activeMpegtsPlayer) {
         try {
             _activeMpegtsPlayer.pause();
