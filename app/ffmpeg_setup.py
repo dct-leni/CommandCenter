@@ -289,7 +289,11 @@ def get_audio_params(is_web: bool = False) -> list:
             "-b:a", "192k",
             "-af", "adelay=350|350,aresample=async=1000:min_hard_comp=0.100000:first_pts=0"
         ]
-    return ["-c:a", "copy"]
+    return [
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-af", "aresample=async=1000:first_pts=0"
+    ]
 
 
 def format_ffmpeg_headers(url: str) -> str:

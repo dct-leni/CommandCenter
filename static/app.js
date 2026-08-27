@@ -2082,6 +2082,8 @@ function openVideoPreview(url, title = 'Stream Preview') {
             _activeMpegtsPlayer = mpegts.createPlayer({
                 type: 'mpegts',
                 isLive: isLive,
+                hasAudio: true,
+                hasVideo: true,
                 url: targetUrl
             }, playerConfig);
 
