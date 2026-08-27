@@ -2042,21 +2042,14 @@ function openVideoPreview(url, title = 'Stream Preview') {
     } else if (window.mpegts && mpegts.isSupported()) {
         try {
             const isLive = !isFile;
-            const playerConfig = isLive ? {
-                enableStashBuffer: false,
-                lazyLoad: false,
-                liveBufferLatencyChasing: true,
-                liveBufferLatencyMaxLatency: 2.0,
-                liveBufferLatencyMinRemain: 0.5,
-                autoCleanupSourceBuffer: true,
-                autoCleanupMaxBackwardDuration: 30,
-                autoCleanupMinBackwardDuration: 10,
-            } : {
+            const playerConfig = {
                 enableStashBuffer: true,
                 stashInitialSize: 384 * 1024,
                 lazyLoad: false,
                 liveBufferLatencyChasing: false,
-                autoCleanupSourceBuffer: false,
+                autoCleanupSourceBuffer: isLive,
+                autoCleanupMaxBackwardDuration: 60,
+                autoCleanupMinBackwardDuration: 30,
             };
 
             _activeMpegtsPlayer = mpegts.createPlayer({
@@ -2068,8 +2061,8 @@ function openVideoPreview(url, title = 'Stream Preview') {
             _activeMpegtsPlayer.attachMediaElement(player);
             _activeMpegtsPlayer.load();
 
-            // When new live chunks are buffered, jump past any initial 0-timestamp gap and ensure playback
-            const onBufferProgress = () => {
+            // Initial buffer alignment (runs once on first load)
+            const onInitialLoaded = () => {
                 try {
                     if (player.buffered && player.buffered.length > 0) {
                         const start = player.buffered.start(0);
@@ -2077,12 +2070,10 @@ function openVideoPreview(url, title = 'Stream Preview') {
                             player.currentTime = start;
                         }
                     }
-                    if (player.paused) {
-                        player.play().catch(() => {});
-                    }
                 } catch (e) {}
+                player.play().catch(() => {});
             };
-            player.addEventListener('progress', onBufferProgress);
+            player.addEventListener('loadeddata', onInitialLoaded, { once: true });
             player.addEventListener('canplay', () => { player.play().catch(() => {}); }, { once: true });
 
             _activeMpegtsPlayer.play().catch(err => {
