@@ -320,7 +320,9 @@ class LiveStreamManager:
             headers = (
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: video/mp2t\r\n"
-                "Connection: close\r\n"
+                "Connection: keep-alive\r\n"
+                "Cache-Control: no-cache, no-store, must-revalidate\r\n"
+                "Pragma: no-cache\r\n"
                 "Access-Control-Allow-Origin: *\r\n"
                 "Access-Control-Allow-Methods: GET, HEAD, OPTIONS\r\n"
                 "Access-Control-Allow-Headers: *\r\n"
@@ -375,27 +377,14 @@ class LiveStreamManager:
                     relay.clients.pop(queue, None)
                     try:
                         writer.close()
-                        await writer.wait_closed()
                     except Exception:
                         pass
 
-            # Start the background writing loop
-            write_task = asyncio.create_task(client_write_loop())
-            
+            # Stream data to the client until client disconnects or write fails
             try:
-                # Wait until client socket is closed or write_task finishes
-                while not write_task.done():
-                    chunk = await reader.read(4096)
-                    if not chunk:
-                        break
+                await client_write_loop()
             except Exception:
                 pass
-            finally:
-                write_task.cancel()
-                try:
-                    await write_task
-                except Exception:
-                    pass
 
         # Start the Python TCP Server to broadcast stream packets
         try:
