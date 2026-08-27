@@ -1923,6 +1923,36 @@ function submitWebStream() {
 let _activeMpegtsPlayer = null;
 let _activeHlsPlayer = null;
 
+function resolveStreamUrlForPreview(url) {
+    if (!url) return { url: '', isHls: false, isFile: false };
+
+    const startPort = (state.config && state.config.streamer && state.config.streamer.port_range_start) || 1935;
+    const endPort = (state.config && state.config.streamer && state.config.streamer.port_range_end) || 1944;
+    const protocol = (state.config && state.config.streamer && state.config.streamer.protocol) ? state.config.streamer.protocol.toLowerCase() : 'rtmp';
+
+    const isFile = url.includes('/file/') || url.endsWith('.ts');
+
+    if (isFile) {
+        return { url, isHls: false, isFile: true };
+    }
+
+    if (url.includes('.m3u8')) {
+        return { url, isHls: true, isFile: false };
+    }
+
+    // Check if this URL points to one of the slot ports in HLS mode
+    try {
+        const parsed = new URL(url, window.location.href);
+        const port = parseInt(parsed.port, 10);
+        if (port >= startPort && port <= endPort && protocol === 'hls') {
+            parsed.pathname = '/stream/index.m3u8';
+            return { url: parsed.toString(), isHls: true, isFile: false };
+        }
+    } catch(e) {}
+
+    return { url, isHls: false, isFile: false };
+}
+
 function openVideoPreview(url, title = 'Stream Preview') {
     const modal = document.getElementById('video-preview-modal');
     const player = document.getElementById('preview-video-player');
@@ -1952,10 +1982,9 @@ function openVideoPreview(url, title = 'Stream Preview') {
         _activeHlsPlayer = null;
     }
 
-    const isHlsStream = url.includes('.m3u8');
-    const isTsStream = !isHlsStream && (url.endsWith('.ts') || url.includes('/file/') || url.includes(':19') || url.includes('/stream'));
+    const { url: targetUrl, isHls, isFile } = resolveStreamUrlForPreview(url);
 
-    if (window.Hls && Hls.isSupported() && isHlsStream) {
+    if (window.Hls && Hls.isSupported() && isHls) {
         try {
             _activeHlsPlayer = new Hls({
                 enableWorker: true,
@@ -1963,10 +1992,12 @@ function openVideoPreview(url, title = 'Stream Preview') {
                 liveSyncDurationCount: 3,
                 liveMaxLatencyDurationCount: 5,
             });
-            _activeHlsPlayer.loadSource(url);
+            _activeHlsPlayer.loadSource(targetUrl);
             _activeHlsPlayer.attachMedia(player);
             _activeHlsPlayer.on(Hls.Events.MANIFEST_PARSED, function() {
-                player.play().catch(() => {});
+                player.play().catch(err => {
+                    if (err.name !== 'AbortError') console.warn('HLS play error:', err);
+                });
             });
             _activeHlsPlayer.on(Hls.Events.ERROR, function(event, data) {
                 if (data.fatal) {
@@ -1975,40 +2006,50 @@ function openVideoPreview(url, title = 'Stream Preview') {
             });
         } catch (e) {
             console.warn('Hls.js init error, falling back to native player:', e);
-            player.src = url;
+            player.src = targetUrl;
             player.load();
             player.play().catch(() => {});
         }
-    } else if (window.mpegts && mpegts.isSupported() && isTsStream) {
+    } else if (window.mpegts && mpegts.isSupported()) {
         try {
+            const isLive = !isFile;
+            const playerConfig = isLive ? {
+                enableStashBuffer: true,
+                stashInitialSize: 128 * 1024,
+                lazyLoad: false,
+                liveBufferLatencyChasing: false,
+                autoCleanupSourceBuffer: true,
+                autoCleanupMaxBackwardDuration: 30,
+                autoCleanupMinBackwardDuration: 10,
+            } : {
+                enableStashBuffer: true,
+                stashInitialSize: 384 * 1024,
+                lazyLoad: false,
+                liveBufferLatencyChasing: false,
+                autoCleanupSourceBuffer: false,
+            };
+
             _activeMpegtsPlayer = mpegts.createPlayer({
                 type: 'mpegts',
-                isLive: !url.includes('/file/'),
-                url: url
-            }, {
-                enableStashBuffer: false,
-                lazyLoad: false,
-                lazyLoadMaxDuration: 0.2,
-                liveBufferLatencyChasing: true,
-                liveBufferLatencyMaxLatency: 1.5,
-                liveBufferLatencyMinRemain: 0.3,
-                autoCleanupSourceBuffer: true,
-                autoCleanupMaxBackwardDuration: 15,
-                autoCleanupMinBackwardDuration: 5
-            });
+                isLive: isLive,
+                url: targetUrl
+            }, playerConfig);
+
             _activeMpegtsPlayer.attachMediaElement(player);
             _activeMpegtsPlayer.load();
             _activeMpegtsPlayer.play().catch(err => {
-                console.warn('Playback error:', err);
+                if (err.name !== 'AbortError') {
+                    console.warn('Playback error:', err);
+                }
             });
         } catch (e) {
             console.warn('mpegts.js init error, falling back to native player:', e);
-            player.src = url;
+            player.src = targetUrl;
             player.load();
             player.play().catch(() => {});
         }
     } else {
-        player.src = url;
+        player.src = targetUrl;
         player.load();
         player.play().catch(() => {});
     }
@@ -2037,8 +2078,9 @@ function closeVideoPreview() {
         _activeHlsPlayer = null;
     }
     if (player) {
-        player.pause();
-        player.src = '';
+        try { player.pause(); } catch(e) {}
+        player.removeAttribute('src');
+        player.load();
     }
     if (modal) modal.style.display = 'none';
 }
