@@ -2046,16 +2046,23 @@ function openVideoPreview(url, title = 'Stream Preview') {
                 enableStashBuffer: true,
                 stashInitialSize: 128 * 1024,
                 lazyLoad: false,
+                lazyLoadMaxDuration: 0,
+                lazyLoadRecoverDuration: 0,
+                deferLoadAfterSourceOpen: false,
                 liveBufferLatencyChasing: false,
                 autoCleanupSourceBuffer: true,
                 autoCleanupMaxBackwardDuration: 30,
                 autoCleanupMinBackwardDuration: 10,
+                fixAudioTimestampGap: true,
+                accurateSeek: false,
             } : {
                 enableStashBuffer: true,
                 stashInitialSize: 384 * 1024,
                 lazyLoad: false,
                 liveBufferLatencyChasing: false,
                 autoCleanupSourceBuffer: false,
+                fixAudioTimestampGap: true,
+                accurateSeek: false,
             };
 
             _activeMpegtsPlayer = mpegts.createPlayer({
@@ -2066,6 +2073,22 @@ function openVideoPreview(url, title = 'Stream Preview') {
 
             _activeMpegtsPlayer.attachMediaElement(player);
             _activeMpegtsPlayer.load();
+
+            // Auto-align playback to first buffered PTS timestamp immediately upon first packet arrival
+            const unstuckHandler = () => {
+                try {
+                    if (player.buffered && player.buffered.length > 0) {
+                        const start = player.buffered.start(0);
+                        if (player.currentTime < start) {
+                            player.currentTime = start;
+                        }
+                    }
+                } catch(e) {}
+                player.play().catch(() => {});
+            };
+            player.addEventListener('loadeddata', unstuckHandler, { once: true });
+            player.addEventListener('canplay', unstuckHandler, { once: true });
+
             _activeMpegtsPlayer.play().catch(err => {
                 if (err.name !== 'AbortError') {
                     console.warn('Playback error:', err);

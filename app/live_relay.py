@@ -693,8 +693,8 @@ class LiveStreamManager:
                 from app.ffmpeg_setup import get_audio_params
                 cmd.extend(get_audio_params(is_web))
                 
-                # -bsf:v dump_extra is ONLY needed for stream copy (-c:v copy). NVENC already generates Annex B SPS/PPS NAL units natively.
-                if not is_web:
+                # -bsf:v dump_extra is ONLY needed for stream copy (-c:v copy). NVENC/QSV/x264 already generate Annex B SPS/PPS NAL units natively.
+                if "-c:v" in video_params and "copy" in video_params:
                     cmd.extend(["-bsf:v", "dump_extra"])
 
                 interleave_delta = "0" if is_web else "50000"
