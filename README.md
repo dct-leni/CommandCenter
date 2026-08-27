@@ -11,7 +11,7 @@ CommandCenter app built. Video converter (.ts) + continuous RTMP streamer.
    Run `start.bat`. Installs Python deps (`requirements.txt`: fastapi, uvicorn[standard], pyyaml, python-multipart, httpx, aiohttp, psutil, comtypes + pycaw on Windows), launches FastAPI server, opens UI on `http://localhost:8080`. Header shows readiness (**FFmpeg**, **MediaMTX**, **Auto-detected Codec** e.g. `Codec: h264_nvenc`).
 
 3. **Run Unit Tests**
-   Run `python -m pytest` from the root directory. Executes the 37-test unit suite covering config roundtrips, converter pool concurrency, stream probing, EPG XMLTV generation, HLS cache byte eviction, port conflict validation, video file streaming preview routes, and VPN management.
+   Run `python -m pytest` from the root directory. Executes the 38-test unit suite covering config roundtrips, converter pool concurrency, stream probing, EPG XMLTV generation, HLS cache byte eviction, port conflict validation, video file streaming preview routes, and VPN management.
 
 4. **Network Access**
    Server binds `0.0.0.0:8080` but an IP allowlist middleware only serves loopback (`127.*`, `::1`) and private/LAN ranges (`192.168.*`, `10.*`, `172.16-31.*`, link-local). Public internet addresses get `403 Forbidden`.

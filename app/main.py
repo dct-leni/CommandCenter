@@ -119,18 +119,37 @@ app = FastAPI(title="CommandCenter", version="1.0.0", lifespan=lifespan)
 
 @app.middleware("http")
 async def lan_only_guard(request: Request, call_next):
-    # Allow loopback + private/LAN ranges only (127.*, ::1, 192.168.*, 10.*,
-    # 172.16-31.*, link-local). Public internet addresses are rejected.
+    # Stream endpoints, media file streaming, and EPG downloads are accessible globally
+    path = request.url.path
+    if (
+        path.startswith("/api/streamer/slot/") or
+        "/file/" in path or
+        "/thumbnail/" in path or
+        path.endswith("/epg") or
+        path.endswith(".xml") or
+        path.endswith(".m3u8") or
+        path.endswith(".ts")
+    ):
+        return await call_next(request)
+
+    # Protect Management UI, settings, and control APIs to LAN/loopback only
     import ipaddress
+    from starlette.responses import Response
     host = request.client.host if request.client else "127.0.0.1"
     if host in ("testclient", "localhost", ""):
         host = "127.0.0.1"
     try:
         addr = ipaddress.ip_address(host)
     except ValueError:
-        raise HTTPException(status_code=403, detail="Forbidden")
+        return Response(status_code=403, content="Forbidden")
+
+    # Allow server's own external IP
+    from app.streamer import streamer
+    if host == streamer.external_ip:
+        return await call_next(request)
+
     if not (addr.is_loopback or addr.is_private or addr.is_link_local):
-        raise HTTPException(status_code=403, detail="Forbidden")
+        return Response(status_code=403, content="Forbidden")
     return await call_next(request)
 
 # Static files (Web UI)

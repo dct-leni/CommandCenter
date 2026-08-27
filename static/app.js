@@ -713,11 +713,10 @@ function renderFolderFiles(folder) {
             `;
         }).join('');
 
-        const slotStreamHttpUrl = (protocol === 'HLS')
-            ? `http://${window.location.hostname || '127.0.0.1'}:${port}/stream/index.m3u8`
-            : `http://${window.location.hostname || '127.0.0.1'}:${port}/`;
+        const isHlsMode = protocol === 'HLS';
+        const slotStreamHttpUrl = `http://${window.location.hostname || '127.0.0.1'}:${port}/stream/index.m3u8`;
 
-        const previewSlotBtn = isLive ? `
+        const previewSlotBtn = (isLive && isHlsMode) ? `
             <button class="slot-preview-btn btn btn-secondary btn-sm" data-action="preview" data-url="${escapeHtml(slotStreamHttpUrl)}" data-title="Slot :${port} (${escapeHtml(currentFile || folder.name)})" title="Preview Stream in In-App Player">
                 <i class="fa-solid fa-eye"></i> Preview
             </button>
@@ -1926,29 +1925,45 @@ let _activeHlsPlayer = null;
 function resolveStreamUrlForPreview(url) {
     if (!url) return { url: '', isHls: false, isFile: false };
 
-    const startPort = (state.config && state.config.streamer && state.config.streamer.port_range_start) || 1935;
-    const endPort = (state.config && state.config.streamer && state.config.streamer.port_range_end) || 1944;
-    const protocol = (state.config && state.config.streamer && state.config.streamer.protocol) ? state.config.streamer.protocol.toLowerCase() : 'rtmp';
-
-    const isFile = url.includes('/file/') || url.endsWith('.ts');
-
-    if (isFile) {
+    // 1. Local video file preview (/api/streamer/.../file/... or /api/converter/file/...)
+    if (url.includes('/file/') || url.endsWith('.ts')) {
         return { url, isHls: false, isFile: true };
     }
 
+    // 2. Explicit HLS playlist URL
     if (url.includes('.m3u8')) {
         return { url, isHls: true, isFile: false };
     }
 
-    // Check if this URL points to one of the slot ports in HLS mode
+    // 3. Check port to distinguish HLS slot proxies from MPEG-TS live relays
     try {
         const parsed = new URL(url, window.location.href);
         const port = parseInt(parsed.port, 10);
-        if (port >= startPort && port <= endPort && protocol === 'hls') {
-            parsed.pathname = '/stream/index.m3u8';
-            return { url: parsed.toString(), isHls: true, isFile: false };
+
+        // Check if port belongs to configured live relays (MPEG-TS broadcast)
+        const liveStreams = (state.config && state.config.streamer && state.config.streamer.live_streams) || [];
+        const isLiveRelay = liveStreams.some(s => parseInt(s.port, 10) === port);
+        if (isLiveRelay) {
+            return { url, isHls: false, isFile: false };
         }
-    } catch(e) {}
+
+        // Check if port belongs to folder slot range or active streamer slots
+        const startPort = (state.config && state.config.streamer && state.config.streamer.port_range_start) || 1900;
+        const endPort = (state.config && state.config.streamer && state.config.streamer.port_range_end) || 1999;
+        const protocol = (state.config && state.config.streamer && state.config.streamer.protocol) ? state.config.streamer.protocol.toLowerCase() : 'hls';
+
+        const activeSlot = state.streamStatus && state.streamStatus.active_streams
+            ? state.streamStatus.active_streams.find(s => s.port === port)
+            : null;
+
+        if (activeSlot || (port >= startPort && port <= endPort)) {
+            if (protocol === 'hls' || !protocol || protocol === 'rtmp') {
+                // In HLS mode, slot streams serve index.m3u8 at /stream/index.m3u8
+                parsed.pathname = '/stream/index.m3u8';
+                return { url: parsed.toString(), isHls: true, isFile: false };
+            }
+        }
+    } catch (e) {}
 
     return { url, isHls: false, isFile: false };
 }
@@ -1962,6 +1977,9 @@ function openVideoPreview(url, title = 'Stream Preview') {
     if (titleEl) titleEl.textContent = title;
 
     closeAllModals();
+
+    player.muted = true;
+    player.playsInline = true;
 
     if (_activeMpegtsPlayer) {
         try {
@@ -2001,7 +2019,18 @@ function openVideoPreview(url, title = 'Stream Preview') {
             });
             _activeHlsPlayer.on(Hls.Events.ERROR, function(event, data) {
                 if (data.fatal) {
-                    console.warn('HLS fatal error:', data);
+                    console.warn('HLS fatal error:', data.type, data.details);
+                    switch (data.type) {
+                        case Hls.ErrorTypes.NETWORK_ERROR:
+                            _activeHlsPlayer.startLoad();
+                            break;
+                        case Hls.ErrorTypes.MEDIA_ERROR:
+                            _activeHlsPlayer.recoverMediaError();
+                            break;
+                        default:
+                            _activeHlsPlayer.destroy();
+                            break;
+                    }
                 }
             });
         } catch (e) {
