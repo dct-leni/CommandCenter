@@ -2043,10 +2043,11 @@ function openVideoPreview(url, title = 'Stream Preview') {
         try {
             const isLive = !isFile;
             const playerConfig = isLive ? {
-                enableStashBuffer: true,
-                stashInitialSize: 128 * 1024,
+                enableStashBuffer: false,
                 lazyLoad: false,
-                liveBufferLatencyChasing: false,
+                liveBufferLatencyChasing: true,
+                liveBufferLatencyMaxLatency: 2.0,
+                liveBufferLatencyMinRemain: 0.5,
                 autoCleanupSourceBuffer: true,
                 autoCleanupMaxBackwardDuration: 30,
                 autoCleanupMinBackwardDuration: 10,
@@ -2066,6 +2067,24 @@ function openVideoPreview(url, title = 'Stream Preview') {
 
             _activeMpegtsPlayer.attachMediaElement(player);
             _activeMpegtsPlayer.load();
+
+            // When new live chunks are buffered, jump past any initial 0-timestamp gap and ensure playback
+            const onBufferProgress = () => {
+                try {
+                    if (player.buffered && player.buffered.length > 0) {
+                        const start = player.buffered.start(0);
+                        if (player.currentTime < start) {
+                            player.currentTime = start;
+                        }
+                    }
+                    if (player.paused) {
+                        player.play().catch(() => {});
+                    }
+                } catch (e) {}
+            };
+            player.addEventListener('progress', onBufferProgress);
+            player.addEventListener('canplay', () => { player.play().catch(() => {}); }, { once: true });
+
             _activeMpegtsPlayer.play().catch(err => {
                 if (err.name !== 'AbortError') {
                     console.warn('Playback error:', err);
