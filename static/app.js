@@ -1978,7 +1978,9 @@ function openVideoPreview(url, title = 'Stream Preview') {
 
     closeAllModals();
 
-    player.muted = true;
+    player.controls = false;
+    player.muted = false;
+    player.volume = 1.0;
     player.playsInline = true;
 
     if (_activeMpegtsPlayer) {
@@ -2061,20 +2063,19 @@ function openVideoPreview(url, title = 'Stream Preview') {
             _activeMpegtsPlayer.attachMediaElement(player);
             _activeMpegtsPlayer.load();
 
-            // Initial buffer alignment (runs once on first load)
-            const onInitialLoaded = () => {
-                try {
-                    if (player.buffered && player.buffered.length > 0) {
-                        const start = player.buffered.start(0);
-                        if (player.currentTime < start) {
-                            player.currentTime = start;
-                        }
-                    }
-                } catch (e) {}
-                player.play().catch(() => {});
+            // Ensure playback resumes immediately when seeking completes or when buffer is ready
+            const tryPlay = () => {
+                if (player.paused && player.readyState >= 2) {
+                    player.play().catch(err => {
+                        if (err.name !== 'AbortError') console.warn('Play retry error:', err);
+                    });
+                }
             };
-            player.addEventListener('loadeddata', onInitialLoaded, { once: true });
-            player.addEventListener('canplay', () => { player.play().catch(() => {}); }, { once: true });
+
+            player.addEventListener('loadeddata', tryPlay);
+            player.addEventListener('canplay', tryPlay);
+            player.addEventListener('seeked', tryPlay);
+            player.addEventListener('waiting', tryPlay);
 
             _activeMpegtsPlayer.play().catch(err => {
                 if (err.name !== 'AbortError') {
