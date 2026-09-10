@@ -78,17 +78,20 @@ def generate_thumbnail(video_path: str, force: bool = False, seek_seconds: float
         # Placing -ss BEFORE -i enables container keyframe fast-seeking (instant ~15ms)
         cmd = [
             get_ffmpeg_path(),
+            "-hide_banner",
+            "-nostdin",
             "-ss", str(seek_seconds),
             "-i", video_path,
             "-vframes", "1",          # Extract 1 frame
             "-q:v", "6",              # JPEG quality (2=best, 31=worst)
-            "-vf", "scale=320:-1",    # Scale to 320px width, keep aspect ratio
+            "-vf", "scale=320:-2",    # Scale to 320px width, keep aspect ratio with guaranteed even height
             "-y",                     # Overwrite output
             str(thumb_path),
         ]
 
         result = subprocess.run(
             cmd,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -101,9 +104,11 @@ def generate_thumbnail(video_path: str, force: bool = False, seek_seconds: float
             return str(thumb_path)
         else:
             # If seek failed (e.g. video shorter than 15s), try fast-seek at 1 second
-            cmd[1] = "1.0"
+            ss_idx = cmd.index("-ss") + 1
+            cmd[ss_idx] = "1.0"
             subprocess.run(
                 cmd,
+                stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -144,6 +149,8 @@ def get_video_metadata(video_path: str) -> dict:
     try:
         cmd = [
             get_ffprobe_path(),
+            "-hide_banner",
+            "-nostdin",
             "-v", "quiet",
             "-print_format", "json",
             "-show_format",
@@ -153,6 +160,7 @@ def get_video_metadata(video_path: str) -> dict:
 
         result = subprocess.run(
             cmd,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             encoding="utf-8",

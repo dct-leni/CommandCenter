@@ -87,7 +87,10 @@ async def probe_streams(input_path: str) -> dict:
 
     ffprobe = get_ffprobe_path()
     cmd = [
-        ffprobe, "-v", "quiet",
+        ffprobe,
+        "-hide_banner",
+        "-nostdin",
+        "-v", "quiet",
         "-print_format", "json",
         "-show_streams",
         input_path,
@@ -96,6 +99,7 @@ async def probe_streams(input_path: str) -> dict:
     try:
         process = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -105,15 +109,29 @@ async def probe_streams(input_path: str) -> dict:
     except Exception as e:
         logger.warning(f"ffprobe failed for {input_path}: {e}")
         return result
- 
+
     for stream in data.get("streams", []):
         codec_type = stream.get("codec_type")
         idx = stream.get("index")
         if codec_type == "video" and result["video"] is None:
+            color_primaries = (stream.get("color_primaries") or "").lower()
+            color_transfer = (stream.get("color_transfer") or "").lower()
+            color_space = (stream.get("color_space") or "").lower()
+            is_hdr = (
+                "bt2020" in color_primaries
+                or "arib-std-b67" in color_transfer
+                or "smpte2084" in color_transfer
+                or "arib" in color_transfer
+            )
             result["video"] = {
                 "index": idx,
                 "width": stream.get("width", 0),
                 "height": stream.get("height", 0),
+                "pix_fmt": stream.get("pix_fmt", ""),
+                "color_primaries": color_primaries,
+                "color_transfer": color_transfer,
+                "color_space": color_space,
+                "is_hdr": is_hdr,
             }
         elif codec_type == "audio":
             tags = stream.get("tags", {}) or {}
@@ -527,13 +545,16 @@ class Converter:
             logger.info(f"{filename}: {audio_note}")
 
             target_size = None
+            is_hdr = False
             if streams["video"]:
                 target_size = _compute_target_size(streams["video"]["width"], streams["video"]["height"])
+                is_hdr = streams["video"].get("is_hdr", False)
 
             needs_scale = target_size is not None
+            hdr_str = " (HDR tone-mapping enabled)" if is_hdr else ""
             info.scaled_note = (
-                f"downscaling to {target_size[0]}x{target_size[1]} (HD cap)"
-                if needs_scale else "no scaling needed (already HD or smaller)"
+                f"downscaling to {target_size[0]}x{target_size[1]} (HD cap){hdr_str}"
+                if needs_scale else f"no scaling needed (already HD or smaller){hdr_str}"
             )
             logger.info(f"{filename}: {info.scaled_note}")
 
@@ -550,6 +571,7 @@ class Converter:
                     video_stream_index=video_stream_index,
                     audio_indices=audio_indices,
                     target_size=target_size,
+                    is_hdr=is_hdr,
                 )
 
             # CPU fallback
@@ -561,6 +583,7 @@ class Converter:
                     video_stream_index=video_stream_index,
                     audio_indices=audio_indices,
                     target_size=target_size,
+                    is_hdr=is_hdr,
                 )
 
             if success and Path(tmp_output_path).exists():
@@ -613,6 +636,7 @@ class Converter:
         video_stream_index: Optional[int],
         audio_indices: List[int],
         target_size: Optional[tuple],
+        is_hdr: bool = False,
     ) -> bool:
         """Run FFmpeg conversion and track progress."""
         info = self.files[filename]
@@ -620,8 +644,11 @@ class Converter:
         # Get duration for progress calculation
         duration = info.metadata.get("duration", 0)
  
-        base_cmd = [get_ffmpeg_path(), "-y", "-hwaccel", "auto", "-i", input_path]
+        base_cmd = [get_ffmpeg_path(), "-hide_banner", "-nostdin", "-y", "-hwaccel", "auto", "-i", input_path]
  
+        # Enforce constant frame rate to prevent A/V drift on variable frame rate sources
+        cfr_args = ["-fps_mode", "cfr", "-r", "30"]
+
         # --- Stream mapping: explicit video + selected or fallback audio tracks.
         # Subtitles are dropped simply by never mapping them.
         map_args = []
@@ -635,9 +662,15 @@ class Converter:
         else:
             map_args += ["-map", "0:a?"]   # best-effort audio fallback if no indices were matched
  
-        scale_args = []
+        # Build video filter chain: HDR tonemapping -> scaling -> SAR normalization -> YUV420p
+        vf_filters = []
+        if is_hdr:
+            vf_filters.append("zscale=t=linear:npl=100,tonemap=tonemap=hable,zscale=p=bt709:t=bt709:m=bt709")
         if target_size:
-            scale_args = ["-vf", f"scale={target_size[0]}:{target_size[1]}"]
+            vf_filters.append(f"scale={target_size[0]}:{target_size[1]}")
+        vf_filters.append("setsar=1")
+        vf_filters.append("format=yuv420p")
+        scale_args = ["-vf", ",".join(vf_filters)]
  
         meta = info.metadata or {}
         video_bitrate = meta.get("video_bitrate", 0) or meta.get("bitrate", 0)
@@ -652,10 +685,11 @@ class Converter:
             from app.ffmpeg_setup import get_best_encoder, get_encoding_params
             best_encoder = get_best_encoder()
             hw_args = get_encoding_params(best_encoder, source_bitrate=video_bitrate)
-            cmd = base_cmd + map_args + scale_args + hw_args + [
+            cmd = base_cmd + cfr_args + map_args + scale_args + hw_args + [
                 "-c:a", "aac",
                 "-b:a", audio_b_str,
                 "-ac", "2",                # Force stereo
+                "-ar", "48000",            # Standard 48kHz audio sample rate
                 "-f", "mpegts",
                 output_path,
             ]
@@ -663,10 +697,11 @@ class Converter:
             # CPU Fallback (libx264)
             from app.ffmpeg_setup import get_encoding_params
             cpu_args = get_encoding_params("libx264", source_bitrate=video_bitrate)
-            cmd = base_cmd + map_args + scale_args + cpu_args + [
+            cmd = base_cmd + cfr_args + map_args + scale_args + cpu_args + [
                 "-c:a", "aac",
                 "-b:a", audio_b_str,
                 "-ac", "2",
+                "-ar", "48000",
                 "-f", "mpegts",
                 output_path,
             ]
@@ -674,6 +709,7 @@ class Converter:
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),

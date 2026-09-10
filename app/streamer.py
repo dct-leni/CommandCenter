@@ -977,7 +977,11 @@ class Streamer:
             # 2. Start FFmpeg using concat demuxer
             ffmpeg_cmd = [
                 get_ffmpeg_path(),
+                "-hide_banner",
+                "-nostdin",
                 "-re",                         # Read at native frame rate
+                "-fflags", "+genpts+igndts",   # Reconstruct DTS/PTS across segment transitions
+                "-avoid_negative_ts", "make_zero",
                 "-f", "concat",                # Concat demuxer
                 "-safe", "0",
                 "-i", playlist_path,
@@ -994,7 +998,8 @@ class Streamer:
 
             ffmpeg_process = await asyncio.create_subprocess_exec(
                 *ffmpeg_cmd,
-                stdout=asyncio.subprocess.PIPE,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )

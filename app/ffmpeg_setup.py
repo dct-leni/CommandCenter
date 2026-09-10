@@ -53,6 +53,8 @@ def is_nvenc_available() -> bool:
         res = subprocess.run(
             [
                 str(FFMPEG_EXE),
+                "-hide_banner",
+                "-nostdin",
                 "-v", "error",
                 "-f", "lavfi",
                 "-i", "nullsrc=s=640x360:d=0.05",
@@ -60,6 +62,7 @@ def is_nvenc_available() -> bool:
                 "-f", "null",
                 "-",
             ],
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -90,6 +93,8 @@ def is_qsv_available() -> bool:
         res = subprocess.run(
             [
                 str(FFMPEG_EXE),
+                "-hide_banner",
+                "-nostdin",
                 "-v", "error",
                 "-f", "lavfi",
                 "-i", "nullsrc=s=640x360:d=0.05",
@@ -97,6 +102,7 @@ def is_qsv_available() -> bool:
                 "-f", "null",
                 "-",
             ],
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
@@ -154,18 +160,33 @@ def get_binaries_status() -> dict:
     }
 
 
+def escape_filter_path(path: str) -> str:
+    """
+    Escape a filesystem path for use inside an FFmpeg filtergraph string on Windows.
+    Converts backslashes to forward slashes and escapes drive colons ('C:' -> 'C\\:').
+    """
+    p = str(path).replace("\\", "/")
+    if len(p) >= 2 and p[1] == ":" and p[0].isalpha():
+        p = p[0] + "\\:" + p[2:]
+    return p
+
+
+BT709_ARGS = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"]
+
+
 def get_encoding_params(
     encoder: str,
     source_bitrate: Optional[int] = None,
-    mode: str = "converter"
+    mode: str = "converter",
+    is_hdr: bool = False,
 ) -> list:
     """
     Unified encoding parameter generator for video conversion, live relays, and web streams.
 
     Modes:
-      - 'converter': File transcode (NVENC preset p5, VBR, cq 24, spatial/temporal AQ)
-      - 'relay':     Live stream re-encode (NVENC preset p5, VBR 2.8M, temporal AQ)
-      - 'web':       GDIGrab screen capture (NVENC preset p5, single-pass CBR 2.8M, NO AQ buffers)
+      - 'converter': File transcode (NVENC preset p6, VBR, cq 22, spatial/temporal AQ, B-refs)
+      - 'relay':     Live stream re-encode (NVENC preset p4, VBR 2.8M, temporal AQ, B-refs)
+      - 'web':       WGC screen capture (NVENC preset p4, capped VBR 2.8M, cq 24, spatial AQ, 0 B-frames)
     """
     target_b_bps = 2_800_000   # 2.8 Mbps default
     max_b_bps    = 3_500_000   # 3.5 Mbps default
@@ -223,6 +244,8 @@ def get_encoding_params(
                 "-spatial-aq", "1", "-temporal-aq", "1",
                 "-bf", "2", "-b_ref_mode", "middle",
             ])
+        if not is_hdr:
+            params.extend(BT709_ARGS)
         return params
 
     elif encoder == "h264_qsv":
@@ -244,6 +267,8 @@ def get_encoding_params(
                 params.extend(["-look_ahead", "1", "-look_ahead_depth", "20", "-bf", "3"])
             else:
                 params.extend(["-rc", "vbr", "-bf", "3"])
+        if not is_hdr:
+            params.extend(BT709_ARGS)
         return params
 
     elif encoder == "libx264":
@@ -266,6 +291,8 @@ def get_encoding_params(
             params.extend(["-crf", "21"])
         elif mode == "relay":
             params.extend(["-crf", "23"])
+        if not is_hdr:
+            params.extend(BT709_ARGS)
         return params
 
     else:
@@ -306,6 +333,7 @@ def get_video_filter(is_web: bool = False, shader_upscale: bool = False, is_wgc:
         filters.append("crop=iw:ih-38:0:38")
     if shader_upscale:
         filters.append("scale=1920:1080:flags=lanczos")
+        filters.append("setsar=1")
         filters.append("unsharp=3:3:0.5:3:3:0.0")
     filters.append("format=yuv420p")
     return ["-vf", ",".join(filters)]
@@ -317,11 +345,13 @@ def get_audio_params(is_web: bool = False) -> list:
         return [
             "-c:a", "aac",
             "-b:a", "192k",
+            "-ar", "48000",
             "-af", "adelay=350|350,aresample=async=1000:min_hard_comp=0.100000:first_pts=0"
         ]
     return [
         "-c:a", "aac",
         "-b:a", "192k",
+        "-ar", "48000",
         "-af", "aresample=async=1000:first_pts=0"
     ]
 
@@ -353,6 +383,8 @@ def probe_source_codec(url: str, timeout: int = 8, proxy_url: Optional[str] = No
     try:
         cmd = [
             str(FFPROBE_EXE),
+            "-hide_banner",
+            "-nostdin",
             "-v", "error",
         ]
 
@@ -402,6 +434,7 @@ def probe_source_codec(url: str, timeout: int = 8, proxy_url: Optional[str] = No
 
         res = subprocess.run(
             cmd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),

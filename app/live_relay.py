@@ -186,6 +186,8 @@ class LiveStreamManager:
                 # Capture 1 frame directly from local HTTP stream output
                 cmd = [
                     get_ffmpeg_path(),
+                    "-hide_banner",
+                    "-nostdin",
                     "-ss", "0",
                     "-i", f"http://127.0.0.1:{port}/",
                     "-vframes", "1",
@@ -631,7 +633,7 @@ class LiveStreamManager:
         while relay.status in ("running", "listening", "reconnecting"):
             try:
                 cfg = load_config()
-                cmd = [get_ffmpeg_path()]
+                cmd = [get_ffmpeg_path(), "-hide_banner", "-nostdin"]
 
                 target_pid = None
                 if is_web:
@@ -778,6 +780,9 @@ class LiveStreamManager:
                     if "-c:v" in video_params and "copy" not in video_params:
                         cmd.extend(get_video_filter(is_web=False, shader_upscale=getattr(cfg.streamer, "shader_upscale", False)))
 
+                if is_web or ("-c:v" in video_params and "copy" not in video_params):
+                    cmd.extend(["-fps_mode", "cfr"])
+
                 cmd.extend(video_params)
 
                 # Output parameters - stream to Python's local loopback TCP port
@@ -814,7 +819,7 @@ class LiveStreamManager:
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdin=r_fd if is_web else subprocess.DEVNULL,
-                    stdout=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
                     limit=1024 * 1024,  # 1 MB — prevents LimitOverrunError on long FFmpeg lines
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
@@ -857,7 +862,7 @@ class LiveStreamManager:
                             while relay.status in ("running", "listening"):
                                 await asyncio.sleep(2.0)
                                 if _u32.IsWindow(h_wnd) and _u32.IsIconic(h_wnd):
-                                    logger.info(f"Web stream '{relay.name}': restoring minimized window to maintain GDI capture")
+                                    logger.info(f"Web stream '{relay.name}': restoring minimized window to maintain WGC capture")
                                     _u32.ShowWindow(h_wnd, 4)  # SW_SHOWNOACTIVATE = 4
                         except asyncio.CancelledError:
                             pass

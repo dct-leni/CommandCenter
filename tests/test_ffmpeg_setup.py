@@ -61,3 +61,20 @@ def test_userchrome_css_syntax():
     assert '\n"' not in content
 
 
+def test_escape_filter_path():
+    from app.ffmpeg_setup import escape_filter_path
+    assert escape_filter_path(r"C:\Windows\Fonts\arial.ttf") == "C\\:/Windows/Fonts/arial.ttf"
+    assert escape_filter_path("/usr/share/fonts/arial.ttf") == "/usr/share/fonts/arial.ttf"
+    assert escape_filter_path(r"D:\media\subtitles.srt") == "D\\:/media/subtitles.srt"
+
+
+def test_get_encoding_params_hdr_guard():
+    params_sdr = get_encoding_params("libx264", source_bitrate=3000000, is_hdr=False)
+    assert "-colorspace" in params_sdr
+    assert "bt709" in params_sdr
+
+    params_hdr = get_encoding_params("libx264", source_bitrate=3000000, is_hdr=True)
+    assert "-colorspace" not in params_hdr
+
+
+
