@@ -281,6 +281,30 @@ def get_screen_capture_params(encoder: str) -> list:
     return get_encoding_params(encoder, mode="web")
 
 
+def get_videocapture_path() -> str:
+    """Return path to app_videocapture.exe binary."""
+    return str(BIN_DIR / "app_videocapture.exe")
+
+
+def is_wgc_available() -> bool:
+    """Check if Windows Graphics Capture binary exists on Windows."""
+    if os.name != "nt":
+        return False
+    return (BIN_DIR / "app_videocapture.exe").exists()
+
+
+def get_video_filter(is_web: bool = False, shader_upscale: bool = False, is_wgc: bool = False) -> list:
+    """Return standardized video filter arguments for live/web streams."""
+    filters = []
+    if is_web and not is_wgc:
+        filters.append("crop=iw:ih-38:0:38")
+    if shader_upscale:
+        filters.append("scale=1920:1080:flags=lanczos")
+        filters.append("unsharp=3:3:0.5:3:3:0.0")
+    filters.append("format=yuv420p")
+    return ["-vf", ",".join(filters)]
+
+
 def get_audio_params(is_web: bool = False) -> list:
     """Return standardized audio encoding/filter parameters for live stream copy vs web streams."""
     if is_web:

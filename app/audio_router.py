@@ -44,46 +44,69 @@ class ProcessLoopbackAudioCapture:
         self._thread.start()
 
     def _run(self):
-        logger.info(f"[{self.stream_id}] Starting app_loopback.exe for PID {self.target_pid} (48000Hz PCM)")
-        try:
-            self._proc = subprocess.Popen(
-                [str(_APP_LOOPBACK_EXE), str(self.target_pid), "48000"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-            )
+        retries = 0
+        max_retries = 3
+        while self._running and retries < max_retries:
+            logger.info(f"[{self.stream_id}] Starting app_loopback.exe for PID {self.target_pid} (48000Hz PCM, attempt {retries + 1})")
+            try:
+                self._proc = subprocess.Popen(
+                    [str(_APP_LOOPBACK_EXE), str(self.target_pid), "48000"],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+                )
 
-            # Background thread to log stderr from app_loopback.exe
-            def _log_stderr():
-                try:
-                    for line in iter(self._proc.stderr.readline, b""):
-                        line_str = line.decode(errors="replace").strip()
-                        if line_str:
-                            logger.info(f"[{self.stream_id}] [app_loopback] {line_str}")
-                except Exception:
-                    pass
-            threading.Thread(target=_log_stderr, daemon=True).start()
+                # Background thread to log stderr from app_loopback.exe
+                def _log_stderr(proc):
+                    try:
+                        for line in iter(proc.stderr.readline, b""):
+                            line_str = line.decode(errors="replace").strip()
+                            if line_str:
+                                logger.info(f"[{self.stream_id}] [app_loopback] {line_str}")
+                    except Exception:
+                        pass
+                threading.Thread(target=_log_stderr, args=(self._proc,), daemon=True).start()
 
-            # Stream stdout chunks into FFmpeg pipe_fd
-            is_fd_int = isinstance(self.pipe_fd, int)
-            raw_stdout = getattr(self._proc.stdout, "raw", self._proc.stdout)
+                # Stream stdout chunks into FFmpeg pipe_fd
+                is_fd_int = isinstance(self.pipe_fd, int)
+                raw_stdout = getattr(self._proc.stdout, "raw", self._proc.stdout)
 
-            while self._running and self._proc.poll() is None:
-                data = raw_stdout.read(4096)
-                if not data:
-                    break
-                if is_fd_int:
-                    os.write(self.pipe_fd, data)
-                else:
-                    self.pipe_fd.write(data)
-                    self.pipe_fd.flush()
+                bytes_transferred = 0
+                while self._running and self._proc.poll() is None:
+                    data = raw_stdout.read(4096)
+                    if not data:
+                        break
+                    bytes_transferred += len(data)
+                    if is_fd_int:
+                        os.write(self.pipe_fd, data)
+                    else:
+                        self.pipe_fd.write(data)
+                        self.pipe_fd.flush()
 
-        except (BrokenPipeError, OSError) as e:
-            logger.debug(f"[{self.stream_id}] Audio pipe closed: {e}")
-        except Exception as e:
-            logger.error(f"[{self.stream_id}] Audio capture worker error: {e}", exc_info=True)
-        finally:
-            self.stop()
+                if bytes_transferred > 48000 * 4:  # Ran healthy
+                    retries = 0
+
+            except (BrokenPipeError, OSError) as e:
+                logger.debug(f"[{self.stream_id}] Audio pipe closed: {e}")
+                break
+            except Exception as e:
+                logger.error(f"[{self.stream_id}] Audio capture worker error: {e}", exc_info=True)
+                retries += 1
+                time.sleep(1.0)
+            finally:
+                if self._proc:
+                    try:
+                        self._proc.terminate()
+                        self._proc.wait(timeout=0.5)
+                    except Exception:
+                        pass
+
+            if self._running and retries < max_retries:
+                retries += 1
+                logger.warning(f"[{self.stream_id}] app_loopback.exe exited unexpectedly, re-attaching in 1s (retry {retries}/{max_retries})...")
+                time.sleep(1.0)
+
+        self.stop()
 
     def stop(self):
         self._running = False

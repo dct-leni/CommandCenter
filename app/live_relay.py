@@ -16,8 +16,16 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from app.config import load_config
-from app.ffmpeg_setup import get_ffmpeg_path, is_nvenc_available
+from app.ffmpeg_setup import (
+    get_ffmpeg_path,
+    is_nvenc_available,
+    get_video_filter,
+    is_wgc_available,
+    get_videocapture_path,
+)
 from app.thumbnails import THUMBNAILS_DIR
+from app.web_stream import web_stream_manager
+from app.process_utils import terminate_process_tree
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +49,7 @@ class LiveRelayStatus:
     port: int
     status: str = "stopped"  # stopped, running, listening, error
     error: Optional[str] = None
+    has_received_data: bool = False
     fps: float = 0.0
     bitrate: str = "0kbits/s"
     process: Optional[asyncio.subprocess.Process] = field(default=None, repr=False)
@@ -52,6 +61,7 @@ class LiveRelayStatus:
     loopback_server: Optional[asyncio.Server] = field(default=None, repr=False)
     loopback_port: int = 0
     audio_ws_task: Optional[asyncio.Task] = field(default=None, repr=False)
+    capture_process: Optional[subprocess.Popen] = field(default=None, repr=False)
 
     @property
     def has_thumbnail(self) -> bool:
@@ -239,6 +249,7 @@ class LiveStreamManager:
             relay = current_relay
             relay.status = "listening"
             relay.error = None
+            relay.has_received_data = False
         else:
             relay = LiveRelayStatus(
                 id=stream_id,
@@ -247,6 +258,7 @@ class LiveStreamManager:
                 port=int(item.get("port", 1913)),
                 status="listening",
                 error=None,
+                has_received_data=False,
             )
             self.active_relays[stream_id] = relay
 
@@ -254,13 +266,25 @@ class LiveStreamManager:
         try:
             async def handle_loopback(reader, writer):
                 relay.status = "running"
+                relay.error = None
                 try:
-                    while relay.status in ("running", "listening"):
-                        # Read up to 64KB socket payload chunks so full H.264 video frames (40-80KB)
-                        # stream instantly in 1-2 reads without 30-fragment event loop delays
-                        chunk = await reader.read(65536)
+                    while relay.status in ("running", "listening", "reconnecting"):
+                        # Read up to 64KB socket payload chunks with 25s silence watchdog
+                        try:
+                            chunk = await asyncio.wait_for(reader.read(65536), timeout=25.0)
+                        except asyncio.TimeoutError:
+                            if relay.status in ("running", "listening") and relay.process and relay.process.returncode is None:
+                                logger.warning(f"Live relay '{relay.name}' silence watchdog triggered (>25s without data) — terminating frozen FFmpeg")
+                                try:
+                                    relay.process.kill()
+                                except Exception:
+                                    pass
+                            break
+
                         if not chunk:
                             break
+
+                        relay.has_received_data = True
                         
                         if relay.clients:
                             for q in list(relay.clients.keys()):
@@ -312,6 +336,45 @@ class LiveStreamManager:
                     return
             except Exception:
                 try:
+                    writer.close()
+                except Exception:
+                    pass
+                return
+
+            # Reject immediately if stream is in error or stopped
+            if relay.status in ("error", "stopped"):
+                err_resp = (
+                    "HTTP/1.1 503 Service Unavailable\r\n"
+                    "Content-Type: text/plain\r\n"
+                    "Access-Control-Allow-Origin: *\r\n"
+                    "Connection: close\r\n\r\n"
+                    "Stream is not available\r\n"
+                )
+                try:
+                    writer.write(err_resp.encode("utf-8"))
+                    await writer.drain()
+                    writer.close()
+                except Exception:
+                    pass
+                return
+
+            # If stream is still starting, wait up to 3 seconds for first packet
+            for _ in range(30):
+                if getattr(relay, "has_received_data", False) or relay.status in ("error", "stopped"):
+                    break
+                await asyncio.sleep(0.1)
+
+            if relay.status in ("error", "stopped") or not getattr(relay, "has_received_data", False):
+                err_resp = (
+                    "HTTP/1.1 503 Service Unavailable\r\n"
+                    "Content-Type: text/plain\r\n"
+                    "Access-Control-Allow-Origin: *\r\n"
+                    "Connection: close\r\n\r\n"
+                    "Stream is not available\r\n"
+                )
+                try:
+                    writer.write(err_resp.encode("utf-8"))
+                    await writer.drain()
                     writer.close()
                 except Exception:
                     pass
@@ -406,7 +469,6 @@ class LiveStreamManager:
     async def stop_stream(self, stream_id: str) -> dict:
         """Stop a running live relay stream cleanly."""
         if stream_id not in self.active_relays:
-            from app.web_stream import web_stream_manager
             await asyncio.to_thread(web_stream_manager.close_browser, stream_id)
             return {"id": stream_id, "status": "stopped"}
 
@@ -457,11 +519,17 @@ class LiveStreamManager:
                 logger.error(f"Error terminating relay process {stream_id}: {e}")
 
         relay.process = None
+
+        if relay.capture_process:
+            try:
+                terminate_process_tree(relay.capture_process)
+            except Exception as e:
+                logger.error(f"Error terminating capture helper for {stream_id}: {e}")
+            relay.capture_process = None
         from app.audio_router import stop_process_audio_capture
         stop_process_audio_capture(stream_id)
         from app.vpn_manager import vpn_manager
         vpn_manager.stop_vpn_for_stream(stream_id)
-        from app.web_stream import web_stream_manager
         await asyncio.to_thread(web_stream_manager.close_browser, stream_id)
 
         # Restore user's default audio device if it was routed to VB-Cable for this stream
@@ -497,7 +565,6 @@ class LiveStreamManager:
         if proxy_url:
             await asyncio.sleep(0.5)  # Wait 500ms for WireGuard local proxy socket readiness
 
-        from app.web_stream import web_stream_manager
         await asyncio.to_thread(web_stream_manager.close_browser, stream_id)
 
         name = stream_item.get("name", "Web Stream")
@@ -559,21 +626,22 @@ class LiveStreamManager:
                 video_params = get_relay_encoding_params(encoder)
                 logger.info(f"Source codec '{source_codec}' — re-encoding with {encoder} for '{relay.name}'")
 
-        while relay.status in ("running", "listening"):
+        retry_count = 0
+        max_retries = 5
+        while relay.status in ("running", "listening", "reconnecting"):
             try:
-
+                cfg = load_config()
                 cmd = [get_ffmpeg_path()]
 
                 target_pid = None
                 if is_web:
-                    from app.web_stream import web_stream_manager
                     hwnd = await asyncio.get_event_loop().run_in_executor(
                         None, web_stream_manager.get_window_hwnd, relay.id, relay.name, relay.url
                     )
 
                     if hwnd:
                         input_target = f"hwnd=0x{hwnd:x}"
-                        logger.info(f"Web stream '{relay.name}' GDIGrab targeting HWND: {input_target}")
+                        logger.info(f"Web stream '{relay.name}' targeting HWND: {input_target}")
                         if os.name == "nt":
                             try:
                                 import ctypes
@@ -592,7 +660,7 @@ class LiveStreamManager:
                         if browser_proc and browser_proc.pid:
                             target_pid = browser_proc.pid
 
-                    logger.info(f"Web stream '{relay.name}': GDIGrab targeting '{input_target}' with PID={target_pid} (Native Process Loopback)")
+                    logger.info(f"Web stream '{relay.name}': targeting '{input_target}' with PID={target_pid} (Native Process Loopback)")
 
                     # Restore window if minimized
                     if hwnd:
@@ -605,24 +673,82 @@ class LiveStreamManager:
                         except Exception:
                             pass
 
-                    cmd.extend([
-                        # Video: GDIGrab browser window HWND capture at 30 FPS (Master Clock Input 0)
-                        "-use_wallclock_as_timestamps", "1",
-                        "-thread_queue_size", "1024",
-                        "-f", "gdigrab",
-                        "-framerate", "30",
-                        "-draw_mouse", "0",
-                        "-i", input_target,
-                        # Audio: Native PROCESS_LOOPBACK raw s16le PCM via pipe:0 (Input 1)
-                        "-thread_queue_size", "1024",
-                        "-f", "s16le",
-                        "-ac", "2",
-                        "-ar", "48000",
-                        "-i", "pipe:0",
-                        "-map", "0:v:0",
-                        "-map", "1:a:0",
-                        "-vf", "crop=iw:ih-38:0:38,format=yuv420p",
-                    ])
+                    # Determine video capture backend (default "wgc" with fallback to "gdigrab")
+                    backend = getattr(cfg.streamer, "video_capture_backend", "wgc").lower()
+                    use_wgc = (backend == "wgc") and is_wgc_available() and (os.name == "nt")
+                    wgc_active = False
+
+                    if use_wgc:
+                        pipe_name = f"\\\\.\\pipe\\cc_video_{relay.id}"
+                        try:
+                            import ctypes
+                            from ctypes import wintypes
+                            rect = wintypes.RECT()
+                            ctypes.windll.user32.GetClientRect(hwnd, ctypes.byref(rect))
+                            win_w = max(640, rect.right - rect.left)
+                            win_h = max(360, rect.bottom - rect.top)
+
+                            vcap_exe = get_videocapture_path()
+                            vcap_cmd = [
+                                vcap_exe,
+                                "--hwnd", f"0x{hwnd:x}",
+                                "--fps", "30",
+                                "--width", str(win_w),
+                                "--height", str(win_h),
+                                "--pipe", pipe_name,
+                            ]
+                            logger.info(f"Web stream '{relay.name}': Launching WGC capture ({win_w}x{win_h} @ 30fps) on {pipe_name}")
+                            capture_proc = subprocess.Popen(
+                                vcap_cmd,
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE,
+                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                            )
+                            relay.capture_process = capture_proc
+                            wgc_active = True
+
+                            await asyncio.sleep(0.25)
+
+                            cmd.extend([
+                                "-f", "rawvideo",
+                                "-pix_fmt", "bgra",
+                                "-s", f"{win_w}x{win_h}",
+                                "-r", "30",
+                                "-i", pipe_name,
+                                "-thread_queue_size", "1024",
+                                "-f", "s16le",
+                                "-ac", "2",
+                                "-ar", "48000",
+                                "-i", "pipe:0",
+                                "-map", "0:v:0",
+                                "-map", "1:a:0",
+                            ])
+                            cmd.extend(get_video_filter(is_web=True, shader_upscale=getattr(cfg.streamer, "shader_upscale", False), is_wgc=True))
+                        except Exception as e:
+                            logger.warning(f"Failed to start WGC capture ({e}), falling back to GDIGrab")
+                            if relay.capture_process:
+                                terminate_process_tree(relay.capture_process)
+                                relay.capture_process = None
+                            wgc_active = False
+
+                    if not wgc_active:
+                        logger.info(f"Web stream '{relay.name}': Using GDIGrab capture backend")
+                        cmd.extend([
+                            "-use_wallclock_as_timestamps", "1",
+                            "-thread_queue_size", "1024",
+                            "-f", "gdigrab",
+                            "-framerate", "30",
+                            "-draw_mouse", "0",
+                            "-i", input_target,
+                            "-thread_queue_size", "1024",
+                            "-f", "s16le",
+                            "-ac", "2",
+                            "-ar", "48000",
+                            "-i", "pipe:0",
+                            "-map", "0:v:0",
+                            "-map", "1:a:0",
+                        ])
+                        cmd.extend(get_video_filter(is_web=True, shader_upscale=getattr(cfg.streamer, "shader_upscale", False), is_wgc=False))
                 else:
                     if proxy_url:
                         if proxy_url.startswith("socks5://") or proxy_url.startswith("socks4://"):
@@ -675,6 +801,8 @@ class LiveStreamManager:
                         cmd.extend(["-re", "-stream_loop", "-1"])
 
                     cmd.extend(["-i", relay.url])
+                    if "-c:v" in video_params and "copy" not in video_params:
+                        cmd.extend(get_video_filter(is_web=False, shader_upscale=getattr(cfg.streamer, "shader_upscale", False)))
 
                 cmd.extend(video_params)
 
@@ -746,7 +874,30 @@ class LiveStreamManager:
 
                 thumb_loop_task = asyncio.create_task(_periodic_thumb_task(relay.id, relay.port))
 
+                window_guard_task = None
+                if is_web and hwnd and os.name == "nt":
+                    async def _watch_window(h_wnd: int):
+                        try:
+                            import ctypes
+                            _u32 = ctypes.windll.user32
+                            while relay.status in ("running", "listening"):
+                                await asyncio.sleep(2.0)
+                                if _u32.IsWindow(h_wnd) and _u32.IsIconic(h_wnd):
+                                    logger.info(f"Web stream '{relay.name}': restoring minimized window to maintain GDI capture")
+                                    _u32.ShowWindow(h_wnd, 4)  # SW_SHOWNOACTIVATE = 4
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception:
+                            pass
+                    window_guard_task = asyncio.create_task(_watch_window(hwnd))
+
+                start_time = time.time()
                 await process.wait()
+                if (time.time() - start_time) > 30.0:
+                    retry_count = 0  # Ran healthy for > 30s, reset retry budget
+
+                if window_guard_task and not window_guard_task.done():
+                    window_guard_task.cancel()
                 if is_web:
                     from app.audio_router import stop_process_audio_capture
                     stop_process_audio_capture(relay.id)
@@ -754,7 +905,7 @@ class LiveStreamManager:
                     thumb_loop_task.cancel()
 
                 # If process exited but status is still active (not stopped by user)
-                if relay.status in ("running", "listening"):
+                if relay.status in ("running", "listening", "reconnecting"):
                     if process.returncode != 0:
                         # Give a tiny slice for log_task to catch any final lines
                         await asyncio.sleep(0.2)
@@ -780,13 +931,35 @@ class LiveStreamManager:
                             else:
                                 error_detail = relay.last_logs[-1]
 
-                        relay.status = "error"
-                        relay.error = error_detail if any(err in error_detail for err in ("404", "403", "401", "refused")) else f"FFmpeg error ({process.returncode}): {error_detail}"
-                        if is_web:
-                            from app.web_stream import web_stream_manager
-                            asyncio.create_task(asyncio.to_thread(web_stream_manager.close_browser, relay.id))
-                        break
+                        formatted_err = error_detail if any(err in error_detail for err in ("404", "403", "401", "refused")) else f"FFmpeg error ({process.returncode}): {error_detail}"
+
+                        # If stream never successfully connected or failed to open input, fail immediately without retrying!
+                        never_connected = not getattr(relay, "has_received_data", False)
+                        is_input_error = any(kw in formatted_err.lower() for kw in ("error opening input", "not found", "404", "403", "401", "refused", "-138"))
+
+                        if never_connected or is_input_error or is_web or retry_count >= max_retries or relay.status in ("stopped",):
+                            relay.status = "error"
+                            relay.error = formatted_err
+                            # Disconnect all hanging clients immediately
+                            for w in list(relay.clients.values()):
+                                try:
+                                    w.close()
+                                except Exception:
+                                    pass
+                            relay.clients.clear()
+                            if is_web:
+                                                    asyncio.create_task(asyncio.to_thread(web_stream_manager.close_browser, relay.id))
+                            break
+                        else:
+                            retry_count += 1
+                            backoff_sec = min(10, 2 ** retry_count)
+                            relay.status = "reconnecting"
+                            relay.error = f"Stream interrupted ({formatted_err}). Reconnecting in {backoff_sec}s (attempt {retry_count}/{max_retries})..."
+                            logger.info(f"Live relay '{relay.name}': {relay.error}")
+                            await asyncio.sleep(backoff_sec)
+                            continue
                     else:
+                        retry_count = 0
                         await asyncio.sleep(1.0)
 
             except asyncio.CancelledError:
@@ -802,8 +975,7 @@ class LiveStreamManager:
                 relay.status = "error"
                 relay.error = str(e)
                 if is_web:
-                    from app.web_stream import web_stream_manager
-                    asyncio.create_task(asyncio.to_thread(web_stream_manager.close_browser, relay.id))
+                            asyncio.create_task(asyncio.to_thread(web_stream_manager.close_browser, relay.id))
                 break
 
     async def _read_relay_logs(self, relay: LiveRelayStatus, stderr):

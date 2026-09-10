@@ -191,9 +191,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') {
             closeFolderBrowser();
-            document.getElementById('file-picker-modal').style.display = 'none';
+            closeVideoPreview();
+            closeLiveStreamModal();
+            closeWebStreamModal();
+            closeGlobalVpnModal();
+            const fp = document.getElementById('file-picker-modal');
+            if (fp) fp.style.display = 'none';
         }
     });
+
+    initStreamFilters();
 
     // Start polling
     startPolling();
@@ -223,6 +230,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         updateConfigSetting({ server: { auto_start: e.target.checked } });
         showToast(e.target.checked ? 'Auto-start enabled (starts with Windows, visible window)' : 'Auto-start disabled', 'info');
     });
+    const upscaleToggle = document.getElementById('shader-upscale-toggle');
+    if (upscaleToggle) {
+        upscaleToggle.addEventListener('change', (e) => {
+            if (state.config?.streamer) state.config.streamer.shader_upscale = e.target.checked;
+            updateConfigSetting({ streamer: { shader_upscale: e.target.checked } });
+            showToast(e.target.checked ? '✨ Shader Upscale enabled (web/live streams)' : 'Shader Upscale disabled', 'info');
+        });
+    }
 });
 
 function applyConfig() {
@@ -243,6 +258,9 @@ function applyConfig() {
     }
     if (streamer?.protocol) {
         document.getElementById('stream-protocol').value = streamer.protocol;
+    }
+    if (streamer && document.getElementById('shader-upscale-toggle')) {
+        document.getElementById('shader-upscale-toggle').checked = Boolean(streamer.shader_upscale);
     }
     if (server) {
         document.getElementById('auto-start-boot').checked = Boolean(server.auto_start);
@@ -603,6 +621,7 @@ function renderStreamerFolders() {
     }).join('');
 
     container.innerHTML = cardsHtml;
+    initSlotSortables();
 }
 
 function renderFolderFiles(folder) {
@@ -686,6 +705,9 @@ function renderFolderFiles(folder) {
             </div>
         ` : '';
 
+        const isHlsMode = protocol === 'HLS';
+        const slotStreamHttpUrl = `http://${window.location.hostname || '127.0.0.1'}:${port}/stream/index.m3u8`;
+
         // File entries
         const fileRows = files.map((fname, fi) => {
             const detail = filesDetail[fi] || {};
@@ -694,6 +716,16 @@ function renderFolderFiles(folder) {
             const thumbSrc = `/api/streamer/folder/${encodeURIComponent(folder.name)}/thumbnail/${encodeURIComponent(fname)}`;
             const thumbHtml = getThumbHtml(thumbSrc, detail.has_thumbnail, 'slot-file-thumb');
             const filePreviewUrl = `/api/streamer/folder/${encodeURIComponent(folder.name)}/file/${encodeURIComponent(fname)}`;
+
+            // When stream is live HLS, preview plays live stream. If RTMP live, no preview button. When stopped, preview local file.
+            let previewBtn = '';
+            if (isLive) {
+                if (isHlsMode) {
+                    previewBtn = `<button class="slot-reorder-btn" data-action="preview" data-url="${escapeHtml(slotStreamHttpUrl)}" data-title="Slot :${port} [Live Stream]" title="Preview Live Stream"><i class="fa-solid fa-eye"></i></button>`;
+                }
+            } else {
+                previewBtn = `<button class="slot-reorder-btn" data-action="preview" data-url="${filePreviewUrl}" data-title="${escapeHtml(fname)}" title="Preview Video File"><i class="fa-solid fa-eye"></i></button>`;
+            }
 
             return `
                 <div class="slot-file-entry ${isCurrent ? 'is-playing' : ''}" draggable="true" ondragstart="handleSlotFileDragStart(event, '${escapeAttr(folder.name)}', ${port}, '${escapeAttr(fname)}')" ondragend="handleSlotFileDragEnd(event)">
@@ -704,7 +736,7 @@ function renderFolderFiles(folder) {
                     </div>
                     ${isCurrent ? '<span class="slot-playing-badge"><i class="fa-solid fa-play"></i> Playing</span>' : ''}
                     <div class="slot-reorder-buttons" style="display:flex; gap:2px; flex-shrink:0;">
-                        <button class="slot-reorder-btn" data-action="preview" data-url="${filePreviewUrl}" data-title="${escapeHtml(fname)}" title="Preview Video File"><i class="fa-solid fa-eye"></i></button>
+                        ${previewBtn}
                         <button class="slot-reorder-btn" data-action="move-file" data-name="${escapeHtml(folder.name)}" data-port="${port}" data-index="${fi}" data-dir="-1" title="Move Up" ${fi === 0 ? 'disabled' : ''}><i class="fa-solid fa-caret-up"></i></button>
                         <button class="slot-reorder-btn" data-action="move-file" data-name="${escapeHtml(folder.name)}" data-port="${port}" data-index="${fi}" data-dir="1" title="Move Down" ${fi === files.length - 1 ? 'disabled' : ''}><i class="fa-solid fa-caret-down"></i></button>
                     </div>
@@ -713,18 +745,16 @@ function renderFolderFiles(folder) {
             `;
         }).join('');
 
-        const isHlsMode = protocol === 'HLS';
-        const slotStreamHttpUrl = `http://${window.location.hostname || '127.0.0.1'}:${port}/stream/index.m3u8`;
-
         const previewSlotBtn = (isLive && isHlsMode) ? `
-            <button class="slot-preview-btn btn btn-secondary btn-sm" data-action="preview" data-url="${escapeHtml(slotStreamHttpUrl)}" data-title="Slot :${port} (${escapeHtml(currentFile || folder.name)})" title="Preview Stream in In-App Player">
+            <button class="slot-preview-btn btn btn-secondary btn-sm" data-action="preview" data-url="${escapeHtml(slotStreamHttpUrl)}" data-title="Slot :${port} (${escapeHtml(currentFile || folder.name)}) [Live Stream]" title="Preview Stream in In-App Player">
                 <i class="fa-solid fa-eye"></i> Preview
             </button>
         ` : '';
 
         return `
-            <div class="slot-card" id="slot-${folder.name}-${port}" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleSlotDrop(event, '${escapeAttr(folder.name)}', ${port})">
+            <div class="slot-card" id="slot-${escapeAttr(folder.name)}-${port}" ondragover="handleDragOver(event)" ondragleave="handleDragLeave(event)" ondrop="handleSlotDrop(event, '${escapeAttr(folder.name)}', ${port})">
                 <div class="slot-header">
+                    <button class="slot-toggle-btn" data-action="toggle-slot" data-slot-id="slot-${escapeAttr(folder.name)}-${port}" title="Collapse / Expand Slot"><i class="fa-solid fa-chevron-down"></i></button>
                     ${portBadge}
                     ${viewerBadge}
                     <span class="slot-file-count">${files.length} file${files.length !== 1 ? 's' : ''}</span>
@@ -733,7 +763,7 @@ function renderFolderFiles(folder) {
                     <button class="slot-add-btn" data-action="add-file" data-name="${escapeHtml(folder.name)}" data-port="${port}">+ Add File</button>
                 </div>
                 ${progressHtml}
-                <div class="slot-file-list">
+                <div class="slot-file-list" data-folder="${escapeAttr(folder.name)}" data-port="${port}">
                     ${fileRows || '<div class="slot-empty">No files. Click + Add File to assign videos.</div>'}
                 </div>
             </div>
@@ -961,7 +991,8 @@ function updateStreamUI() {
     document.getElementById('streamer-browse-btn').disabled = isRunning;
 
     if (isRunning) {
-        const liveCount = state.streamStatus.active_streams.filter(s => s.status === 'live').length;
+        const activeStreams = state.streamStatus.active_streams || [];
+        const liveCount = activeStreams.filter(s => s.status === 'live').length;
         badge.textContent = `Live · ${liveCount} streams`;
         badge.className = 'stream-status-badge live';
         startBtn.innerHTML = '<span class="btn-icon"><i class="fa-solid fa-stop"></i></span> Stop';
@@ -975,12 +1006,14 @@ function updateStreamUI() {
         startBtn.disabled = !state.streamerFolders.length;
     }
 
-    // Show errors
-    if (state.streamStatus.errors && state.streamStatus.errors.length > 0) {
-        errorsEl.style.display = 'block';
-        errorsEl.innerHTML = state.streamStatus.errors.map(e => `<p><i class="fa-solid fa-triangle-exclamation"></i> ${escapeHtml(e)}</p>`).join('');
-    } else {
-        errorsEl.style.display = 'none';
+    // Show errors safely
+    if (errorsEl) {
+        if (state.streamStatus.errors && state.streamStatus.errors.length > 0) {
+            errorsEl.style.display = 'block';
+            errorsEl.innerHTML = state.streamStatus.errors.map(e => `<p><i class="fa-solid fa-triangle-exclamation"></i> ${escapeHtml(e)}</p>`).join('');
+        } else {
+            errorsEl.style.display = 'none';
+        }
     }
 
     // Re-render folder list to update port indicators — skip when nothing
@@ -1032,7 +1065,12 @@ async function startStreaming() {
                         state.streamStatus = statusData;
                         updateStreamUI();
                         if (state.streamerFolders.length === 0 && state.config?.streamer?.content_folder) {
-                            await scanStreamerFolder(state.config.streamer.content_folder);
+                            try {
+                                const folderData = await api('GET', '/streamer/folders');
+                                await setStreamerFoldersAndRefresh(folderData.folders);
+                            } catch (e) {
+                                await scanStreamerFolder(state.config.streamer.content_folder);
+                            }
                         } else {
                             renderStreamerFolders();
                         }
@@ -1375,9 +1413,16 @@ function escapeAttr(str) {
     return String(str).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
 }
 
-function copyToClipboard(text) {
+function copyToClipboard(text, triggerEl) {
     navigator.clipboard.writeText(text)
-        .then(() => showToast('URL copied to clipboard!', 'success'))
+        .then(() => {
+            if (triggerEl) {
+                const origHtml = triggerEl.innerHTML;
+                triggerEl.innerHTML = `<i class="fa-solid fa-check" style="color:var(--emerald);"></i> Copied!`;
+                setTimeout(() => { triggerEl.innerHTML = origHtml; }, 1500);
+            }
+            showToast('URL copied to clipboard!', 'success');
+        })
         .catch(err => showToast('Failed to copy URL', 'error'));
 }
 
@@ -1675,6 +1720,8 @@ function renderLiveStreams() {
             statusBadge = `<span class="livestream-status listening"><i class="fa-solid fa-spinner"></i> Listening</span>`;
         } else if (item.status === 'browser_ready') {
             statusBadge = `<span class="livestream-status listening" style="background: rgba(0, 240, 255, 0.15); color: var(--accent); border-color: rgba(0, 240, 255, 0.3);"><i class="fa-solid fa-window-restore"></i> Browser Ready</span>`;
+        } else if (item.status === 'reconnecting') {
+            statusBadge = `<span class="livestream-status listening reconnecting" style="background: var(--amber-glow); color: var(--amber); border-color: var(--amber);"><span class="status-dot reconnecting" style="display:inline-block; width:6px; height:6px; border-radius:50%; margin-right:4px;"></span> Reconnecting</span>`;
         } else if (item.status === 'error') {
             statusBadge = `<span class="livestream-status error" style="max-width: 750px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-flex; align-items: center;" title="${escapeAttr(item.error || 'Error')}"><i class="fa-solid fa-triangle-exclamation"></i> Error: ${escapeAttr(item.error || 'Unknown Error')}</span>`;
         } else {
@@ -1752,7 +1799,7 @@ function renderLiveStreams() {
             : '';
 
         return `
-            <div class="folder-card livestream-card ${isRunning ? 'active' : ''}" id="livestream-${item.id}">
+            <div class="folder-card livestream-card ${isRunning ? 'active' : ''}" id="livestream-${item.id}" data-is-web="${isWeb ? 'true' : 'false'}">
                 <div class="folder-card-header" style="cursor: default; display: flex; align-items: center; gap: 10px; padding: 10px 12px;">
                     ${thumbHtml}
                     <span class="folder-card-title" style="margin-left: 5px;">${escapeAttr(item.name)}</span>
@@ -1781,6 +1828,7 @@ function renderLiveStreams() {
         </div>
         ${html}
     `;
+    applyStreamFilter();
 }
 
 // Shared create/edit/submit logic for the two stream modals (HTTP vs Web).
@@ -1957,7 +2005,7 @@ function resolveStreamUrlForPreview(url) {
             : null;
 
         if (activeSlot || (port >= startPort && port <= endPort)) {
-            if (protocol === 'hls' || !protocol || protocol === 'rtmp') {
+            if (protocol === 'hls' || !protocol) {
                 // In HLS mode, slot streams serve index.m3u8 at /stream/index.m3u8
                 parsed.pathname = '/stream/index.m3u8';
                 return { url: parsed.toString(), isHls: true, isFile: false };
@@ -2166,7 +2214,8 @@ document.addEventListener('click', (e) => {
         case 'edit-folder':   openModifyFolderModal(e, a.name); break;
         case 'delete-folder': deleteFolder(e, a.name); break;
         case 'add-file':      openAddFileModal(a.name, Number(a.port)); break;
-        case 'copy-url':      copyToClipboard(a.url); e.stopPropagation(); break;
+        case 'copy-url':      copyToClipboard(a.url, el); e.stopPropagation(); break;
+        case 'toggle-slot':   toggleSlotCollapse(a.slotId); break;
         case 'move-file':     moveFileInSlot(e, a.name, Number(a.port), Number(a.index), Number(a.dir)); break;
         case 'remove-file':   removeFileFromSlot(e, a.name, Number(a.port), a.filename); break;
         case 'pick-file':     addFileToSlot(a.folder, Number(a.port), a.filename); break;
@@ -2206,3 +2255,77 @@ window.openVideoPreview = openVideoPreview;
 window.closeVideoPreview = closeVideoPreview;
 window.clearDoneConverterFiles = clearDoneConverterFiles;
 window.copyToClipboard = copyToClipboard;
+
+// ──────────────────────────────────────────────
+//  Sleek UI Helpers (Tippy.js, SortableJS, Filters, Accordion)
+// ──────────────────────────────────────────────
+
+function toggleSlotCollapse(slotId) {
+    if (!slotId) return;
+    const card = document.getElementById(slotId);
+    if (card) card.classList.toggle('is-collapsed');
+}
+
+function initSlotSortables() {
+    if (typeof Sortable === 'undefined') return;
+    document.querySelectorAll('.slot-file-list').forEach(list => {
+        if (list._sortableInit) return;
+        list._sortableInit = true;
+        Sortable.create(list, {
+            animation: 150,
+            ghostClass: 'sortable-ghost',
+            chosenClass: 'sortable-chosen',
+            filter: '.slot-reorder-buttons, .slot-remove-btn',
+            preventOnFilter: false,
+            onEnd: async (evt) => {
+                if (evt.oldIndex === evt.newIndex) return;
+                const folderName = list.dataset.folder;
+                const port = Number(list.dataset.port);
+                const steps = Math.abs(evt.newIndex - evt.oldIndex);
+                const dir = evt.newIndex > evt.oldIndex ? 1 : -1;
+                let cur = evt.oldIndex;
+                for (let s = 0; s < steps; s++) {
+                    await moveFileInSlot(null, folderName, port, cur, dir);
+                    cur += dir;
+                }
+            }
+        });
+    });
+}
+
+let _activeStreamFilter = 'all';
+function initStreamFilters() {
+    const container = document.getElementById('stream-filter-chips');
+    if (!container) return;
+    container.addEventListener('click', (e) => {
+        const btn = e.target.closest('.filter-chip');
+        if (!btn) return;
+        container.querySelectorAll('.filter-chip').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        _activeStreamFilter = btn.dataset.filter || 'all';
+        applyStreamFilter();
+    });
+}
+
+function applyStreamFilter() {
+    const folderList = document.getElementById('streamer-folder-list');
+    const liveList = document.getElementById('live-streams-list');
+
+    if (folderList) {
+        folderList.style.display = (_activeStreamFilter === 'all' || _activeStreamFilter === 'slots') ? '' : 'none';
+    }
+
+    if (liveList) {
+        const isLiveOrWeb = (_activeStreamFilter === 'all' || _activeStreamFilter === 'live' || _activeStreamFilter === 'web');
+        liveList.style.display = isLiveOrWeb ? '' : 'none';
+
+        liveList.querySelectorAll('.livestream-card').forEach(card => {
+            const isWeb = card.dataset.isWeb === 'true';
+            if (_activeStreamFilter === 'live' && isWeb) card.style.display = 'none';
+            else if (_activeStreamFilter === 'web' && !isWeb) card.style.display = 'none';
+            else card.style.display = '';
+        });
+    }
+}
+
+window.toggleSlotCollapse = toggleSlotCollapse;

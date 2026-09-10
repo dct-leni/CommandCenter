@@ -3,7 +3,7 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -50,11 +50,12 @@ async def streamer_scan(body: FolderPath):
     if not path or not Path(path).is_dir():
         raise HTTPException(status_code=400, detail="Invalid folder path")
 
-    if streamer.is_running and path != streamer.content_folder:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot change streams folder while streaming is in progress. Stop streaming first."
-        )
+    if streamer.is_running and streamer.content_folder:
+        if Path(path).resolve() != Path(streamer.content_folder).resolve():
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot change streams folder while streaming is in progress. Stop streaming first."
+            )
 
     # Save to config if changed
     cfg = load_config()

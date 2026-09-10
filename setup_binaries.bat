@@ -157,7 +157,7 @@ if exist "%FIREFOX_EXE%" (
 REM ---- App Loopback Native Audio Tool ----
 if exist "%BIN_DIR%\app_loopback.exe" (
     echo [OK] app_loopback.exe already exists.
-    goto :cleanup
+    goto :app_videocapture
 )
 
 echo        Compiling app_loopback.exe from src\app_loopback.cpp...
@@ -171,6 +171,26 @@ if exist "%BIN_DIR%\app_loopback.exe" (
     echo [OK] app_loopback.exe compiled successfully.
 ) else (
     echo [INFO] Ready with pre-built app_loopback.exe.
+)
+
+:app_videocapture
+REM ---- App Video Capture Native WGC Tool ----
+if exist "%BIN_DIR%\app_videocapture.exe" (
+    echo [OK] app_videocapture.exe already exists.
+    goto :cleanup
+)
+
+echo        Compiling app_videocapture.exe from src\app_videocapture.cpp...
+where cl >nul 2>&1
+if %ERRORLEVEL% == 0 (
+    cl /O2 /EHsc /std:c++17 /Fe:"%BIN_DIR%\app_videocapture.exe" "%~dp0src\app_videocapture.cpp" /link d3d11.lib dxgi.lib windowsapp.lib user32.lib >nul 2>&1
+    del "%~dp0src\app_videocapture.obj" "%~dp0app_videocapture.obj" 2>nul
+)
+
+if exist "%BIN_DIR%\app_videocapture.exe" (
+    echo [OK] app_videocapture.exe compiled successfully.
+) else (
+    echo [INFO] Ready with pre-built app_videocapture.exe.
 )
 
 :cleanup

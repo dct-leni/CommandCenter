@@ -27,7 +27,7 @@ from typing import Dict, List, Optional, Tuple
 from app.ffmpeg_setup import FFMPEG_EXE, FFPROBE_EXE, parse_ffmpeg_progress
 from enum import Enum
  
-from app.ffmpeg_setup import get_ffmpeg_path, is_ffmpeg_installed
+from app.ffmpeg_setup import get_ffmpeg_path, get_ffprobe_path, is_ffmpeg_installed
 from app.thumbnails import generate_thumbnail, get_video_metadata
 from app.config import load_config
  
@@ -64,23 +64,9 @@ class FileInfo:
     scaled_note: str = ""      # human-readable note about whether/how video was scaled
  
  
-def _get_ffprobe_path() -> str:
-    """Best-effort resolution of the ffprobe binary that ships alongside ffmpeg."""
-    ffmpeg_path = get_ffmpeg_path()
-    p = Path(ffmpeg_path)
-    candidate_name = "ffprobe.exe" if p.suffix.lower() == ".exe" else "ffprobe"
-    candidate = p.parent / candidate_name
-    if candidate.exists():
-        return str(candidate)
-    # Fall back to a plain name replace, then to just "ffprobe" on PATH.
-    if "ffmpeg" in p.name.lower():
-        guess = p.parent / p.name.lower().replace("ffmpeg", "ffprobe")
-        if guess.exists():
-            return str(guess)
-    return "ffprobe"
-
 _PROBE_STREAMS_CACHE: dict = {}
- 
+_MAX_PROBE_CACHE_SIZE = 500
+
 async def probe_streams(input_path: str) -> dict:
     """
     Run ffprobe and return a dict:
@@ -88,7 +74,7 @@ async def probe_streams(input_path: str) -> dict:
         "video": {"index": int, "width": int, "height": int} | None,
         "audio": [{"index": int, "language": str, "title": str}, ...],
       }
-    Cached in memory based on file path, mtime, and size.
+    Cached in memory based on file path, mtime, and size (capped at 500 entries).
     """
     cache_key = ""
     try:
@@ -99,7 +85,7 @@ async def probe_streams(input_path: str) -> dict:
     except Exception:
         pass
 
-    ffprobe = _get_ffprobe_path()
+    ffprobe = get_ffprobe_path()
     cmd = [
         ffprobe, "-v", "quiet",
         "-print_format", "json",
@@ -137,6 +123,12 @@ async def probe_streams(input_path: str) -> dict:
             result["audio"].append({"index": idx, "language": language, "title": title, "codec": codec_name})
  
     if cache_key:
+        if len(_PROBE_STREAMS_CACHE) >= _MAX_PROBE_CACHE_SIZE:
+            # Pop oldest entry to bound memory
+            try:
+                _PROBE_STREAMS_CACHE.pop(next(iter(_PROBE_STREAMS_CACHE)))
+            except (StopIteration, KeyError):
+                pass
         _PROBE_STREAMS_CACHE[cache_key] = result
 
     return result

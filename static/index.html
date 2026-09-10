@@ -46,6 +46,13 @@
                     <i class="fa-solid fa-microchip status-icon"></i>
                     <span class="status-label" id="codec-status-label">Codec: detecting...</span>
                 </div>
+                <div class="status-indicator divider-left" title="Enable lightweight GPU shader upscaling & sharpening on web/live streams">
+                    <label class="cc-switch">
+                        <input type="checkbox" id="shader-upscale-toggle">
+                        <span class="cc-slider"></span>
+                    </label>
+                    <span class="status-label"><i class="fa-solid fa-wand-magic-sparkles"></i> Upscale</span>
+                </div>
                 <div class="status-indicator divider-left" title="Start CommandCenter automatically at Windows logon (visible window, same as start.bat)">
                     <label class="cc-switch">
                         <input type="checkbox" id="auto-start-boot">
@@ -166,10 +173,16 @@
                         Idle
                     </div>
                 </div>
+                <div id="stream-errors" class="stream-errors" style="display: none; margin-top: 10px; padding: 10px 14px; background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: var(--radius-sm); color: #ef4444; font-size: 13px;"></div>
             </div>
 
-            <!-- Stream errors -->
-            <div class="stream-errors" id="stream-errors" style="display: none;"></div>
+            <!-- Stream Category Filter Chips -->
+            <div class="stream-filter-chips" id="stream-filter-chips">
+                <button class="filter-chip active" data-filter="all">All</button>
+                <button class="filter-chip" data-filter="slots"><i class="fa-regular fa-folder"></i> Date Slots</button>
+                <button class="filter-chip" data-filter="live"><i class="fa-solid fa-satellite-dish"></i> Live Relays</button>
+                <button class="filter-chip" data-filter="web"><i class="fa-solid fa-globe"></i> Web Streams</button>
+            </div>
 
             <!-- Unified Scrollable Container for Folders & Relays -->
             <div class="streamer-scroll-container" id="streamer-scroll-area">
@@ -460,6 +473,8 @@
     <!-- HLS.js & MPEG-TS In-Browser MSE Demuxers -->
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.min.js"></script>
+    <!-- SortableJS (Butter-Smooth 60fps Drag & Drop) -->
+    <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
     <script src="/static/app.js"></script>
 </body>
 

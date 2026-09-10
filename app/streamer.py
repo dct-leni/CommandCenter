@@ -42,6 +42,7 @@ class StreamInfo:
     api_port: int = 0          # MediaMTX control API port
     metadata: dict = field(default_factory=dict)  # metadata of first file in slot
     log_task: Optional[asyncio.Task] = field(default=None, repr=False)
+    cycle_task: Optional[asyncio.Task] = field(default=None, repr=False)
     mediamtx_process: Optional[subprocess.Popen] = field(default=None, repr=False)
     ffmpeg_process: Optional[asyncio.subprocess.Process] = field(default=None, repr=False)
 
@@ -662,7 +663,7 @@ class Streamer:
     def get_status(self) -> dict:
         """Get current streaming status."""
         streams = []
-        for port, info in self.active_streams.items():
+        for port, info in list(self.active_streams.items()):
             streams.append({
                 "filename": info.filename,
                 "slot_files": info.slot_files,
@@ -673,7 +674,7 @@ class Streamer:
                 "status": info.status,
                 "viewers": info.viewers,
                 "error": info.error,
-                "progress": round(info.progress, 3),
+                "progress": round(float(info.progress or 0.0), 3),
                 "metadata": info.metadata,
             })
 
@@ -785,22 +786,26 @@ class Streamer:
 
         lines = ["ffconcat version 1.0"]
 
+        def _escape_concat_path(p: str) -> str:
+            # In ffconcat format, single quotes are escaped as '\''
+            return p.replace("'", "'\\''")
+
         # First entry: seek into the correct file
         first_path = Path(slot.paths[start_file_index]).resolve().as_posix()
-        lines.append(f"file '{first_path}'")
+        lines.append(f"file '{_escape_concat_path(first_path)}'")
         if seek_offset > 1.0:
             lines.append(f"inpoint {seek_offset:.3f}")
 
         # Append remaining files in this cycle
         for j in range(start_file_index + 1, len(slot.files)):
             p = Path(slot.paths[j]).resolve().as_posix()
-            lines.append(f"file '{p}'")
+            lines.append(f"file '{_escape_concat_path(p)}'")
 
         # Append full cycles to cover remaining date range
         for _ in range(repeats_needed):
             for p_raw in slot.paths:
                 p = Path(p_raw).resolve().as_posix()
-                lines.append(f"file '{p}'")
+                lines.append(f"file '{_escape_concat_path(p)}'")
 
         config_dir = Path(tempfile.gettempdir()) / "commandcenter"
         config_dir.mkdir(parents=True, exist_ok=True)
@@ -816,12 +821,18 @@ class Streamer:
                 active_folder = self._get_active_folder(today)
 
                 if active_folder is None:
+                    today_str = today.strftime("%d.%m")
+                    msg = f"No folder covers today's date ({today_str}). Modify a folder's date range to include today."
+                    if msg not in self._errors:
+                        self._errors.append(msg)
                     if self.active_streams:
                         logger.info("No active folder for today, stopping streams.")
                         await self._stop_all_streams()
                         self._current_folder_name = ""
-                    await asyncio.sleep(60)
+                    await asyncio.sleep(10)
                     continue
+                else:
+                    self._errors = [e for e in self._errors if "No folder covers today's date" not in e]
 
                 # Check if we need to switch folders
                 if active_folder.name != self._current_folder_name:
@@ -852,8 +863,8 @@ class Streamer:
             logger.warning(f"No streamable files found in folder '{folder.name}'")
             return
 
-        for slot in slots:
-            await self._start_slot_stream(slot, folder)
+        if slots:
+            await asyncio.gather(*[self._start_slot_stream(slot, folder) for slot in slots])
 
     async def _start_slot_stream(self, slot: PortSlot, folder: DateRangeFolder):
         """Start MediaMTX + FFmpeg for a slot (one port, multiple files round-robin)."""
@@ -861,6 +872,7 @@ class Streamer:
         cfg = load_config()
         protocol = cfg.streamer.protocol.lower()
 
+        internal_mediamtx_hls_port = None
         if protocol == "hls":
             public_port = port
             internal_rtmp_port = port + 6000
@@ -896,6 +908,11 @@ class Streamer:
 
         internal_api_port = public_port + 20000
 
+        # Ensure all ports for this slot are free from orphan/stale processes
+        for p_check in (internal_rtmp_port, public_port, internal_mediamtx_hls_port, internal_api_port):
+            if p_check:
+                self._free_stale_port(p_check)
+
         stream_info = StreamInfo(
             port=port,
             slot_files=list(slot.files),
@@ -913,13 +930,13 @@ class Streamer:
         self.active_streams[port] = stream_info
 
         try:
-            # 1. Start MediaMTX
+            # 1. Start MediaMTX with piped stdout/stderr so startup errors are captured
             mtx_config = self._create_mediamtx_config(internal_rtmp_port, public_port, protocol, internal_api_port)
             mtx_process = subprocess.Popen(
                 [get_mediamtx_path(), mtx_config],
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
             stream_info.mediamtx_process = mtx_process
@@ -927,12 +944,25 @@ class Streamer:
             await asyncio.sleep(2)
 
             if mtx_process.poll() is not None:
-                stderr = mtx_process.stderr.read().decode("utf-8", errors="replace") if mtx_process.stderr else ""
+                output = mtx_process.stdout.read().decode("utf-8", errors="replace") if mtx_process.stdout else ""
+                clean_err = output.strip()
                 stream_info.status = "error"
-                stream_info.error = f"MediaMTX failed to start on port {port}: {stderr[-300:]}"
+                stream_info.error = f"MediaMTX failed to start on port {port}: {clean_err[-300:]}"
                 logger.error(stream_info.error)
                 self._errors.append(stream_info.error)
                 return
+
+            # Drain stdout in background so pipe buffer never fills up
+            async def _drain_mtx_output(proc):
+                try:
+                    while proc.poll() is None:
+                        line = await asyncio.to_thread(proc.stdout.readline)
+                        if not line:
+                            break
+                except Exception:
+                    pass
+
+            asyncio.create_task(_drain_mtx_output(mtx_process))
 
             # Check if audio stream in slot uses AAC (requires aac_adtstoasc filter for FLV/RTMP)
             is_aac = False
@@ -987,6 +1017,26 @@ class Streamer:
             # Background log reader to track progress
             stream_info.log_task = asyncio.create_task(
                 self._read_ffmpeg_logs(stream_info, ffmpeg_process.stderr)
+            )
+
+            # Fast cycle handoff watcher: immediately start next playlist cycle when FFmpeg finishes
+            async def _watch_slot_cycle(p_port: int, proc, s_slot: PortSlot, s_folder: DateRangeFolder):
+                try:
+                    await proc.wait()
+                    if proc.returncode == 0 and self.is_running and self._current_folder_name == s_folder.name:
+                        logger.info(f"Slot port {p_port}: finished playlist cycle, restarting next cycle immediately...")
+                        await self._stop_single_stream(p_port)
+                        slots_now = self._load_slots_for_folder(s_folder)
+                        slot_now = next((s for s in slots_now if s.port == p_port), None)
+                        if slot_now:
+                            await self._start_slot_stream(slot_now, s_folder)
+                except asyncio.CancelledError:
+                    pass
+                except Exception as ex:
+                    logger.error(f"Slot port {p_port} cycle watcher error: {ex}")
+
+            stream_info.cycle_task = asyncio.create_task(
+                _watch_slot_cycle(port, ffmpeg_process, slot, folder)
             )
 
         except Exception as e:
@@ -1053,6 +1103,9 @@ paths:
         if stream.log_task:
             stream.log_task.cancel()
 
+        if getattr(stream, "cycle_task", None):
+            stream.cycle_task.cancel()
+
         if stream.ffmpeg_process and stream.ffmpeg_process.returncode is None:
             try:
                 stream.ffmpeg_process.terminate()
@@ -1080,6 +1133,21 @@ paths:
         asyncio.create_task(hls_cache.stop_proxy_server(port))
         
         logger.info(f"Stream stopped on port {port}")
+
+    def _free_stale_port(self, port: int):
+        """Terminate any stale/orphan process holding a specific port (e.g. detached MediaMTX)."""
+        try:
+            import psutil
+            for conn in psutil.net_connections(kind="inet"):
+                if conn.laddr and conn.laddr.port == port and conn.pid and conn.pid != os.getpid():
+                    try:
+                        p = psutil.Process(conn.pid)
+                        logger.warning(f"Freeing port {port}: terminating stale process {p.name()} (PID {conn.pid})")
+                        p.kill()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     async def _health_check(self):
         """Check for dead streams and restart them."""

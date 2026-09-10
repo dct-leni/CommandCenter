@@ -38,3 +38,26 @@ def test_format_ffmpeg_headers():
     headers_str = format_ffmpeg_headers(url)
     assert "User-Agent:" in headers_str
     assert "\r\n" in headers_str
+
+
+def test_get_video_filter_wgc_vs_gdi():
+    from app.ffmpeg_setup import get_video_filter
+    gdi_filter = get_video_filter(is_web=True, is_wgc=False, shader_upscale=False)
+    assert any("crop=iw:ih-38:0:38" in f for f in gdi_filter)
+
+    wgc_filter = get_video_filter(is_web=True, is_wgc=True, shader_upscale=False)
+    assert not any("crop" in f for f in wgc_filter)
+    assert any("format=yuv420p" in f for f in wgc_filter)
+
+
+def test_userchrome_css_syntax():
+    from pathlib import Path
+    css_path = Path(__file__).parent.parent / "app" / "assets" / "firefox" / "userChrome.css"
+    assert css_path.exists()
+    content = css_path.read_text(encoding="utf-8")
+    assert "visibility: collapse !important;" in content
+    assert "#nav-bar" in content
+    assert '"""' not in content
+    assert '\n"' not in content
+
+
