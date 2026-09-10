@@ -282,3 +282,54 @@ When `-use_wallclock_as_timestamps 1` was specified on BOTH Input 0 (GDIGrab) an
   * `_auto_restart_loop()` in `app/live_relay.py` intercepts this status, marks `relay.status = "error"` with the exact message, and immediately exits without starting FFmpeg or burning CPU/GPU cycles on dead endpoints.
   * When FFmpeg exits with error, the last log lines are scanned for HTTP status codes to surface clean error reasons (`404 Not Found`) directly to the UI.
 
+### 24. How to Restore Legacy GDIGrab Capture
+
+CommandCenter now exclusively uses native **Windows Graphics Capture (WGC)** via `bin/app_videocapture.exe` for screen and browser capture. WGC captures hardware D3D11 surfaces directly with zero tearing, supports hardware WebRender overlays, and works seamlessly with Capped VBR encoding.
+
+> [!WARNING]
+> **Why VBR Breaks GDIGrab**:
+> GDIGrab relies on legacy CPU `BitBlt` and a strict synchronous wallclock. Variable Bitrate (VBR) with lookahead buffers on GDIGrab causes input pipeline queue stalls and desynchronizes audio/video timestamps. GDIGrab **strictly requires single-pass CBR** (`-rc cbr`).
+
+If you ever need to restore the legacy GDIGrab capture pipeline on a system where WGC is unavailable:
+
+1. **Revert Video Input in `app/live_relay.py`**:
+   Replace the WGC named pipe input block with legacy GDIGrab flags:
+   ```python
+   cmd.extend([
+       "-use_wallclock_as_timestamps", "1",
+       "-thread_queue_size", "1024",
+       "-f", "gdigrab",
+       "-framerate", "30",
+       "-draw_mouse", "0",
+       "-i", f"hwnd=0x{hwnd:x}",
+       "-thread_queue_size", "1024",
+       "-f", "s16le",
+       "-ac", "2",
+       "-ar", "48000",
+       "-i", "pipe:0",
+       "-map", "0:v:0",
+       "-map", "1:a:0",
+   ])
+   ```
+
+2. **Revert Encoding Rate Control to Strict CBR in `app/ffmpeg_setup.py`**:
+   In `get_encoding_params()` for `mode == "web"`, switch back from VBR to strict CBR:
+   ```python
+   params.extend(["-rc", "cbr", "-bf", "0"])
+   ```
+
+3. **Re-add Titlebar Crop Filter**:
+   Because GDIGrab captures the top-level OS window including the titlebar, re-apply the 38px crop:
+   ```python
+   filters.append("crop=iw:ih-38:0:38")
+   ```
+
+4. **Force Software WebRender in Firefox (`app/assets/firefox/user.js`)**:
+   GDIGrab cannot capture DirectComposition hardware-accelerated surfaces (resulting in a gray box). You must force Firefox to render in software:
+   ```javascript
+   user_pref("gfx.webrender.all", false);
+   user_pref("gfx.webrender.software", true);
+   user_pref("layers.acceleration.disabled", true);
+   ```
+
+

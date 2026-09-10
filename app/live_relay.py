@@ -673,82 +673,56 @@ class LiveStreamManager:
                         except Exception:
                             pass
 
-                    # Determine video capture backend (default "wgc" with fallback to "gdigrab")
-                    backend = getattr(cfg.streamer, "video_capture_backend", "wgc").lower()
-                    use_wgc = (backend == "wgc") and is_wgc_available() and (os.name == "nt")
-                    wgc_active = False
+                    # Native Windows Graphics Capture (WGC) pipeline
+                    if not is_wgc_available() or os.name != "nt":
+                        raise RuntimeError(
+                            f"Windows Graphics Capture (app_videocapture.exe) is unavailable for web stream '{relay.name}'. "
+                            "Please ensure bin/app_videocapture.exe is compiled."
+                        )
 
-                    if use_wgc:
-                        pipe_name = f"\\\\.\\pipe\\cc_video_{relay.id}"
-                        try:
-                            import ctypes
-                            from ctypes import wintypes
-                            rect = wintypes.RECT()
-                            ctypes.windll.user32.GetClientRect(hwnd, ctypes.byref(rect))
-                            win_w = max(640, rect.right - rect.left)
-                            win_h = max(360, rect.bottom - rect.top)
+                    pipe_name = f"\\\\.\\pipe\\cc_video_{relay.id}"
+                    import ctypes
+                    from ctypes import wintypes
+                    rect = wintypes.RECT()
+                    ctypes.windll.user32.GetClientRect(hwnd, ctypes.byref(rect))
+                    win_w = max(640, rect.right - rect.left)
+                    win_h = max(360, rect.bottom - rect.top)
 
-                            vcap_exe = get_videocapture_path()
-                            vcap_cmd = [
-                                vcap_exe,
-                                "--hwnd", f"0x{hwnd:x}",
-                                "--fps", "30",
-                                "--width", str(win_w),
-                                "--height", str(win_h),
-                                "--pipe", pipe_name,
-                            ]
-                            logger.info(f"Web stream '{relay.name}': Launching WGC capture ({win_w}x{win_h} @ 30fps) on {pipe_name}")
-                            capture_proc = subprocess.Popen(
-                                vcap_cmd,
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.PIPE,
-                                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                            )
-                            relay.capture_process = capture_proc
-                            wgc_active = True
+                    vcap_exe = get_videocapture_path()
+                    vcap_cmd = [
+                        vcap_exe,
+                        "--hwnd", f"0x{hwnd:x}",
+                        "--fps", "30",
+                        "--width", str(win_w),
+                        "--height", str(win_h),
+                        "--pipe", pipe_name,
+                    ]
+                    logger.info(f"Web stream '{relay.name}': Launching WGC capture ({win_w}x{win_h} @ 30fps) on {pipe_name}")
+                    capture_proc = subprocess.Popen(
+                        vcap_cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                    relay.capture_process = capture_proc
 
-                            await asyncio.sleep(0.25)
+                    await asyncio.sleep(0.25)
 
-                            cmd.extend([
-                                "-f", "rawvideo",
-                                "-pix_fmt", "bgra",
-                                "-s", f"{win_w}x{win_h}",
-                                "-r", "30",
-                                "-i", pipe_name,
-                                "-thread_queue_size", "1024",
-                                "-f", "s16le",
-                                "-ac", "2",
-                                "-ar", "48000",
-                                "-i", "pipe:0",
-                                "-map", "0:v:0",
-                                "-map", "1:a:0",
-                            ])
-                            cmd.extend(get_video_filter(is_web=True, shader_upscale=getattr(cfg.streamer, "shader_upscale", False), is_wgc=True))
-                        except Exception as e:
-                            logger.warning(f"Failed to start WGC capture ({e}), falling back to GDIGrab")
-                            if relay.capture_process:
-                                terminate_process_tree(relay.capture_process)
-                                relay.capture_process = None
-                            wgc_active = False
-
-                    if not wgc_active:
-                        logger.info(f"Web stream '{relay.name}': Using GDIGrab capture backend")
-                        cmd.extend([
-                            "-use_wallclock_as_timestamps", "1",
-                            "-thread_queue_size", "1024",
-                            "-f", "gdigrab",
-                            "-framerate", "30",
-                            "-draw_mouse", "0",
-                            "-i", input_target,
-                            "-thread_queue_size", "1024",
-                            "-f", "s16le",
-                            "-ac", "2",
-                            "-ar", "48000",
-                            "-i", "pipe:0",
-                            "-map", "0:v:0",
-                            "-map", "1:a:0",
-                        ])
-                        cmd.extend(get_video_filter(is_web=True, shader_upscale=getattr(cfg.streamer, "shader_upscale", False), is_wgc=False))
+                    cmd.extend([
+                        "-f", "rawvideo",
+                        "-pix_fmt", "bgra",
+                        "-s", f"{win_w}x{win_h}",
+                        "-r", "30",
+                        "-i", pipe_name,
+                        "-thread_queue_size", "1024",
+                        "-f", "s16le",
+                        "-ac", "2",
+                        "-ar", "48000",
+                        "-i", "pipe:0",
+                        "-map", "0:v:0",
+                        "-map", "1:a:0",
+                    ])
+                    cmd.extend(get_video_filter(is_web=True, shader_upscale=getattr(cfg.streamer, "shader_upscale", False)))
                 else:
                     if proxy_url:
                         if proxy_url.startswith("socks5://") or proxy_url.startswith("socks4://"):

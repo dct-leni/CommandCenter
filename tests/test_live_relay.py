@@ -29,14 +29,13 @@ def test_live_relay_status_defaults():
 
 
 def test_video_filter_generation():
-    # Web stream without shader upscale
+    # Web stream without shader upscale (WGC clean client bounds)
     f_web = get_video_filter(is_web=True, shader_upscale=False)
-    assert f_web == ["-vf", "crop=iw:ih-38:0:38,format=yuv420p"]
+    assert f_web == ["-vf", "format=yuv420p"]
 
     # Web stream with shader upscale
     f_web_up = get_video_filter(is_web=True, shader_upscale=True)
     assert f_web_up[0] == "-vf"
-    assert "crop=iw:ih-38:0:38" in f_web_up[1]
     assert "scale=1920:1080:flags=lanczos" in f_web_up[1]
     assert "unsharp=3:3:0.5:3:3:0.0" in f_web_up[1]
     assert "format=yuv420p" in f_web_up[1]
