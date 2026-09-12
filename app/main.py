@@ -14,9 +14,11 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 import uvicorn
+
+from app.__version__ import __version__
 
 from app.config import load_config
 from app.ffmpeg_setup import get_binaries_status
@@ -114,7 +116,7 @@ async def lifespan(app: FastAPI):
     web_stream_manager.purge_all()
 
 # Create FastAPI app
-app = FastAPI(title="CommandCenter", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="CommandCenter", version=__version__, lifespan=lifespan)
 
 
 @app.middleware("http")
@@ -167,9 +169,17 @@ app.include_router(live_routes.router)
 #  Root — serve index.html
 # ──────────────────────────────────────────────
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 async def root():
-    return FileResponse(str(STATIC_DIR / "index.html"))
+    import re
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    html = re.sub(
+        r'<span class="version-badge"[^>]*>.*?</span>',
+        f'<span class="version-badge" id="app-version-badge">v{__version__}</span>',
+        html,
+        count=1,
+    )
+    return HTMLResponse(content=html)
 
 
 # ──────────────────────────────────────────────

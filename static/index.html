@@ -25,7 +25,7 @@
                 <h1>CommandCenter</h1>
                 <span class="panel-subtitle">VIDEO & STREAMING</span>
             </div>
-            <span class="version-badge">V0.3</span>
+            <span class="version-badge" id="app-version-badge">v0.4.0</span>
         </div>
         <div class="header-right">
             <div class="system-status" id="system-status">
@@ -330,6 +330,17 @@
                     <span
                         style="font-size: 11.5px; color: var(--text-secondary); display: block; margin-top: 4px; margin-left: 24px;">
                         Routes stream ingestion through the configured Global VPN.
+                    </span>
+                </div>
+                <div style="border-top: 1px solid var(--border); padding-top: 12px; margin-top: 4px;">
+                    <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;">
+                        <input type="checkbox" id="livestream-infinite-retry"
+                            style="width: 16px; height: 16px; cursor: pointer; accent-color: var(--accent);">
+                        <span style="font-size: 13px; font-weight: 600; color: var(--text-primary);">Infinite Reconnect Retry</span>
+                    </label>
+                    <span
+                        style="font-size: 11.5px; color: var(--text-secondary); display: block; margin-top: 4px; margin-left: 24px;">
+                        Continuously retry reconnecting if remote source drops or fails to start.
                     </span>
                 </div>
             </div>

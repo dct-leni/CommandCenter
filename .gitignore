@@ -6,6 +6,7 @@ __pycache__/
 # Binaries and downloaded dependencies
 bin/*
 !bin/app_loopback.exe
+!bin/app_videocapture.exe
 !bin/.gitkeep
 mediamtx_*
 
@@ -24,14 +25,11 @@ streams/*
 # Config (optional, depends if you want to commit default config or not)
 config.yml
 
-.codegraph/
-.graymatter/
-
-auto.crt
-auto.key
-summery.md
+*.crt
+*.key
 
 # AI slop
 .agents/
-GEMINI.md
-ffmpeg-skill/
+.codegraph/
+.graymatter/
+PLAN_N100.md

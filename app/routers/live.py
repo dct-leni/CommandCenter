@@ -20,6 +20,7 @@ class LiveStreamCreateRequest(BaseModel):
     auto_start: bool = False
     use_vpn: bool = False
     stream_type: str = "http"  # "http" or "web"
+    infinite_retry: bool = False
 
 
 class LiveStreamUpdateRequest(BaseModel):
@@ -29,6 +30,7 @@ class LiveStreamUpdateRequest(BaseModel):
     auto_start: Optional[bool] = None
     use_vpn: Optional[bool] = None
     stream_type: Optional[str] = None
+    infinite_retry: Optional[bool] = None
 
 
 class GlobalVPNUpdateRequest(BaseModel):
@@ -115,6 +117,7 @@ async def create_live_stream(body: LiveStreamCreateRequest):
         "auto_start": body.auto_start,
         "use_vpn": body.use_vpn,
         "stream_type": body.stream_type or "http",
+        "infinite_retry": body.infinite_retry,
     }
     cfg.streamer.live_streams.append(new_item)
     update_config({"streamer": {"live_streams": cfg.streamer.live_streams}})
@@ -142,6 +145,8 @@ async def update_live_stream(stream_id: str, body: LiveStreamUpdateRequest):
                 item["use_vpn"] = body.use_vpn
             if body.stream_type is not None:
                 item["stream_type"] = body.stream_type
+            if body.infinite_retry is not None:
+                item["infinite_retry"] = body.infinite_retry
 
             update_config({"streamer": {"live_streams": cfg.streamer.live_streams}})
 
@@ -150,6 +155,7 @@ async def update_live_stream(stream_id: str, body: LiveStreamUpdateRequest):
                 relay.name = item["name"]
                 relay.url = item["url"]
                 relay.port = item["port"]
+                relay.infinite_retry = bool(item.get("infinite_retry", False))
 
             return {"status": "success", "live_stream": item}
     raise HTTPException(status_code=404, detail="Live stream not found")

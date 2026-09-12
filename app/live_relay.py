@@ -52,6 +52,7 @@ class LiveRelayStatus:
     has_received_data: bool = False
     fps: float = 0.0
     bitrate: str = "0kbits/s"
+    infinite_retry: bool = False
     process: Optional[asyncio.subprocess.Process] = field(default=None, repr=False)
     restart_task: Optional[asyncio.Task] = field(default=None, repr=False)
     log_task: Optional[asyncio.Task] = field(default=None, repr=False)
@@ -99,6 +100,7 @@ class LiveRelayStatus:
             "bitrate": self.bitrate,
             "has_thumbnail": self.has_thumbnail,
             "thumbnail_url": f"/api/streamer/live_stream/{self.id}/thumbnail?v={int(self.last_thumbnail_time)}",
+            "infinite_retry": self.infinite_retry,
         }
 
 
@@ -132,6 +134,7 @@ class LiveStreamManager:
                 relay.name = item.get("name", relay.name)
                 relay.url = item.get("url", relay.url)
                 relay.port = item.get("port", relay.port)
+                relay.infinite_retry = bool(item.get("infinite_retry", False))
                 # Only capture thumbnails when viewers are actively watching
                 if relay.status == "running":
                     self.trigger_thumbnail_generation(sid, f"http://127.0.0.1:{relay.port}/")
@@ -154,6 +157,7 @@ class LiveStreamManager:
                     "bitrate": "0kbits/s",
                     "has_thumbnail": has_thumb,
                     "thumbnail_url": f"/api/streamer/live_stream/{sid}/thumbnail?v={mtime}",
+                    "infinite_retry": bool(item.get("infinite_retry", False)),
                 }
 
             url_str = item.get("url", "").lower()
@@ -165,6 +169,7 @@ class LiveStreamManager:
             d["use_vpn"] = bool(use_vpn)
             d["global_vpn_mode"] = global_vpn_mode
             d["stream_type"] = stype
+            d["infinite_retry"] = bool(item.get("infinite_retry", False))
             results.append(d)
         return results
 
@@ -249,6 +254,20 @@ class LiveStreamManager:
 
         if current_relay:
             relay = current_relay
+            if relay.restart_task and not relay.restart_task.done():
+                relay.restart_task.cancel()
+                try:
+                    await relay.restart_task
+                except asyncio.CancelledError:
+                    pass
+                relay.restart_task = None
+            if relay.log_task and not relay.log_task.done():
+                relay.log_task.cancel()
+                relay.log_task = None
+            relay.name = item.get("name", relay.name)
+            relay.url = item.get("url", relay.url)
+            relay.port = int(item.get("port", relay.port))
+            relay.infinite_retry = bool(item.get("infinite_retry", False))
             relay.status = "listening"
             relay.error = None
             relay.has_received_data = False
@@ -261,8 +280,18 @@ class LiveStreamManager:
                 status="listening",
                 error=None,
                 has_received_data=False,
+                infinite_retry=bool(item.get("infinite_retry", False)),
             )
             self.active_relays[stream_id] = relay
+
+        # Clean up existing loopback server before creating a new one
+        if relay.loopback_server:
+            try:
+                relay.loopback_server.close()
+                await relay.loopback_server.wait_closed()
+            except Exception:
+                pass
+            relay.loopback_server = None
 
         # Start Loopback Server to receive binary data from FFmpeg
         try:
@@ -451,18 +480,42 @@ class LiveStreamManager:
             except Exception:
                 pass
 
-        # Start the Python TCP Server to broadcast stream packets
-        try:
-            relay.server = await asyncio.start_server(handle_client, "0.0.0.0", relay.port)
-        except Exception as e:
-            logger.error(f"Failed to start TCP listener on port {relay.port}: {e}")
-            # Clean up loopback server
-            if relay.loopback_server:
-                relay.loopback_server.close()
-                relay.loopback_server = None
-            relay.status = "error"
-            relay.error = f"Port bind error: {e}"
-            return relay.to_dict()
+        # Check if existing TCP listener is already open and bound to relay.port
+        server_matches_port = False
+        if relay.server and relay.server.is_serving():
+            try:
+                for sock in relay.server.sockets:
+                    if sock.getsockname()[1] == relay.port:
+                        server_matches_port = True
+                        break
+            except Exception:
+                server_matches_port = False
+
+        if not server_matches_port:
+            if relay.server:
+                try:
+                    relay.server.close()
+                    await relay.server.wait_closed()
+                except Exception:
+                    pass
+                relay.server = None
+
+            try:
+                relay.server = await asyncio.start_server(handle_client, "0.0.0.0", relay.port)
+            except Exception as e:
+                logger.error(f"Failed to start TCP listener on port {relay.port}: {e}")
+                if relay.loopback_server:
+                    try:
+                        relay.loopback_server.close()
+                        await relay.loopback_server.wait_closed()
+                    except Exception:
+                        pass
+                    relay.loopback_server = None
+                relay.status = "error"
+                relay.error = f"Port bind error: {e}"
+                return relay.to_dict()
+        else:
+            logger.info(f"Reusing existing active TCP listener for '{relay.name}' on port :{relay.port}")
 
         relay.restart_task = asyncio.create_task(self._auto_restart_loop(relay))
         logger.info(f"Started live relay loop for '{relay.name}' on HTTP port :{relay.port}")
@@ -490,6 +543,7 @@ class LiveStreamManager:
         if relay.server:
             try:
                 relay.server.close()
+                await relay.server.wait_closed()
             except Exception as e:
                 logger.error(f"Error closing relay TCP server: {e}")
             relay.server = None
@@ -498,6 +552,7 @@ class LiveStreamManager:
         if relay.loopback_server:
             try:
                 relay.loopback_server.close()
+                await relay.loopback_server.wait_closed()
             except Exception as e:
                 logger.error(f"Error closing loopback server: {e}")
             relay.loopback_server = None
@@ -610,29 +665,47 @@ class LiveStreamManager:
             logger.info(f"Web stream capture for '{relay.name}' — encoding with {encoder} (screen-capture profile)")
             # Audio routes via Firefox cubeb pref in user.js (set at profile creation time).
         else:
-            logger.info(f"Probing source codec for '{relay.name}' at {relay.url} (proxy: {proxy_url or 'none'}) …")
-            source_codec = await asyncio.get_event_loop().run_in_executor(
-                None, probe_source_codec, relay.url, 8, proxy_url
-            )
-            if source_codec in ("404 Not Found", "403 Forbidden", "401 Unauthorized", "Connection refused") or "404" in source_codec or "not found" in source_codec.lower():
-                logger.warning(f"Stream '{relay.name}' source is unavailable: {source_codec}")
-                relay.status = "error"
-                relay.error = source_codec
-                return
+            video_params = None
+            while relay.status in ("running", "listening", "reconnecting"):
+                cfg = load_config()
+                stream_item = next((x for x in cfg.streamer.live_streams if x.get("id") == relay.id), stream_item)
+                infinite_retry = bool(stream_item.get("infinite_retry", False)) and not is_web
 
-            if source_codec == "h264":
-                video_params = get_relay_params()   # stream copy — 0 GPU
-                logger.info(f"Source is H.264 — using stream copy for '{relay.name}'")
-            else:
-                encoder = get_best_encoder()
-                video_params = get_relay_encoding_params(encoder)
-                logger.info(f"Source codec '{source_codec}' — re-encoding with {encoder} for '{relay.name}'")
+                logger.info(f"Probing source codec for '{relay.name}' at {relay.url} (proxy: {proxy_url or 'none'}) …")
+                source_codec = await asyncio.get_event_loop().run_in_executor(
+                    None, probe_source_codec, relay.url, 8, proxy_url
+                )
+                if source_codec in ("404 Not Found", "403 Forbidden", "401 Unauthorized", "Connection refused") or "404" in source_codec or "not found" in source_codec.lower():
+                    logger.warning(f"Stream '{relay.name}' source is unavailable: {source_codec}")
+                    if infinite_retry:
+                        relay.status = "reconnecting"
+                        relay.error = f"Source unavailable ({source_codec}). Retrying probe in 5s..."
+                        await asyncio.sleep(5.0)
+                        continue
+                    else:
+                        relay.status = "error"
+                        relay.error = source_codec
+                        return
+
+                if source_codec == "h264":
+                    video_params = get_relay_params()   # stream copy — 0 GPU
+                    logger.info(f"Source is H.264 — using stream copy for '{relay.name}'")
+                else:
+                    encoder = get_best_encoder()
+                    video_params = get_relay_encoding_params(encoder)
+                    logger.info(f"Source codec '{source_codec}' — re-encoding with {encoder} for '{relay.name}'")
+                break
+
+            if relay.status not in ("running", "listening", "reconnecting") or not video_params:
+                return
 
         retry_count = 0
         max_retries = 5
         while relay.status in ("running", "listening", "reconnecting"):
             try:
                 cfg = load_config()
+                stream_item = next((x for x in cfg.streamer.live_streams if x.get("id") == relay.id), stream_item)
+                infinite_retry = bool(stream_item.get("infinite_retry", False)) and not is_web
                 cmd = [get_ffmpeg_path(), "-hide_banner", "-nostdin"]
 
                 target_pid = None
@@ -912,11 +985,11 @@ class LiveStreamManager:
 
                         formatted_err = error_detail if any(err in error_detail for err in ("404", "403", "401", "refused")) else f"FFmpeg error ({process.returncode}): {error_detail}"
 
-                        # If stream never successfully connected or failed to open input, fail immediately without retrying!
+                        # If stream never successfully connected or failed to open input, fail immediately without retrying unless infinite_retry is active!
                         never_connected = not getattr(relay, "has_received_data", False)
                         is_input_error = any(kw in formatted_err.lower() for kw in ("error opening input", "not found", "404", "403", "401", "refused", "-138"))
 
-                        if never_connected or is_input_error or is_web or retry_count >= max_retries or relay.status in ("stopped",):
+                        if not infinite_retry and (never_connected or is_input_error or is_web or retry_count >= max_retries or relay.status in ("stopped",)):
                             relay.status = "error"
                             relay.error = formatted_err
                             # Disconnect all hanging clients immediately
@@ -927,13 +1000,18 @@ class LiveStreamManager:
                                     pass
                             relay.clients.clear()
                             if is_web:
-                                                    asyncio.create_task(asyncio.to_thread(web_stream_manager.close_browser, relay.id))
+                                asyncio.create_task(asyncio.to_thread(web_stream_manager.close_browser, relay.id))
                             break
                         else:
                             retry_count += 1
-                            backoff_sec = min(10, 2 ** retry_count)
-                            relay.status = "reconnecting"
-                            relay.error = f"Stream interrupted ({formatted_err}). Reconnecting in {backoff_sec}s (attempt {retry_count}/{max_retries})..."
+                            if infinite_retry:
+                                backoff_sec = min(15, max(3, retry_count * 2))
+                                relay.status = "reconnecting"
+                                relay.error = f"Stream interrupted ({formatted_err}). Reconnecting in {backoff_sec}s (retry #{retry_count})..."
+                            else:
+                                backoff_sec = min(10, 2 ** retry_count)
+                                relay.status = "reconnecting"
+                                relay.error = f"Stream interrupted ({formatted_err}). Reconnecting in {backoff_sec}s (attempt {retry_count}/{max_retries})..."
                             logger.info(f"Live relay '{relay.name}': {relay.error}")
                             await asyncio.sleep(backoff_sec)
                             continue
@@ -954,8 +1032,16 @@ class LiveStreamManager:
                 relay.status = "error"
                 relay.error = str(e)
                 if is_web:
-                            asyncio.create_task(asyncio.to_thread(web_stream_manager.close_browser, relay.id))
+                    asyncio.create_task(asyncio.to_thread(web_stream_manager.close_browser, relay.id))
                 break
+        
+        if relay.loopback_server:
+            try:
+                relay.loopback_server.close()
+                await relay.loopback_server.wait_closed()
+            except Exception:
+                pass
+            relay.loopback_server = None
 
     async def _read_relay_logs(self, relay: LiveRelayStatus, stderr):
         """Read stderr from FFmpeg relay to update fps, bitrate, and rolling logs."""

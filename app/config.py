@@ -29,6 +29,8 @@ class LiveStreamItem:
     url: str
     port: int
     auto_start: bool = False
+    infinite_retry: bool = False
+
 
 
 @dataclass

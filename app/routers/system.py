@@ -14,6 +14,7 @@ from app.ffmpeg_setup import get_binaries_status
 from app.converter import converter
 from app.streamer import streamer
 from app.live_relay import live_relay_manager
+from app.__version__ import __version__
 
 logger = logging.getLogger("commandcenter")
 router = APIRouter()
@@ -70,6 +71,7 @@ async def system_status():
     status = get_binaries_status()
     from app.vpn_manager import vpn_manager
     status["vpn"] = vpn_manager.get_status()
+    status["version"] = __version__
     return status
 
 
@@ -81,6 +83,7 @@ async def websocket_status(websocket: WebSocket):
     try:
         while True:
             payload = {
+                "version": __version__,
                 "system": get_binaries_status(),
                 "vpn": vpn_manager.get_status(),
                 "converter": {

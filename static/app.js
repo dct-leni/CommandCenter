@@ -320,6 +320,14 @@ let _statusWsRetryMs = 0;
 
 function applyStatusPayload(msg) {
     if (!msg) return;
+    const appVersion = msg.version || msg.system?.version;
+    if (appVersion) {
+        state.version = appVersion;
+        const badge = document.getElementById('app-version-badge');
+        if (badge && badge.textContent !== `v${appVersion}`) {
+            badge.textContent = `v${appVersion}`;
+        }
+    }
     if (msg.system) {
         state.systemStatus = Object.assign({}, msg.system, msg.vpn ? { vpn: msg.vpn } : {});
         renderSystemStatus();
@@ -1798,6 +1806,11 @@ function renderLiveStreams() {
             ? `<span class="viewer-badge ${viewersCount > 0 ? 'active' : ''}" title="${viewersCount} active viewer(s)"><i class="fa-solid fa-users"></i> ${viewersCount}</span>`
             : '';
 
+        let retryBadge = '';
+        if (!isWeb && item.infinite_retry) {
+            retryBadge = `<span style="font-size: 11px; background: rgba(16, 185, 129, 0.12); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.25); padding: 2px 7px; border-radius: 4px; font-family: 'JetBrains Mono', monospace;" title="Infinite reconnect retry enabled"><i class="fa-solid fa-rotate"></i> Auto-Retry</span>`;
+        }
+
         return `
             <div class="folder-card livestream-card ${isRunning ? 'active' : ''}" id="livestream-${item.id}" data-is-web="${isWeb ? 'true' : 'false'}">
                 <div class="folder-card-header" style="cursor: default; display: flex; align-items: center; gap: 10px; padding: 10px 12px;">
@@ -1805,6 +1818,7 @@ function renderLiveStreams() {
                     <span class="folder-card-title" style="margin-left: 5px;">${escapeAttr(item.name)}</span>
                     ${statusBadge}
                     ${viewerBadge}
+                    ${retryBadge}
                     ${vpnBadge}
                     <span class="folder-date-range" style="font-family: 'JetBrains Mono', monospace; font-size: 12px; margin-left: auto; display: flex; align-items: center; gap: 4px;">
                         Port: ${item.port}
@@ -1851,6 +1865,10 @@ function _openStreamModal(kind, item) {
     document.getElementById(`${d.prefix}-port`).value = item ? (item.port || d.defPort) : d.defPort;
     const useVpn = item ? Boolean(item.use_vpn ?? (item.vpn_mode && item.vpn_mode !== 'none')) : false;
     document.getElementById(`${d.prefix}-use-vpn`).checked = useVpn;
+    const retryEl = document.getElementById(`${d.prefix}-infinite-retry`);
+    if (retryEl) {
+        retryEl.checked = item ? Boolean(item.infinite_retry) : false;
+    }
     document.getElementById(`${d.prefix}-save-btn`).textContent = item ? 'Save' : 'Create';
     document.getElementById(d.modalId).style.display = 'flex';
 }
@@ -1862,6 +1880,8 @@ async function _submitStreamForm(kind) {
     const url = document.getElementById(`${d.prefix}-url`).value.trim();
     const port = parseInt(document.getElementById(`${d.prefix}-port`).value, 10);
     const use_vpn = document.getElementById(`${d.prefix}-use-vpn`).checked;
+    const retryEl = document.getElementById(`${d.prefix}-infinite-retry`);
+    const infinite_retry = retryEl ? retryEl.checked : false;
 
     if (!name || !url || isNaN(port)) {
         showToast('Please enter valid Name, URL, and Port', 'error');
@@ -1869,7 +1889,7 @@ async function _submitStreamForm(kind) {
     }
 
     try {
-        const payload = { name, url, port, use_vpn, stream_type: d.type };
+        const payload = { name, url, port, use_vpn, stream_type: d.type, infinite_retry };
         if (streamId) {
             await api('PUT', `/streamer/live_stream/${streamId}`, payload);
             showToast(`${d.label} updated`, 'success');
