@@ -53,6 +53,7 @@ class LiveRelayStatus:
     fps: float = 0.0
     bitrate: str = "0kbits/s"
     infinite_retry: bool = False
+    resolution: str = "720p"
     process: Optional[asyncio.subprocess.Process] = field(default=None, repr=False)
     restart_task: Optional[asyncio.Task] = field(default=None, repr=False)
     log_task: Optional[asyncio.Task] = field(default=None, repr=False)
@@ -101,6 +102,7 @@ class LiveRelayStatus:
             "has_thumbnail": self.has_thumbnail,
             "thumbnail_url": f"/api/streamer/live_stream/{self.id}/thumbnail?v={int(self.last_thumbnail_time)}",
             "infinite_retry": self.infinite_retry,
+            "resolution": getattr(self, "resolution", "720p"),
         }
 
 
@@ -135,6 +137,7 @@ class LiveStreamManager:
                 relay.url = item.get("url", relay.url)
                 relay.port = item.get("port", relay.port)
                 relay.infinite_retry = bool(item.get("infinite_retry", False))
+                relay.resolution = item.get("resolution", getattr(relay, "resolution", "720p"))
                 # Only capture thumbnails when viewers are actively watching
                 if relay.status == "running":
                     self.trigger_thumbnail_generation(sid, f"http://127.0.0.1:{relay.port}/")
@@ -170,6 +173,7 @@ class LiveStreamManager:
             d["global_vpn_mode"] = global_vpn_mode
             d["stream_type"] = stype
             d["infinite_retry"] = bool(item.get("infinite_retry", False))
+            d["resolution"] = item.get("resolution", "720p" if stype == "web" else "original")
             results.append(d)
         return results
 
@@ -626,10 +630,11 @@ class LiveStreamManager:
 
         name = stream_item.get("name", "Web Stream")
         target_url = stream_item.get("url", "")
+        resolution = stream_item.get("resolution", "720p")
         
-        window_title = await asyncio.to_thread(web_stream_manager.launch_browser, stream_id, name, target_url, proxy_url)
+        window_title = await asyncio.to_thread(web_stream_manager.launch_browser, stream_id, name, target_url, proxy_url, resolution)
         # Capture actual Firefox window HWND so close_browser can kill by window
-        await asyncio.to_thread(web_stream_manager.wait_for_window_title, stream_id, name, target_url, 10.0)
+        await asyncio.to_thread(web_stream_manager.wait_for_window_title, stream_id, name, target_url, 10.0, resolution)
 
         relay = self.active_relays.get(stream_id)
         if not relay:
@@ -640,13 +645,15 @@ class LiveStreamManager:
                 port=int(stream_item.get("port", 1916)),
                 status="browser_ready",
                 error=None,
+                resolution=resolution,
             )
             self.active_relays[stream_id] = relay
         else:
             relay.status = "browser_ready"
             relay.error = None
+            relay.resolution = resolution
 
-        logger.info(f"Opened browser for web stream '{name}' ({stream_id}). Status: browser_ready.")
+        logger.info(f"Opened browser for web stream '{name}' ({stream_id}) [{resolution}]. Status: browser_ready.")
 
         return relay.to_dict()
 
@@ -657,12 +664,13 @@ class LiveStreamManager:
         stream_item = next((x for x in cfg.streamer.live_streams if x.get("id") == relay.id), {})
         proxy_url = vpn_manager.get_proxy_url_for_stream(stream_item)
         is_web = stream_item.get("stream_type") == "web"
+        resolution = stream_item.get("resolution", "720p" if is_web else "original")
         from app.ffmpeg_setup import probe_source_codec, get_relay_params, get_best_encoder, get_relay_encoding_params, format_ffmpeg_headers
         if is_web:
             from app.ffmpeg_setup import get_screen_capture_params
             encoder = get_best_encoder()
-            video_params = get_screen_capture_params(encoder)
-            logger.info(f"Web stream capture for '{relay.name}' — encoding with {encoder} (screen-capture profile)")
+            video_params = get_screen_capture_params(encoder, resolution=resolution)
+            logger.info(f"Web stream capture for '{relay.name}' ({resolution}) — encoding with {encoder} (screen-capture profile)")
             # Audio routes via Firefox cubeb pref in user.js (set at profile creation time).
         else:
             video_params = None
@@ -671,6 +679,7 @@ class LiveStreamManager:
                 cfg = load_config()
                 stream_item = next((x for x in cfg.streamer.live_streams if x.get("id") == relay.id), stream_item)
                 infinite_retry = bool(stream_item.get("infinite_retry", False)) and not is_web
+                resolution = stream_item.get("resolution", "original")
 
                 if not warned_probe_unavailable:
                     logger.info(f"Probing source codec for '{relay.name}' at {relay.url} (proxy: {proxy_url or 'none'}) …")
@@ -695,13 +704,17 @@ class LiveStreamManager:
                 if warned_probe_unavailable:
                     logger.info(f"Stream '{relay.name}' source is now reachable (codec: {source_codec})")
 
-                if source_codec == "h264":
+                if source_codec == "h264" and resolution in ("original", "auto", "1080p", ""):
                     video_params = get_relay_params()   # stream copy — 0 GPU
                     logger.info(f"Source is H.264 — using stream copy for '{relay.name}'")
+                elif source_codec == "h264" and resolution == "720p":
+                    encoder = get_best_encoder()
+                    video_params = get_relay_encoding_params(encoder, resolution="720p")
+                    logger.info(f"Source is H.264 but stream set to 720p — downscaling/re-encoding with {encoder} for '{relay.name}'")
                 else:
                     encoder = get_best_encoder()
-                    video_params = get_relay_encoding_params(encoder)
-                    logger.info(f"Source codec '{source_codec}' — re-encoding with {encoder} for '{relay.name}'")
+                    video_params = get_relay_encoding_params(encoder, resolution=resolution)
+                    logger.info(f"Source codec '{source_codec}' ({resolution}) — re-encoding with {encoder} for '{relay.name}'")
                 break
 
             if relay.status not in ("running", "listening", "reconnecting") or not video_params:
@@ -715,12 +728,13 @@ class LiveStreamManager:
                 cfg = load_config()
                 stream_item = next((x for x in cfg.streamer.live_streams if x.get("id") == relay.id), stream_item)
                 infinite_retry = bool(stream_item.get("infinite_retry", False)) and not is_web
+                resolution = stream_item.get("resolution", "720p" if is_web else "original")
                 cmd = [get_ffmpeg_path(), "-hide_banner", "-nostdin"]
 
                 target_pid = None
                 if is_web:
                     hwnd = await asyncio.get_event_loop().run_in_executor(
-                        None, web_stream_manager.get_window_hwnd, relay.id, relay.name, relay.url
+                        None, web_stream_manager.get_window_hwnd, relay.id, relay.name, relay.url, resolution
                     )
 
                     if hwnd:
@@ -861,7 +875,7 @@ class LiveStreamManager:
 
                     cmd.extend(["-i", relay.url])
                     if "-c:v" in video_params and "copy" not in video_params:
-                        cmd.extend(get_video_filter(is_web=False, shader_upscale=getattr(cfg.streamer, "shader_upscale", False)))
+                        cmd.extend(get_video_filter(is_web=False, shader_upscale=getattr(cfg.streamer, "shader_upscale", False), resolution=resolution))
 
                 if is_web or ("-c:v" in video_params and "copy" not in video_params):
                     cmd.extend(["-fps_mode", "cfr"])

@@ -321,6 +321,17 @@
                     <input type="number" id="livestream-port" placeholder="1913" value="1913"
                         style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
                 </div>
+                <div>
+                    <label
+                        style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Stream
+                        Resolution & Quality</label>
+                    <select id="livestream-resolution"
+                        style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 13px;">
+                        <option value="original" selected>Original / Stream Copy (Auto: 0% CPU)</option>
+                        <option value="720p">720p (1280x720) - 2.8 Mbps (Transcode / Downscale)</option>
+                        <option value="1080p">1080p (1920x1080) - 5.0 Mbps (Transcode)</option>
+                    </select>
+                </div>
                 <div style="border-top: 1px solid var(--border); padding-top: 12px; margin-top: 4px;">
                     <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;">
                         <input type="checkbox" id="livestream-use-vpn"
@@ -381,6 +392,16 @@
                         HTTP Port</label>
                     <input type="number" id="webstream-port" placeholder="1916" value="1916"
                         style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-family: 'JetBrains Mono', monospace; font-size: 13px;">
+                </div>
+                <div>
+                    <label
+                        style="font-size: 12px; font-weight: 600; color: var(--text-primary); display: block; margin-bottom: 4px;">Browser
+                        Resolution</label>
+                    <select id="webstream-resolution"
+                        style="width: 100%; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-input); color: var(--text-primary); font-size: 13px;">
+                        <option value="720p" selected>720p (1280x720) - 2.8 Mbps (Lower bandwidth)</option>
+                        <option value="1080p">1080p (1920x1080) - 5.0 Mbps (Full HD / Sports)</option>
+                    </select>
                 </div>
                 <div style="border-top: 1px solid var(--border); padding-top: 12px; margin-top: 4px;">
                     <label style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;">

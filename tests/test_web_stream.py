@@ -65,3 +65,45 @@ def test_create_firefox_profile_with_http_proxy(tmp_path):
     assert "';" not in content
     assert "'," not in content
 
+
+def test_screen_capture_params_resolution_scaling():
+    from app.ffmpeg_setup import get_screen_capture_params, get_relay_encoding_params
+
+    # 720p profile checks
+    params_720 = get_screen_capture_params("libx264", resolution="720p")
+    assert "-b:v" in params_720
+    idx_b = params_720.index("-b:v")
+    assert params_720[idx_b + 1] == "2800k"
+    idx_buf = params_720.index("-bufsize")
+    assert params_720[idx_buf + 1] == "6400k"
+
+    # 1080p profile checks
+    params_1080 = get_screen_capture_params("libx264", resolution="1080p")
+    assert "-b:v" in params_1080
+    idx_b1080 = params_1080.index("-b:v")
+    assert params_1080[idx_b1080 + 1] == "5M"
+    idx_buf1080 = params_1080.index("-bufsize")
+    assert params_1080[idx_buf1080 + 1] == "10M"
+
+    # Relay transcode 1080p profile checks
+    relay_1080 = get_relay_encoding_params("libx264", resolution="1080p")
+    idx_buf_relay = relay_1080.index("-bufsize")
+    assert relay_1080[idx_buf_relay + 1] == "9M"
+
+
+def test_create_and_update_stream_resolution():
+    from app.routers.live import LiveStreamCreateRequest, LiveStreamUpdateRequest
+
+    req = LiveStreamCreateRequest(
+        name="Test 1080p Web Stream",
+        url="https://test.com",
+        port=1929,
+        stream_type="web",
+        resolution="1080p",
+    )
+    assert req.resolution == "1080p"
+
+    update_req = LiveStreamUpdateRequest(resolution="720p")
+    assert update_req.resolution == "720p"
+
+

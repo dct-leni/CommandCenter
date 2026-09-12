@@ -346,12 +346,16 @@ class WebStreamManager:
         self.window_titles: Dict[str, str] = {}
         self.window_hwnds: Dict[str, int] = {}  # HWND of the Firefox content window
 
-    def launch_browser(self, stream_id: str, name: str, url: str, proxy_url: Optional[str] = None) -> str:
+    def launch_browser(self, stream_id: str, name: str, url: str, proxy_url: Optional[str] = None, resolution: str = "720p") -> str:
         """
-        Launch a 1280x720 Portable Firefox popup for a web stream.
+        Launch a Portable Firefox popup for a web stream with requested resolution (720p or 1080p).
         Creates an isolated profile with the CommandCenter MV2 audio extension pre-loaded.
         """
         self.close_browser(stream_id)
+
+        is_1080p = "1080" in str(resolution or "").lower()
+        w_px = 1920 if is_1080p else 1280
+        h_px = 1080 if is_1080p else 720
 
         firefox_exe = find_firefox_executable()
         if firefox_exe:
@@ -382,14 +386,14 @@ app:
                     yaml_path.write_text(yml_content, encoding="utf-8")
                     cmd = [
                         firefox_exe,
-                        "--width=1280",
-                        "--height=720",
+                        f"--width={w_px}",
+                        f"--height={h_px}",
                         url,
                         "-foreground"
                     ]
                     env = os.environ.copy()
                     env["TZ"] = "Europe/Istanbul"
-                    logger.info(f"Launching Portapps phyrox-portable for '{name}' ({stream_id}) -> '{url}'")
+                    logger.info(f"Launching Portapps phyrox-portable for '{name}' ({stream_id}) [{w_px}x{h_px}] -> '{url}'")
                     proc = subprocess.Popen(
                         cmd,
                         env=env,
@@ -410,14 +414,14 @@ app:
                     "--no-remote",
                     "--new-instance",
                     f"--profile", str(profile_dir.resolve()),
-                    "--width=1280",
-                    "--height=720",
+                    f"--width={w_px}",
+                    f"--height={h_px}",
                     url,
                     "-foreground"
                 ]
                 env = os.environ.copy()
                 env["TZ"] = "Europe/Istanbul"
-                logger.info(f"Launching Native Firefox for web stream '{name}' ({stream_id}) -> '{url}'")
+                logger.info(f"Launching Native Firefox for web stream '{name}' ({stream_id}) [{w_px}x{h_px}] -> '{url}'")
                 proc = subprocess.Popen(
                     cmd,
                     env=env,
@@ -437,7 +441,7 @@ app:
 
         return name
 
-    def wait_for_window_title(self, stream_id: str, stream_name: str, url: str, timeout: float = 10.0) -> str:
+    def wait_for_window_title(self, stream_id: str, stream_name: str, url: str, timeout: float = 10.0, resolution: str = "720p") -> str:
         """Poll window titles for up to timeout seconds. Also stores the HWND for region-based capture."""
         import time
         start_time = time.time()
@@ -528,9 +532,12 @@ app:
                             SW_SHOW = 5
                             user32.ShowWindow(hwnd, SW_SHOW)
 
-                        # Position window at (0,0) 1280x758
+                        # Position window at (0,0): 1920x1118 for 1080p, 1280x758 for 720p (+38px window titlebar)
+                        is_1080p = "1080" in str(resolution or "").lower()
+                        win_w = 1920 if is_1080p else 1280
+                        win_h = 1118 if is_1080p else 758
                         SWP_SHOWWINDOW = 0x0040
-                        user32.SetWindowPos(hwnd, 0, 0, 0, 1280, 758, SWP_SHOWWINDOW)
+                        user32.SetWindowPos(hwnd, 0, 0, 0, win_w, win_h, SWP_SHOWWINDOW)
                     except Exception as e:
                         logger.debug(f"SetWindowPos/Style error: {e}")
 
@@ -544,11 +551,11 @@ app:
         self.window_titles[stream_id] = fallback
         return fallback
 
-    def get_window_hwnd(self, stream_id: str, stream_name: str = "", url: str = "") -> Optional[int]:
+    def get_window_hwnd(self, stream_id: str, stream_name: str = "", url: str = "", resolution: str = "720p") -> Optional[int]:
         """Return HWND (int) for stream_id."""
         if stream_id in self.window_hwnds:
             return self.window_hwnds[stream_id]
-        self.wait_for_window_title(stream_id, stream_name, url, timeout=10.0)
+        self.wait_for_window_title(stream_id, stream_name, url, timeout=10.0, resolution=resolution)
         return self.window_hwnds.get(stream_id)
 
     def get_window_title(self, stream_id: str, default_name: str = "", url: str = "") -> str:

@@ -179,18 +179,30 @@ def get_encoding_params(
     source_bitrate: Optional[int] = None,
     mode: str = "converter",
     is_hdr: bool = False,
+    resolution: str = "720p",
 ) -> list:
     """
     Unified encoding parameter generator for video conversion, live relays, and web streams.
 
     Modes:
       - 'converter': File transcode (NVENC preset p6, VBR, cq 22, spatial/temporal AQ, B-refs)
-      - 'relay':     Live stream re-encode (NVENC preset p4, VBR 2.8M, temporal AQ, B-refs)
-      - 'web':       WGC screen capture (NVENC preset p4, capped VBR 2.8M, cq 24, spatial AQ, 0 B-frames)
+      - 'relay':     Live stream re-encode (NVENC preset p4, VBR 2.8M-4.5M, temporal AQ, B-refs)
+      - 'web':       WGC screen capture (NVENC preset p4, capped VBR 2.8M-5.0M, cq 24, spatial AQ, 0 B-frames)
     """
-    target_b_bps = 2_800_000   # 2.8 Mbps default
-    max_b_bps    = 3_500_000   # 3.5 Mbps default
-    buf_b_bps    = 6_400_000   # 6.4 Mbps default
+    res_lower = str(resolution or "720p").lower()
+    if "1080" in res_lower:
+        if mode == "web":
+            target_b_bps = 5_000_000   # 5.0 Mbps for 1080p web screen capture
+            max_b_bps    = 6_500_000   # 6.5 Mbps peak for fast motion / sports
+            buf_b_bps    = 10_000_000  # 10.0 Mbps VBV buffer
+        else:
+            target_b_bps = 4_500_000   # 4.5 Mbps for 1080p relay transcode
+            max_b_bps    = 5_500_000   # 5.5 Mbps peak
+            buf_b_bps    = 9_000_000   # 9.0 Mbps VBV buffer
+    else:
+        target_b_bps = 2_800_000   # 2.8 Mbps default (720p)
+        max_b_bps    = 3_500_000   # 3.5 Mbps default
+        buf_b_bps    = 6_400_000   # 6.4 Mbps default
 
     if source_bitrate and 0 < source_bitrate < target_b_bps:
         # Match source bitrate 1:1 to preserve original file size without padding
@@ -304,14 +316,14 @@ def get_relay_params() -> list:
     return ["-c:v", "copy"]
 
 
-def get_relay_encoding_params(encoder: str) -> list:
+def get_relay_encoding_params(encoder: str, resolution: str = "720p") -> list:
     """Alias for get_encoding_params with mode='relay'."""
-    return get_encoding_params(encoder, mode="relay")
+    return get_encoding_params(encoder, mode="relay", resolution=resolution)
 
 
-def get_screen_capture_params(encoder: str) -> list:
+def get_screen_capture_params(encoder: str, resolution: str = "720p") -> list:
     """Alias for get_encoding_params with mode='web'."""
-    return get_encoding_params(encoder, mode="web")
+    return get_encoding_params(encoder, mode="web", resolution=resolution)
 
 
 def get_videocapture_path() -> str:
@@ -326,7 +338,7 @@ def is_wgc_available() -> bool:
     return (BIN_DIR / "app_videocapture.exe").exists()
 
 
-def get_video_filter(is_web: bool = False, shader_upscale: bool = False, is_wgc: bool = True) -> list:
+def get_video_filter(is_web: bool = False, shader_upscale: bool = False, is_wgc: bool = True, resolution: Optional[str] = None) -> list:
     """Return standardized video filter arguments for live/web streams."""
     filters = []
     if is_web and not is_wgc:
@@ -335,6 +347,12 @@ def get_video_filter(is_web: bool = False, shader_upscale: bool = False, is_wgc:
         filters.append("scale=1920:1080:flags=lanczos")
         filters.append("setsar=1")
         filters.append("unsharp=3:3:0.5:3:3:0.0")
+    elif resolution == "720p" and not is_web:
+        filters.append("scale=1280:720:flags=bicubic")
+        filters.append("setsar=1")
+    elif resolution == "1080p" and not is_web:
+        filters.append("scale=1920:1080:flags=bicubic")
+        filters.append("setsar=1")
     filters.append("format=yuv420p")
     return ["-vf", ",".join(filters)]
 

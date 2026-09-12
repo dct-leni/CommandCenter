@@ -1824,6 +1824,16 @@ function renderLiveStreams() {
             retryBadge = `<span style="font-size: 11px; background: rgba(16, 185, 129, 0.12); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.25); padding: 2px 7px; border-radius: 4px; font-family: 'JetBrains Mono', monospace;" title="Infinite reconnect retry enabled"><i class="fa-solid fa-rotate"></i> Auto-Retry</span>`;
         }
 
+        let resBadge = '';
+        const resVal = item.resolution || (isWeb ? '720p' : 'original');
+        if (resVal === '1080p') {
+            resBadge = `<span style="font-size: 11px; background: rgba(59, 130, 246, 0.15); color: #60a5fa; border: 1px solid rgba(59, 130, 246, 0.3); padding: 2px 7px; border-radius: 4px; font-family: 'JetBrains Mono', monospace;" title="Resolution: 1080p Full HD"><i class="fa-solid fa-tv"></i> 1080p</span>`;
+        } else if (resVal === '720p') {
+            resBadge = `<span style="font-size: 11px; background: rgba(59, 130, 246, 0.08); color: #93c5fd; border: 1px solid rgba(59, 130, 246, 0.2); padding: 2px 7px; border-radius: 4px; font-family: 'JetBrains Mono', monospace;" title="Resolution: 720p HD"><i class="fa-solid fa-tv"></i> 720p</span>`;
+        } else {
+            resBadge = `<span style="font-size: 11px; background: rgba(255, 255, 255, 0.05); color: var(--text-muted); border: 1px solid rgba(255, 255, 255, 0.1); padding: 2px 7px; border-radius: 4px; font-family: 'JetBrains Mono', monospace;" title="Resolution: Original Stream Copy"><i class="fa-solid fa-copy"></i> Copy</span>`;
+        }
+
         return `
             <div class="folder-card livestream-card ${isRunning || isReconnecting ? 'active' : ''}" id="livestream-${item.id}" data-is-web="${isWeb ? 'true' : 'false'}">
                 <div class="folder-card-header" style="cursor: default; display: flex; align-items: center; gap: 10px; padding: 10px 12px;">
@@ -1832,6 +1842,7 @@ function renderLiveStreams() {
                     ${statusBadge}
                     ${viewerBadge}
                     ${retryBadge}
+                    ${resBadge}
                     ${vpnBadge}
                     <span class="folder-date-range" style="font-family: 'JetBrains Mono', monospace; font-size: 12px; margin-left: auto; display: flex; align-items: center; gap: 4px;">
                         Port: ${item.port}
@@ -1882,6 +1893,10 @@ function _openStreamModal(kind, item) {
     if (retryEl) {
         retryEl.checked = item ? Boolean(item.infinite_retry) : false;
     }
+    const resEl = document.getElementById(`${d.prefix}-resolution`);
+    if (resEl) {
+        resEl.value = item ? (item.resolution || (kind === 'web' ? '720p' : 'original')) : (kind === 'web' ? '720p' : 'original');
+    }
     document.getElementById(`${d.prefix}-save-btn`).textContent = item ? 'Save' : 'Create';
     document.getElementById(d.modalId).style.display = 'flex';
 }
@@ -1895,6 +1910,8 @@ async function _submitStreamForm(kind) {
     const use_vpn = document.getElementById(`${d.prefix}-use-vpn`).checked;
     const retryEl = document.getElementById(`${d.prefix}-infinite-retry`);
     const infinite_retry = retryEl ? retryEl.checked : false;
+    const resEl = document.getElementById(`${d.prefix}-resolution`);
+    const resolution = resEl ? resEl.value : (kind === 'web' ? '720p' : 'original');
 
     if (!name || !url || isNaN(port)) {
         showToast('Please enter valid Name, URL, and Port', 'error');
@@ -1902,7 +1919,7 @@ async function _submitStreamForm(kind) {
     }
 
     try {
-        const payload = { name, url, port, use_vpn, stream_type: d.type, infinite_retry };
+        const payload = { name, url, port, use_vpn, stream_type: d.type, infinite_retry, resolution };
         if (streamId) {
             await api('PUT', `/streamer/live_stream/${streamId}`, payload);
             showToast(`${d.label} updated`, 'success');

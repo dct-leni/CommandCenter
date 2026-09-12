@@ -30,6 +30,7 @@ class LiveStreamItem:
     port: int
     auto_start: bool = False
     infinite_retry: bool = False
+    resolution: str = "720p"
 
 
 
@@ -45,6 +46,7 @@ class StreamerConfig:
     epg_timezone: str = "+0300"         # XMLTV timezone offset string
     playlists: dict = field(default_factory=dict)  # folder_name → [{port, files}]
     live_streams: List[dict] = field(default_factory=list)  # List of LiveStreamItem dicts
+    default_stream_resolution: str = "720p"  # "720p" or "1080p"
     shader_upscale: bool = False        # Apply lightweight GPU upscaling/sharpening to web/live streams
     video_capture_backend: str = "wgc"  # "wgc" (Windows Graphics Capture) or "gdigrab" (fallback)
     global_vpn: dict = field(default_factory=lambda: {

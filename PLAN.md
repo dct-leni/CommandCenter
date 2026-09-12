@@ -4,10 +4,10 @@
 
 | Feature / Task | Status | Implementation Details |
 | :--- | :--- | :--- |
-| **Feature 1: Stream Resolution Selection (720p vs 1080p)** | ⏳ **Planned** | Ready for execution. Includes 24MB Named Pipe buffer & dynamic VBV scaling. |
+| **Feature 1: Stream Resolution Selection (720p vs 1080p)** | ✅ **Completed** | Implemented 24MB Named Pipe buffer, dynamic VBV & bitrate scaling, and UI selection. |
 ---
 
-## Feature 1: Stream Resolution Selection (720p vs 1080p) [PLANNED]
+## Feature 1: Stream Resolution Selection (720p vs 1080p) [COMPLETED]
 
 ### 1. Overview & Motivation
 Allow choosing between **720p (1280x720)** and **1080p (1920x1080)** per stream for both Web Streams (Firefox + WGC) and Live Relays (IPTV / M3U8 / RTMP).

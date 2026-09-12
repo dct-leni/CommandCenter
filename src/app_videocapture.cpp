@@ -84,8 +84,8 @@ int main(int argc, char* argv[]) {
             PIPE_ACCESS_OUTBOUND,
             PIPE_TYPE_BYTE | PIPE_WAIT,
             1,
-            8 * 1024 * 1024, // 8MB buffer
-            8 * 1024 * 1024,
+            24 * 1024 * 1024, // 24MB buffer (safely holds ~3 uncompressed 1080p BGRA frames)
+            24 * 1024 * 1024,
             5000,
             nullptr
         );
