@@ -720,6 +720,10 @@ class LiveStreamManager:
             if relay.status not in ("running", "listening", "reconnecting") or not video_params:
                 return
 
+        # Cooldown slice for network HTTP streams: allows satellite receivers / Enigma2 tuners to cleanly release ffprobe socket before FFmpeg connects
+        if not is_web and (relay.url.startswith("http://") or relay.url.startswith("https://")):
+            await asyncio.sleep(1.0)
+
         retry_count = 0
         max_retries = 5
         warned_stream_drop = False
@@ -857,13 +861,16 @@ class LiveStreamManager:
                             "-timeout", "10000000",
                         ])
                     elif relay.url.startswith("http://") or relay.url.startswith("https://"):
-                        # Plain HTTP MPEG-TS stream with 10MB network socket buffer
+                        # Plain HTTP MPEG-TS stream with 10MB network socket buffer and auto-reconnect on 4xx/5xx
                         cmd.extend([
                             "-buffer_size", "10M",
                             "-reconnect", "1",
+                            "-reconnect_at_eof", "1",
                             "-reconnect_streamed", "1",
+                            "-reconnect_on_network_error", "1",
+                            "-reconnect_on_http_error", "4xx,5xx",
                             "-reconnect_delay_max", "5",
-                            "-timeout", "5000000",
+                            "-timeout", "10000000",
                         ])
                     elif relay.url.startswith("rtsp://"):
                         cmd.extend(["-stimeout", "5000000"])
@@ -1011,11 +1018,8 @@ class LiveStreamManager:
 
                         formatted_err = error_detail if any(err in error_detail for err in ("404", "403", "401", "refused")) else f"FFmpeg error ({process.returncode}): {error_detail}"
 
-                        # If stream never successfully connected or failed to open input, fail immediately without retrying unless infinite_retry is active!
-                        never_connected = not getattr(relay, "has_received_data", False)
-                        is_input_error = any(kw in formatted_err.lower() for kw in ("error opening input", "not found", "404", "403", "401", "refused", "-138"))
-
-                        if not infinite_retry and (never_connected or is_input_error or is_web or retry_count >= max_retries or relay.status in ("stopped",)):
+                        # Web streams fail immediately on process exit; live relays retry up to max_retries (or forever if infinite_retry is enabled)
+                        if is_web or relay.status in ("stopped",) or (not infinite_retry and retry_count >= max_retries):
                             logger.error(f"Live relay '{relay.name}' process exited with error code {process.returncode}: {formatted_err}")
                             relay.status = "error"
                             relay.error = formatted_err

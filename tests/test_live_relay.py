@@ -189,3 +189,49 @@ def test_auto_restart_loop_infinite_retry_behavior(monkeypatch):
         assert 30.0 in sleep_durations
 
     asyncio.run(run_test())
+
+
+def test_live_relay_startup_retry_budget(monkeypatch):
+    import asyncio
+    from unittest.mock import MagicMock, AsyncMock
+
+    async def run_test():
+        mock_cfg = MagicMock()
+        mock_cfg.streamer.live_streams = [
+            {"id": "test_retry_budget", "name": "Retry Budget", "url": "http://192.168.1.97:8001/1:0:1", "port": 1995, "infinite_retry": False}
+        ]
+        mock_cfg.streamer.global_vpn = {}
+        monkeypatch.setattr("app.live_relay.load_config", lambda: mock_cfg)
+        monkeypatch.setattr("app.ffmpeg_setup.probe_source_codec", lambda *args, **kwargs: "h264")
+
+        # Mock asyncio.create_subprocess_exec to return a mock process that exits with code 1 and 404 in logs
+        exec_count = 0
+        async def mock_subprocess_exec(*cmd, **kwargs):
+            nonlocal exec_count
+            exec_count += 1
+            proc = MagicMock()
+            proc.returncode = 1
+            proc.wait = AsyncMock(return_value=1)
+            proc.stderr = AsyncMock()
+            proc.stderr.readline = AsyncMock(side_effect=[b"Server returned 404 Not Found\n", b""])
+            return proc
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", mock_subprocess_exec)
+
+        sleep_count = 0
+        async def mock_sleep(sec):
+            nonlocal sleep_count
+            sleep_count += 1
+            if exec_count >= 3:
+                relay.status = "stopped"
+
+        monkeypatch.setattr(asyncio, "sleep", mock_sleep)
+
+        relay = LiveRelayStatus(id="test_retry_budget", name="Retry Budget", url="http://192.168.1.97:8001/1:0:1", port=1995, status="listening", infinite_retry=False)
+        await live_relay_manager._auto_restart_loop(relay)
+
+        # Must have retried at least 3 times instead of aborting immediately on the first 404
+        assert exec_count >= 3
+
+    asyncio.run(run_test())
+

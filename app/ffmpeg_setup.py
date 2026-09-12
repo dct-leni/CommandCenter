@@ -420,8 +420,8 @@ def probe_source_codec(url: str, timeout: int = 8, proxy_url: Optional[str] = No
 
         if is_network_input:
             cmd.extend([
-                "-probesize", "5M",
-                "-analyzeduration", "5M",
+                "-probesize", "1M",
+                "-analyzeduration", "1M",
             ])
 
         if (url.lower().startswith("http://") or url.lower().startswith("https://")) and not is_hls:
