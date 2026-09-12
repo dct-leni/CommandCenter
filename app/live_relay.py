@@ -326,8 +326,8 @@ class LiveStreamManager:
                                 try:
                                     q.put_nowait(chunk)
                                 except asyncio.QueueFull:
-                                    # Relieve congestion by dropping only a few oldest chunks rather than purging whole GOP
-                                    for _ in range(8):
+                                    # Client fell behind — drain all stale data so it jumps to live
+                                    while not q.empty():
                                         try:
                                             q.get_nowait()
                                         except asyncio.QueueEmpty:
@@ -445,8 +445,8 @@ class LiveStreamManager:
             except Exception:
                 pass
 
-            # Low-latency queue size (256 chunks ~16MB) absorbs satellite bitrate spikes without dropping
-            queue = asyncio.Queue(maxsize=256)
+            # Low-latency queue size (128 chunks) prevents burst packet dumps that cause playback stacking
+            queue = asyncio.Queue(maxsize=128)
             relay.clients[queue] = writer
 
             async def client_write_loop():
@@ -720,10 +720,6 @@ class LiveStreamManager:
             if relay.status not in ("running", "listening", "reconnecting") or not video_params:
                 return
 
-        # Cooldown slice for network HTTP streams: allows satellite receivers / Enigma2 tuners to cleanly release ffprobe socket before FFmpeg connects
-        if not is_web and (relay.url.startswith("http://") or relay.url.startswith("https://")):
-            await asyncio.sleep(1.0)
-
         retry_count = 0
         max_retries = 5
         warned_stream_drop = False
@@ -861,16 +857,12 @@ class LiveStreamManager:
                             "-timeout", "10000000",
                         ])
                     elif relay.url.startswith("http://") or relay.url.startswith("https://"):
-                        # Plain HTTP MPEG-TS stream with 10MB network socket buffer and auto-reconnect on 4xx/5xx
+                        # Plain HTTP MPEG-TS stream
                         cmd.extend([
-                            "-buffer_size", "10M",
                             "-reconnect", "1",
-                            "-reconnect_at_eof", "1",
                             "-reconnect_streamed", "1",
-                            "-reconnect_on_network_error", "1",
-                            "-reconnect_on_http_error", "4xx,5xx",
                             "-reconnect_delay_max", "5",
-                            "-timeout", "10000000",
+                            "-timeout", "5000000",
                         ])
                     elif relay.url.startswith("rtsp://"):
                         cmd.extend(["-stimeout", "5000000"])
@@ -897,11 +889,11 @@ class LiveStreamManager:
                 if "-c:v" in video_params and "copy" in video_params:
                     cmd.extend(["-bsf:v", "dump_extra"])
 
-                interleave_delta = "0" if is_web else "1000000"
+                interleave_delta = "0" if is_web else "50000"
                 cmd.extend([
                     "-avoid_negative_ts", "make_zero",
                     "-fflags", "+genpts",
-                    "-max_interleave_delta", interleave_delta, # 0 for web streams, 1s for live relays to absorb motion bursts
+                    "-max_interleave_delta", interleave_delta, # 0 for web streams forces instant video packet output without interleave holds
                     "-flush_packets", "1",        # Flush MPEG-TS packets immediately
                     "-f", "mpegts",
                     f"tcp://127.0.0.1:{relay.loopback_port}?tcp_nodelay=1"
@@ -1018,8 +1010,11 @@ class LiveStreamManager:
 
                         formatted_err = error_detail if any(err in error_detail for err in ("404", "403", "401", "refused")) else f"FFmpeg error ({process.returncode}): {error_detail}"
 
-                        # Web streams fail immediately on process exit; live relays retry up to max_retries (or forever if infinite_retry is enabled)
-                        if is_web or relay.status in ("stopped",) or (not infinite_retry and retry_count >= max_retries):
+                        # If stream never successfully connected or failed to open input, fail immediately without retrying unless infinite_retry is active!
+                        never_connected = not getattr(relay, "has_received_data", False)
+                        is_input_error = any(kw in formatted_err.lower() for kw in ("error opening input", "not found", "404", "403", "401", "refused", "-138"))
+
+                        if not infinite_retry and (never_connected or is_input_error or is_web or retry_count >= max_retries or relay.status in ("stopped",)):
                             logger.error(f"Live relay '{relay.name}' process exited with error code {process.returncode}: {formatted_err}")
                             relay.status = "error"
                             relay.error = formatted_err
