@@ -322,8 +322,8 @@ class LiveStreamManager:
                                 try:
                                     q.put_nowait(chunk)
                                 except asyncio.QueueFull:
-                                    # Client fell behind — drain all stale data so it jumps to live
-                                    while not q.empty():
+                                    # Relieve congestion by dropping only a few oldest chunks rather than purging whole GOP
+                                    for _ in range(8):
                                         try:
                                             q.get_nowait()
                                         except asyncio.QueueEmpty:
@@ -441,8 +441,8 @@ class LiveStreamManager:
             except Exception:
                 pass
 
-            # Low-latency queue size (128 chunks) prevents burst packet dumps that cause playback stacking
-            queue = asyncio.Queue(maxsize=128)
+            # Low-latency queue size (256 chunks ~16MB) absorbs satellite bitrate spikes without dropping
+            queue = asyncio.Queue(maxsize=256)
             relay.clients[queue] = writer
 
             async def client_write_loop():
@@ -843,8 +843,9 @@ class LiveStreamManager:
                             "-timeout", "10000000",
                         ])
                     elif relay.url.startswith("http://") or relay.url.startswith("https://"):
-                        # Plain HTTP MPEG-TS stream
+                        # Plain HTTP MPEG-TS stream with 10MB network socket buffer
                         cmd.extend([
+                            "-buffer_size", "10M",
                             "-reconnect", "1",
                             "-reconnect_streamed", "1",
                             "-reconnect_delay_max", "5",
@@ -875,11 +876,11 @@ class LiveStreamManager:
                 if "-c:v" in video_params and "copy" in video_params:
                     cmd.extend(["-bsf:v", "dump_extra"])
 
-                interleave_delta = "0" if is_web else "50000"
+                interleave_delta = "0" if is_web else "1000000"
                 cmd.extend([
                     "-avoid_negative_ts", "make_zero",
                     "-fflags", "+genpts",
-                    "-max_interleave_delta", interleave_delta, # 0 for web streams forces instant video packet output without interleave holds
+                    "-max_interleave_delta", interleave_delta, # 0 for web streams, 1s for live relays to absorb motion bursts
                     "-flush_packets", "1",        # Flush MPEG-TS packets immediately
                     "-f", "mpegts",
                     f"tcp://127.0.0.1:{relay.loopback_port}?tcp_nodelay=1"

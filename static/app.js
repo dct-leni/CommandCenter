@@ -2127,7 +2127,7 @@ function openVideoPreview(url, title = 'Stream Preview') {
             const isLive = !isFile;
             const playerConfig = {
                 enableStashBuffer: true,
-                stashInitialSize: 384 * 1024,
+                stashInitialSize: 1024 * 1024,
                 lazyLoad: false,
                 liveBufferLatencyChasing: false,
                 autoCleanupSourceBuffer: isLive,
