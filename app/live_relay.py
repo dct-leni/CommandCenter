@@ -666,26 +666,34 @@ class LiveStreamManager:
             # Audio routes via Firefox cubeb pref in user.js (set at profile creation time).
         else:
             video_params = None
+            warned_probe_unavailable = False
             while relay.status in ("running", "listening", "reconnecting"):
                 cfg = load_config()
                 stream_item = next((x for x in cfg.streamer.live_streams if x.get("id") == relay.id), stream_item)
                 infinite_retry = bool(stream_item.get("infinite_retry", False)) and not is_web
 
-                logger.info(f"Probing source codec for '{relay.name}' at {relay.url} (proxy: {proxy_url or 'none'}) …")
+                if not warned_probe_unavailable:
+                    logger.info(f"Probing source codec for '{relay.name}' at {relay.url} (proxy: {proxy_url or 'none'}) …")
                 source_codec = await asyncio.get_event_loop().run_in_executor(
                     None, probe_source_codec, relay.url, 8, proxy_url
                 )
                 if source_codec in ("404 Not Found", "403 Forbidden", "401 Unauthorized", "Connection refused") or "404" in source_codec or "not found" in source_codec.lower():
-                    logger.warning(f"Stream '{relay.name}' source is unavailable: {source_codec}")
                     if infinite_retry:
+                        if not warned_probe_unavailable:
+                            logger.warning(f"Stream '{relay.name}' source is unavailable: {source_codec}. Retrying every 30s...")
+                            warned_probe_unavailable = True
                         relay.status = "reconnecting"
-                        relay.error = f"Source unavailable ({source_codec}). Retrying probe in 5s..."
-                        await asyncio.sleep(5.0)
+                        relay.error = f"Source unavailable ({source_codec}). Retrying probe in 30s..."
+                        await asyncio.sleep(30.0)
                         continue
                     else:
+                        logger.warning(f"Stream '{relay.name}' source is unavailable: {source_codec}")
                         relay.status = "error"
                         relay.error = source_codec
                         return
+
+                if warned_probe_unavailable:
+                    logger.info(f"Stream '{relay.name}' source is now reachable (codec: {source_codec})")
 
                 if source_codec == "h264":
                     video_params = get_relay_params()   # stream copy — 0 GPU
@@ -701,6 +709,7 @@ class LiveStreamManager:
 
         retry_count = 0
         max_retries = 5
+        warned_stream_drop = False
         while relay.status in ("running", "listening", "reconnecting"):
             try:
                 cfg = load_config()
@@ -946,7 +955,10 @@ class LiveStreamManager:
                 start_time = time.time()
                 await process.wait()
                 if (time.time() - start_time) > 30.0:
+                    if retry_count > 0 or warned_stream_drop:
+                        logger.info(f"Live relay '{relay.name}' restored and streaming normally.")
                     retry_count = 0  # Ran healthy for > 30s, reset retry budget
+                    warned_stream_drop = False
 
                 if window_guard_task and not window_guard_task.done():
                     window_guard_task.cancel()
@@ -961,7 +973,6 @@ class LiveStreamManager:
                     if process.returncode != 0:
                         # Give a tiny slice for log_task to catch any final lines
                         await asyncio.sleep(0.2)
-                        logger.error(f"Live relay '{relay.name}' process exited with error code {process.returncode}")
                         
                         # Inspect last logs for error reason
                         error_detail = "Check input stream URL or network connection."
@@ -990,6 +1001,7 @@ class LiveStreamManager:
                         is_input_error = any(kw in formatted_err.lower() for kw in ("error opening input", "not found", "404", "403", "401", "refused", "-138"))
 
                         if not infinite_retry and (never_connected or is_input_error or is_web or retry_count >= max_retries or relay.status in ("stopped",)):
+                            logger.error(f"Live relay '{relay.name}' process exited with error code {process.returncode}: {formatted_err}")
                             relay.status = "error"
                             relay.error = formatted_err
                             # Disconnect all hanging clients immediately
@@ -1005,18 +1017,23 @@ class LiveStreamManager:
                         else:
                             retry_count += 1
                             if infinite_retry:
-                                backoff_sec = min(15, max(3, retry_count * 2))
+                                backoff_sec = 30
                                 relay.status = "reconnecting"
-                                relay.error = f"Stream interrupted ({formatted_err}). Reconnecting in {backoff_sec}s (retry #{retry_count})..."
+                                relay.error = f"Stream interrupted ({formatted_err}). Retrying in {backoff_sec}s (retry #{retry_count})..."
+                                if not warned_stream_drop:
+                                    logger.warning(f"Live relay '{relay.name}' interrupted: {formatted_err}. Retrying every 30s...")
+                                    warned_stream_drop = True
                             else:
+                                logger.error(f"Live relay '{relay.name}' process exited with error code {process.returncode}: {formatted_err}")
                                 backoff_sec = min(10, 2 ** retry_count)
                                 relay.status = "reconnecting"
                                 relay.error = f"Stream interrupted ({formatted_err}). Reconnecting in {backoff_sec}s (attempt {retry_count}/{max_retries})..."
-                            logger.info(f"Live relay '{relay.name}': {relay.error}")
+                                logger.info(f"Live relay '{relay.name}': {relay.error}")
                             await asyncio.sleep(backoff_sec)
                             continue
                     else:
                         retry_count = 0
+                        warned_stream_drop = False
                         await asyncio.sleep(1.0)
 
             except asyncio.CancelledError:

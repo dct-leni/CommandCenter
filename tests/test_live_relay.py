@@ -176,7 +176,9 @@ def test_auto_restart_loop_infinite_retry_behavior(monkeypatch):
 
         relay2 = LiveRelayStatus(id="test_with_retry", name="With Retry", url="http://test/stream", port=1991, status="listening", infinite_retry=True)
 
+        sleep_durations = []
         async def fast_sleep(sec):
+            sleep_durations.append(sec)
             if probe_calls >= 2:
                 relay2.status = "stopped"  # stop loop after probe recovery
 
@@ -184,5 +186,6 @@ def test_auto_restart_loop_infinite_retry_behavior(monkeypatch):
 
         await live_relay_manager._auto_restart_loop(relay2)
         assert probe_calls >= 2
+        assert 30.0 in sleep_durations
 
     asyncio.run(run_test())

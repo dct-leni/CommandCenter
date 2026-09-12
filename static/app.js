@@ -1720,6 +1720,7 @@ function renderLiveStreams() {
 
     const html = state.liveStreams.map(item => {
         const isRunning = item.status === 'running' || item.status === 'listening';
+        const isReconnecting = item.status === 'reconnecting';
         const isWeb = item.stream_type === 'web';
         let statusBadge = '';
         if (item.status === 'running') {
@@ -1766,6 +1767,12 @@ function renderLiveStreams() {
                         <i class="fa-solid fa-stop"></i> Stop
                     </button>
                 `;
+            } else if (isReconnecting) {
+                actionsHtml = `
+                    <button class="btn btn-danger btn-sm" data-action="stream-stop" data-id="${escapeHtml(item.id)}" title="Stop Reconnecting">
+                        <i class="fa-solid fa-stop"></i> Stop
+                    </button>
+                `;
             } else if (item.status === 'browser_ready') {
                 actionsHtml = `
                     <button class="btn btn-emerald btn-sm" data-action="stream-start" data-id="${escapeHtml(item.id)}" title="Start Streaming Captured Window">
@@ -1792,6 +1799,12 @@ function renderLiveStreams() {
                         <i class="fa-solid fa-stop"></i> Stop
                     </button>
                 `;
+            } else if (isReconnecting) {
+                actionsHtml = `
+                    <button class="btn btn-danger btn-sm" data-action="stream-stop" data-id="${escapeHtml(item.id)}" title="Stop Reconnecting">
+                        <i class="fa-solid fa-stop"></i> Stop
+                    </button>
+                `;
             } else {
                 actionsHtml = `
                     <button class="btn btn-emerald btn-sm" data-action="stream-start" data-id="${escapeHtml(item.id)}" title="Start Stream">
@@ -1812,7 +1825,7 @@ function renderLiveStreams() {
         }
 
         return `
-            <div class="folder-card livestream-card ${isRunning ? 'active' : ''}" id="livestream-${item.id}" data-is-web="${isWeb ? 'true' : 'false'}">
+            <div class="folder-card livestream-card ${isRunning || isReconnecting ? 'active' : ''}" id="livestream-${item.id}" data-is-web="${isWeb ? 'true' : 'false'}">
                 <div class="folder-card-header" style="cursor: default; display: flex; align-items: center; gap: 10px; padding: 10px 12px;">
                     ${thumbHtml}
                     <span class="folder-card-title" style="margin-left: 5px;">${escapeAttr(item.name)}</span>
