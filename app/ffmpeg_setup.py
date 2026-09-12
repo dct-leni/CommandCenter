@@ -384,7 +384,6 @@ def probe_source_codec(url: str, timeout: int = 8, proxy_url: Optional[str] = No
         cmd = [
             str(FFPROBE_EXE),
             "-hide_banner",
-            "-nostdin",
             "-v", "error",
         ]
 

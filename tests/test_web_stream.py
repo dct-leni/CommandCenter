@@ -46,3 +46,22 @@ def test_create_firefox_profile_with_socks5_proxy(tmp_path):
     assert 'network.proxy.socks", "127.0.0.1"' in content
     assert 'network.proxy.socks_port", 1080' in content
     assert 'network.proxy.socks_remote_dns", true' in content
+
+
+def test_create_firefox_profile_with_http_proxy(tmp_path):
+    profile_dir = tmp_path / "http_proxy_profile"
+    _create_firefox_profile(profile_dir, proxy_url="http://127.0.0.1:10501", stream_id="stream_http_proxy")
+
+    user_js = profile_dir / "user.js"
+    content = user_js.read_text(encoding="utf-8")
+    assert 'network.proxy.type", 1' in content
+    assert 'network.proxy.http", "127.0.0.1"' in content
+    assert 'network.proxy.http_port", 10501' in content
+    assert 'network.proxy.ssl", "127.0.0.1"' in content
+    assert 'network.proxy.ssl_port", 10501' in content
+    assert 'network.proxy.share_proxy_settings", true' in content
+
+    # Verify no syntax error remnants from python string literals
+    assert "';" not in content
+    assert "'," not in content
+

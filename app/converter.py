@@ -89,7 +89,6 @@ async def probe_streams(input_path: str) -> dict:
     cmd = [
         ffprobe,
         "-hide_banner",
-        "-nostdin",
         "-v", "quiet",
         "-print_format", "json",
         "-show_streams",

@@ -150,7 +150,6 @@ def get_video_metadata(video_path: str) -> dict:
         cmd = [
             get_ffprobe_path(),
             "-hide_banner",
-            "-nostdin",
             "-v", "quiet",
             "-print_format", "json",
             "-show_format",

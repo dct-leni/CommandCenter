@@ -232,7 +232,8 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
         "storage",
         "webappsstore.sqlite",
         "extensions.json",
-        "addonStartup.json.lz4"
+        "addonStartup.json.lz4",
+        "prefs.js"
     ]
     for name in _STALE_PATHS:
         p = profile_dir / name
@@ -286,7 +287,16 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
     # --- Write user.js preferences ---
     user_js = profile_dir / "user.js"
     base_prefs = (ff_assets / "user.js").read_text(encoding="utf-8").splitlines()
-    prefs = [p for p in base_prefs if p.strip() and not p.strip().startswith("#")]
+    prefs = []
+    for p in base_prefs:
+        s = p.strip()
+        if not s or s.startswith("#") or s.startswith("//"):
+            continue
+        if "';" in s:
+            s = s.split("';")[0].strip()
+            if not s.endswith(";"):
+                s += ";"
+        prefs.append(s)
 
     # --- Proxy Configuration (SOCKS5 or HTTP) ---
     if proxy_url:
@@ -307,11 +317,13 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
                 ])
             else:
                 prefs.extend([
+                    'user_pref("network.proxy.type", 1);',
                     f'user_pref("network.proxy.http", "{host}");',
                     f'user_pref("network.proxy.http_port", {port});',
                     f'user_pref("network.proxy.ssl", "{host}");',
                     f'user_pref("network.proxy.ssl_port", {port});',
-                    'user_pref("network.proxy.type", 1);',
+                    'user_pref("network.proxy.share_proxy_settings", true);',
+                    'user_pref("network.proxy.no_proxies_on", "");',
                 ])
             logger.info(f"Applied Firefox proxy settings for {proxy_url}")
         except Exception as e:
