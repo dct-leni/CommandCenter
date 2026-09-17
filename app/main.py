@@ -75,10 +75,13 @@ async def lifespan(app: FastAPI):
     from app.web_stream import web_stream_manager
     vpn_manager.purge_temp_dir()
     web_stream_manager.purge_all()
+    web_stream_manager.ensure_phyrox_config()
     # Resolve external IP on app start
     safe_create_task(streamer._resolve_external_ip(), name="resolve_external_ip")
-    # Start Global VPN on app startup if configured
-    vpn_manager.start_global_vpn()
+    # Start Global VPN on app startup if configured and pre-warm tunnel
+    vpn_url = vpn_manager.start_global_vpn()
+    if vpn_url:
+        safe_create_task(vpn_manager.warmup_tunnel(), name="warmup_global_vpn")
 
     # Populate configured folders and handle auto-resume on boot
     cfg = load_config()

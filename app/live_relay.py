@@ -59,6 +59,7 @@ class LiveRelayStatus:
     log_task: Optional[asyncio.Task] = field(default=None, repr=False)
     last_logs: List[str] = field(default_factory=list, repr=False)
     clients: dict = field(default_factory=dict, repr=False)
+    client_tasks: set = field(default_factory=set, repr=False)
     server: Optional[asyncio.Server] = field(default=None, repr=False)
     loopback_server: Optional[asyncio.Server] = field(default=None, repr=False)
     loopback_port: int = 0
@@ -140,7 +141,7 @@ class LiveStreamManager:
                 relay.resolution = item.get("resolution", getattr(relay, "resolution", "720p"))
                 # Only capture thumbnails when viewers are actively watching
                 if relay.status == "running":
-                    self.trigger_thumbnail_generation(sid, f"http://127.0.0.1:{relay.port}/")
+                    self.trigger_thumbnail_generation(sid, relay.port)
                 d = relay.to_dict()
             else:
                 thumb_path = THUMBNAILS_DIR / f"live_{sid}.jpg"
@@ -343,6 +344,12 @@ class LiveStreamManager:
                         writer.close()
                     except Exception:
                         pass
+                    # Unblock any waiting client write loops with sentinel
+                    for q in list(relay.clients.keys()):
+                        try:
+                            q.put_nowait(b"")
+                        except Exception:
+                            pass
 
             relay.loopback_server = await asyncio.start_server(handle_loopback, "127.0.0.1", 0)
             relay.loopback_port = relay.loopback_server.sockets[0].getsockname()[1]
@@ -449,10 +456,21 @@ class LiveStreamManager:
             queue = asyncio.Queue(maxsize=128)
             relay.clients[queue] = writer
 
+            curr_task = asyncio.current_task()
+            if curr_task:
+                relay.client_tasks.add(curr_task)
+
             async def client_write_loop():
                 try:
-                    while True:
-                        chunk = await queue.get()
+                    while relay.status in ("running", "listening", "reconnecting"):
+                        try:
+                            chunk = await asyncio.wait_for(queue.get(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            if relay.status not in ("running", "listening", "reconnecting"):
+                                break
+                            continue
+                        if not chunk:
+                            break
                         writer.write(chunk)
                         queue.task_done()
 
@@ -460,6 +478,8 @@ class LiveStreamManager:
                         while not queue.empty():
                             try:
                                 next_chunk = queue.get_nowait()
+                                if not next_chunk:
+                                    return
                                 writer.write(next_chunk)
                                 queue.task_done()
                             except asyncio.QueueEmpty:
@@ -469,7 +489,7 @@ class LiveStreamManager:
                             await writer.drain()
                         except Exception:
                             break
-                except Exception:
+                except (asyncio.CancelledError, Exception):
                     pass
                 finally:
                     relay.clients.pop(queue, None)
@@ -481,8 +501,11 @@ class LiveStreamManager:
             # Stream data to the client until client disconnects or write fails
             try:
                 await client_write_loop()
-            except Exception:
+            except (asyncio.CancelledError, Exception):
                 pass
+            finally:
+                if curr_task:
+                    relay.client_tasks.discard(curr_task)
 
         # Check if existing TCP listener is already open and bound to relay.port
         server_matches_port = False
@@ -561,13 +584,24 @@ class LiveStreamManager:
                 logger.error(f"Error closing loopback server: {e}")
             relay.loopback_server = None
 
-        # Disconnect all connected clients
-        for writer in list(relay.clients.values()):
+        # Disconnect all connected clients and unblock queues
+        for q, writer in list(relay.clients.items()):
+            try:
+                q.put_nowait(b"")
+            except Exception:
+                pass
             try:
                 writer.close()
             except Exception:
                 pass
         relay.clients.clear()
+
+        # Cancel any active client tasks
+        for t in list(getattr(relay, "client_tasks", set())):
+            if not t.done():
+                t.cancel()
+        if hasattr(relay, "client_tasks"):
+            relay.client_tasks.clear()
 
         # Kill FFmpeg process
         if relay.process and relay.process.returncode is None:
@@ -624,7 +658,7 @@ class LiveStreamManager:
         from app.vpn_manager import vpn_manager
         proxy_url = vpn_manager.get_proxy_url_for_stream(stream_item)
         if proxy_url:
-            await asyncio.sleep(0.5)  # Wait 500ms for WireGuard local proxy socket readiness
+            await vpn_manager.wait_until_ready(timeout=3.0)
 
         await asyncio.to_thread(web_stream_manager.close_browser, stream_id)
 
@@ -871,6 +905,14 @@ class LiveStreamManager:
                     elif not is_network_input:
                         # Local file input
                         cmd.extend(["-re", "-stream_loop", "-1"])
+
+                    if proxy_url:
+                        await vpn_manager.wait_until_ready(timeout=3.0)
+                        if is_hls or relay.url.startswith("http://") or relay.url.startswith("https://"):
+                            cmd.extend([
+                                "-multiple_requests", "1",
+                                "-http_proxy", proxy_url,
+                            ])
 
                     cmd.extend(["-i", relay.url])
                     if "-c:v" in video_params and "copy" not in video_params:

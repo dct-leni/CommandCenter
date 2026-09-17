@@ -69,3 +69,6 @@ user_pref("javascript.use_us_english_locale", false);
 user_pref("network.http.http3.enable", false);
 user_pref("network.http.spdy.enabled.http2", true);
 user_pref("network.dns.disableIPv6", true);
+// --- Minimize Child Process Count ---
+user_pref("dom.ipc.processCount", 1);
+user_pref("dom.ipc.processCount.webIsolated", 1);

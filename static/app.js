@@ -297,15 +297,21 @@ function renderSystemStatus() {
 
     if (vpnDot && vpnLabel && s.vpn) {
         const v = s.vpn;
+        const vpnIndicator = document.getElementById('vpn-status-indicator');
         if (v.mode === 'none' || v.status === 'disabled') {
             vpnDot.className = 'status-dot';
             vpnLabel.textContent = 'VPN: Off';
+            if (vpnIndicator) vpnIndicator.title = 'Click to configure Global VPN (Currently Off)';
         } else if (v.active) {
-            vpnDot.className = 'status-dot ok';
-            vpnLabel.textContent = v.mode === 'wireguard' ? 'VPN: WireGuard' : 'VPN: SOCKS5';
+            vpnDot.className = (v.status === 'stalled') ? 'status-dot warning' : 'status-dot ok';
+            vpnLabel.textContent = (v.status === 'stalled') ? 'VPN: Stalled' : (v.mode === 'wireguard' ? 'VPN: WireGuard' : 'VPN: SOCKS5');
+            if (vpnIndicator) {
+                vpnIndicator.title = 'WireGuard VPN: Active (Click to configure)';
+            }
         } else {
             vpnDot.className = 'status-dot warning';
             vpnLabel.textContent = 'VPN: Inactive';
+            if (vpnIndicator) vpnIndicator.title = 'WireGuard VPN inactive or error (Click to configure)';
         }
     }
 }
@@ -1969,6 +1975,7 @@ async function startLiveStream(streamId) {
 
 async function stopLiveStream(streamId) {
     try {
+        closeVideoPreview();
         await api('POST', `/streamer/live_stream/${streamId}/stop`);
         showToast('Live stream stopped', 'success');
         await fetchLiveStreams();
@@ -2176,6 +2183,10 @@ function openVideoPreview(url, title = 'Stream Preview') {
             player.addEventListener('canplay', tryPlay);
             player.addEventListener('seeked', tryPlay);
             player.addEventListener('waiting', tryPlay);
+
+            _activeMpegtsPlayer.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
+                console.warn('mpegts error:', errorType, errorDetail, errorInfo);
+            });
 
             _activeMpegtsPlayer.play().catch(err => {
                 if (err.name !== 'AbortError') {

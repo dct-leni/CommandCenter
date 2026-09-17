@@ -23,9 +23,6 @@ import threading
 
 logger = logging.getLogger(__name__)
 
-# Global lock to prevent race conditions when generating Portapps YAML config for concurrent streams
-_launcher_lock = threading.Lock()
-
 # Base project directory (CommandCenter root)
 _BASE_DIR = Path(__file__).parent.parent
 
@@ -97,13 +94,16 @@ def get_stream_pids(stream_id: str, parent_pid: Optional[int] = None) -> set:
 
     try:
         import psutil
-        for p in psutil.process_iter(['pid', 'name', 'cmdline']):
+        for p in psutil.process_iter(['pid', 'name']):
             try:
                 pname = (p.info.get('name') or '').lower()
                 if 'firefox' in pname or 'phyrox' in pname:
-                    cmdline = p.info.get('cmdline') or []
+                    try:
+                        cmdline = p.cmdline()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
                     if any(stream_id in str(arg) for arg in cmdline):
-                        pids.add(p.info['pid'])
+                        pids.add(p.pid)
                         try:
                             for child in p.children(recursive=True):
                                 pids.add(child.pid)
@@ -203,6 +203,13 @@ def _ensure_firefox_policies(firefox_exe: Path) -> None:
         dist_dir.mkdir(parents=True, exist_ok=True)
         (dist_dir / "policies.json").write_text(policy_json, encoding="utf-8")
         logger.info(f"Created Enterprise policies.json at: {dist_dir / 'policies.json'}")
+
+        # Also write data/policies.json for Portapps phyrox-portable
+        portapps_root = firefox_exe.parent.parent if firefox_exe.name.lower() == "firefox.exe" else firefox_exe.parent
+        portapps_data = portapps_root / "data"
+        if portapps_data.exists():
+            (portapps_data / "policies.json").write_text(policy_json, encoding="utf-8")
+            logger.debug(f"Created Portapps policies.json at: {portapps_data / 'policies.json'}")
     except Exception as e:
         logger.warning(f"Could not write Firefox policies.json: {e}")
 
@@ -323,7 +330,7 @@ def _create_firefox_profile(profile_dir: Path, proxy_url: Optional[str] = None, 
                     f'user_pref("network.proxy.ssl", "{host}");',
                     f'user_pref("network.proxy.ssl_port", {port});',
                     'user_pref("network.proxy.share_proxy_settings", true);',
-                    'user_pref("network.proxy.no_proxies_on", "");',
+                    'user_pref("network.proxy.no_proxies_on", "localhost, 127.0.0.1");',
                 ])
             logger.info(f"Applied Firefox proxy settings for {proxy_url}")
         except Exception as e:
@@ -352,6 +359,7 @@ class WebStreamManager:
         Creates an isolated profile with the CommandCenter MV2 audio extension pre-loaded.
         """
         self.close_browser(stream_id)
+        self.ensure_phyrox_config()
 
         is_1080p = "1080" in str(resolution or "").lower()
         w_px = 1920 if is_1080p else 1280
@@ -360,77 +368,37 @@ class WebStreamManager:
         firefox_exe = find_firefox_executable()
         if firefox_exe:
             exe_path = Path(firefox_exe)
-            
-            if exe_path.name.lower() == "phyrox-portable.exe":
-                # Portapps strictly resolves profiles relative to data/profile/
-                profile_dir = exe_path.parent / "data" / "profile" / stream_id
-                _create_firefox_profile(profile_dir, proxy_url, stream_id)
-                
-                yaml_path = exe_path.with_suffix(".yml")
-                yml_content = f"""common:
-  disable_log: true
-  args: []
-  env: {{}}
-  app_path: ""
-app:
-  profile: "{stream_id}"
-  multiple_instances: true
-  disable_telemetry: true
-  disable_firefox_studies: true
-  disable_crash_reporter: true
-  locale: en-US
-  cleanup: true
-"""
-                with _launcher_lock:
-                    _ensure_firefox_policies(exe_path)
-                    yaml_path.write_text(yml_content, encoding="utf-8")
-                    cmd = [
-                        firefox_exe,
-                        f"--width={w_px}",
-                        f"--height={h_px}",
-                        url,
-                        "-foreground"
-                    ]
-                    env = os.environ.copy()
-                    env["TZ"] = "Europe/Istanbul"
-                    logger.info(f"Launching Portapps phyrox-portable for '{name}' ({stream_id}) [{w_px}x{h_px}] -> '{url}'")
-                    proc = subprocess.Popen(
-                        cmd,
-                        env=env,
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        creationflags=getattr(subprocess, "DETACHED_PROCESS", 0x00000008),
-                    )
-                    # Brief sleep to ensure Portapps reads the YAML before another thread can overwrite it
-                    time.sleep(1.0)
-            else:
-                profile_dir = BROWSER_PROFILES_DIR / stream_id
-                _create_firefox_profile(profile_dir, proxy_url, stream_id)
-                
-                _ensure_firefox_policies(exe_path)
-                cmd = [
-                    firefox_exe,
-                    "--no-remote",
-                    "--new-instance",
-                    f"--profile", str(profile_dir.resolve()),
-                    f"--width={w_px}",
-                    f"--height={h_px}",
-                    url,
-                    "-foreground"
-                ]
-                env = os.environ.copy()
-                env["TZ"] = "Europe/Istanbul"
-                logger.info(f"Launching Native Firefox for web stream '{name}' ({stream_id}) [{w_px}x{h_px}] -> '{url}'")
-                proc = subprocess.Popen(
-                    cmd,
-                    env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    creationflags=getattr(subprocess, "DETACHED_PROCESS", 0x00000008),
-                )
-            
+
+            # If Portapps launcher was selected, resolve directly to the bundled portable Firefox binary
+            if exe_path.name.lower() == "phyrox-portable.exe" and (exe_path.parent / "app" / "firefox.exe").exists():
+                exe_path = exe_path.parent / "app" / "firefox.exe"
+                firefox_exe = str(exe_path)
+
+            profile_dir = BROWSER_PROFILES_DIR / stream_id
+            _create_firefox_profile(profile_dir, proxy_url, stream_id)
+
+            _ensure_firefox_policies(exe_path)
+            cmd = [
+                firefox_exe,
+                "--no-remote",
+                "--new-instance",
+                "--profile", str(profile_dir.resolve()),
+                f"--width={w_px}",
+                f"--height={h_px}",
+                url,
+                "-foreground"
+            ]
+            env = os.environ.copy()
+            env["TZ"] = "Europe/Istanbul"
+            logger.info(f"Launching Portable Firefox ({exe_path}) for web stream '{name}' ({stream_id}) [{w_px}x{h_px}] -> '{url}'")
+            proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "DETACHED_PROCESS", 0x00000008),
+            )
             self.browser_processes[stream_id] = proc
         else:
             logger.warning(f"Portable Firefox not found. Falling back to default browser for web stream '{name}' ({stream_id})")
@@ -465,37 +433,90 @@ app:
             proc = self.browser_processes.get(stream_id)
             target_pids = get_stream_pids(stream_id, proc.pid if proc else None)
 
+            # HWNDs and PIDs actively claimed by OTHER running streams — NEVER touch or steal these
+            busy_hwnds = {h for sid, h in self.window_hwnds.items() if sid != stream_id and h}
+            other_pids = set()
+            for other_sid in set(self.browser_processes.keys()) | set(self.window_hwnds.keys()):
+                if other_sid != stream_id:
+                    other_pids.update(get_stream_pids(other_sid, None))
+            if os.name == "nt":
+                from ctypes import wintypes
+                for other_hwnd in busy_hwnds:
+                    try:
+                        _wpid = wintypes.DWORD()
+                        user32.GetWindowThreadProcessId(other_hwnd, ctypes.byref(_wpid))
+                        if _wpid.value:
+                            other_pids.add(_wpid.value)
+                            other_pids.update(get_child_pids(_wpid.value))
+                    except Exception:
+                        pass
+
             if os.name == "nt":
                 found: List[tuple] = []  # (hwnd, title, score)
 
                 def _enum_windows(hwnd, lParam):
-                    if user32.IsWindowVisible(hwnd):
-                        rect = ctypes.wintypes.RECT()
-                        user32.GetClientRect(hwnd, ctypes.byref(rect))
-                        w = rect.right - rect.left
-                        h = rect.bottom - rect.top
-                        if w >= 400 and h >= 300:
-                            cls_buf = ctypes.create_unicode_buffer(256)
-                            user32.GetClassNameW(hwnd, cls_buf, 256)
-                            cls = cls_buf.value
-                            pid = ctypes.wintypes.DWORD()
-                            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                            title_buf = ctypes.create_unicode_buffer(512)
-                            user32.GetWindowTextW(hwnd, title_buf, 512)
-                            val = title_buf.value.strip()
+                    if not user32.IsWindowVisible(hwnd):
+                        return True
 
-                            # Match 1: PID belongs to this stream's process tree (Direct 100% confidence match)
-                            if target_pids and pid.value in target_pids:
-                                found.append((hwnd, val or "Mozilla Firefox", 100))
-                            # Match 2: Window class is MozillaWindowClass and title matches stream name / domain
-                            elif cls == "MozillaWindowClass":
-                                for matcher in [full_netloc, parsed_domain, stream_name]:
-                                    if matcher and matcher.lower() in val.lower():
-                                        found.append((hwnd, val, 80))
-                                        break
-                                # Match 3: Visible MozillaWindowClass when no other matches exist
-                                if not found and val and not any(skip == val.lower() or skip in val.lower() for skip in _FIREFOX_SKIP):
-                                    found.append((hwnd, val, 20))
+                    if hwnd in busy_hwnds:
+                        return True  # Never hijack an HWND already reserved by another stream
+
+                    pid = ctypes.wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                    win_pid = pid.value
+                    if win_pid in other_pids:
+                        return True  # Never hijack a window owned by another stream's process tree
+
+                    rect = ctypes.wintypes.RECT()
+                    user32.GetClientRect(hwnd, ctypes.byref(rect))
+                    w = rect.right - rect.left
+                    h = rect.bottom - rect.top
+                    if w < 400 or h < 300:
+                        return True
+
+                    cls_buf = ctypes.create_unicode_buffer(256)
+                    user32.GetClassNameW(hwnd, cls_buf, 256)
+                    cls = cls_buf.value
+                    if cls != "MozillaWindowClass":
+                        return True
+
+                    title_buf = ctypes.create_unicode_buffer(512)
+                    user32.GetWindowTextW(hwnd, title_buf, 512)
+                    val = title_buf.value.strip()
+
+                    # Verify ownership via process command-line inspection
+                    is_stream_pid = False
+                    if target_pids and win_pid in target_pids:
+                        is_stream_pid = True
+                    else:
+                        try:
+                            import psutil
+                            p_proc = psutil.Process(win_pid)
+                            cmdline = p_proc.cmdline()
+                            # If cmdline references another stream's profile, record as other_pid and reject
+                            for other_sid in set(self.browser_processes.keys()) | set(self.window_hwnds.keys()):
+                                if other_sid != stream_id and any(other_sid in str(arg) for arg in cmdline):
+                                    other_pids.add(win_pid)
+                                    return True
+                            # If cmdline points to this stream's profile, confirm ownership
+                            if any(stream_id in str(arg) for arg in cmdline):
+                                target_pids.add(win_pid)
+                                is_stream_pid = True
+                        except Exception:
+                            pass
+
+                    # Match 1: PID belongs to this stream's process tree (Direct 100% confidence match)
+                    if is_stream_pid:
+                        found.append((hwnd, val or "Mozilla Firefox", 100))
+                        return True
+
+                    # Match 2: Window class is MozillaWindowClass and title matches stream name / domain (80% confidence)
+                    matchers = [m for m in (full_netloc, parsed_domain, stream_name) if m and len(m) >= 3]
+                    for matcher in matchers:
+                        if matcher.lower() in val.lower():
+                            found.append((hwnd, val, 80))
+                            break
+
                     return True
 
                 cb = WNDENUMPROC(_enum_windows)
@@ -504,45 +525,49 @@ app:
                 if found:
                     found.sort(key=lambda x: x[2], reverse=True)
                     hwnd, title, score = found[0]
-                    try:
-                        # Disable window resizing (remove WS_THICKFRAME and WS_MAXIMIZEBOX styles)
-                        GWL_STYLE = -16
-                        WS_THICKFRAME = 0x00040000
-                        WS_MAXIMIZEBOX = 0x00010000
-                        WS_MINIMIZEBOX = 0x00020000
-                        style = user32.GetWindowLongW(hwnd, GWL_STYLE)
-                        if style:
-                            style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX)
-                            user32.SetWindowLongW(hwnd, GWL_STYLE, style)
-                            user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0027)  # SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED
-                    except Exception as e:
-                        logger.debug(f"SetWindowLongW error: {e}")
 
-                    self.window_hwnds[stream_id] = hwnd
-                    self.window_titles[stream_id] = title
+                    # Only accept high-confidence matches (PID match score 100 or domain/title score 80).
+                    # Generic / unverified windows are never matched or locked.
+                    if score >= 80:
+                        try:
+                            # Disable window resizing (remove WS_THICKFRAME and WS_MAXIMIZEBOX styles)
+                            GWL_STYLE = -16
+                            WS_THICKFRAME = 0x00040000
+                            WS_MAXIMIZEBOX = 0x00010000
+                            WS_MINIMIZEBOX = 0x00020000
+                            style = user32.GetWindowLongW(hwnd, GWL_STYLE)
+                            if style:
+                                style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX | WS_MINIMIZEBOX)
+                                user32.SetWindowLongW(hwnd, GWL_STYLE, style)
+                                user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, 0x0027)  # SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED
+                        except Exception as e:
+                            logger.debug(f"SetWindowLongW error: {e}")
 
-                    # Ensure Firefox window is visible and anchored at top-left (0,0) for high-performance desktop capture
-                    try:
-                        is_minimized = user32.IsIconic(hwnd)
-                        if is_minimized:
-                            SW_RESTORE = 9
-                            user32.ShowWindow(hwnd, SW_RESTORE)
-                            logger.debug(f"Restored minimized Firefox window (hwnd=0x{hwnd:x})")
-                        else:
-                            SW_SHOW = 5
-                            user32.ShowWindow(hwnd, SW_SHOW)
+                        self.window_hwnds[stream_id] = hwnd
+                        self.window_titles[stream_id] = title
 
-                        # Position window at (0,0): 1920x1118 for 1080p, 1280x758 for 720p (+38px window titlebar)
-                        is_1080p = "1080" in str(resolution or "").lower()
-                        win_w = 1920 if is_1080p else 1280
-                        win_h = 1118 if is_1080p else 758
-                        SWP_SHOWWINDOW = 0x0040
-                        user32.SetWindowPos(hwnd, 0, 0, 0, win_w, win_h, SWP_SHOWWINDOW)
-                    except Exception as e:
-                        logger.debug(f"SetWindowPos/Style error: {e}")
+                        # Ensure Firefox window is visible and anchored at top-left (0,0) for high-performance desktop capture
+                        try:
+                            is_minimized = user32.IsIconic(hwnd)
+                            if is_minimized:
+                                SW_RESTORE = 9
+                                user32.ShowWindow(hwnd, SW_RESTORE)
+                                logger.debug(f"Restored minimized Firefox window (hwnd=0x{hwnd:x})")
+                            else:
+                                SW_SHOW = 5
+                                user32.ShowWindow(hwnd, SW_SHOW)
 
-                    logger.info(f"Locked Firefox window (hwnd=0x{hwnd:x}) with title '{title}' for stream '{stream_name}' ({stream_id}) [confidence={score}]")
-                    return title
+                            # Position window at (0,0): 1920x1118 for 1080p, 1280x758 for 720p (+38px window titlebar)
+                            is_1080p = "1080" in str(resolution or "").lower()
+                            win_w = 1920 if is_1080p else 1280
+                            win_h = 1118 if is_1080p else 758
+                            SWP_SHOWWINDOW = 0x0040
+                            user32.SetWindowPos(hwnd, 0, 0, 0, win_w, win_h, SWP_SHOWWINDOW)
+                        except Exception as e:
+                            logger.debug(f"SetWindowPos/Style error: {e}")
+
+                        logger.info(f"Locked Firefox window (hwnd=0x{hwnd:x}) with title '{title}' for stream '{stream_name}' ({stream_id}) [confidence={score}]")
+                        return title
 
             time.sleep(0.5)
 
@@ -554,7 +579,13 @@ app:
     def get_window_hwnd(self, stream_id: str, stream_name: str = "", url: str = "", resolution: str = "720p") -> Optional[int]:
         """Return HWND (int) for stream_id."""
         if stream_id in self.window_hwnds:
-            return self.window_hwnds[stream_id]
+            hwnd = self.window_hwnds[stream_id]
+            if os.name == "nt" and hwnd:
+                if user32.IsWindow(hwnd):
+                    return hwnd
+                self.window_hwnds.pop(stream_id, None)
+            else:
+                return hwnd
         self.wait_for_window_title(stream_id, stream_name, url, timeout=10.0, resolution=resolution)
         return self.window_hwnds.get(stream_id)
 
@@ -589,12 +620,31 @@ app:
 
         pids_to_kill = get_stream_pids(stream_id, proc.pid if proc else None)
 
-        if os.name == "nt" and hwnd:
+        # Protect any HWNDs and PIDs actively claimed by OTHER active streams
+        other_hwnds = {h for sid, h in self.window_hwnds.items() if sid != stream_id and h}
+        other_pids = set()
+        for other_sid in set(self.browser_processes.keys()) | set(self.window_hwnds.keys()):
+            if other_sid != stream_id:
+                other_pids.update(get_stream_pids(other_sid, None))
+
+        if os.name == "nt":
+            from ctypes import wintypes
+            for other_hwnd in other_hwnds:
+                try:
+                    _wpid = wintypes.DWORD()
+                    user32.GetWindowThreadProcessId(other_hwnd, ctypes.byref(_wpid))
+                    if _wpid.value:
+                        other_pids.add(_wpid.value)
+                        other_pids.update(get_child_pids(_wpid.value))
+                except Exception:
+                    pass
+
+        if os.name == "nt" and hwnd and hwnd not in other_hwnds:
             try:
                 from ctypes import wintypes
                 main_pid = wintypes.DWORD()
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(main_pid))
-                if main_pid.value:
+                if main_pid.value and main_pid.value not in other_pids:
                     pids_to_kill.add(main_pid.value)
             except Exception as e:
                 logger.debug(f"Error reading HWND PID: {e}")
@@ -607,6 +657,8 @@ app:
                 pass
 
         for pid in pids_to_kill:
+            if pid in other_pids:
+                continue  # Never taskkill a PID belonging to another running stream!
             try:
                 subprocess.run(
                     ["taskkill", "/F", "/T", "/PID", str(pid)],
@@ -636,5 +688,55 @@ app:
                 except Exception:
                     pass
 
+    def ensure_phyrox_config(self) -> None:
+        """
+        Auto-configure any Portapps Phyrox / Firefox Portable instances found in bin/.
+        Ensures phyrox-portable.yml has multiple_instances=true, telemetry disabled, cleanup=false,
+        and ensures data/policies.json and app/distribution/policies.json exist.
+        Runs automatically on server startup and before browser launch.
+        """
+        bin_dir = _BASE_DIR / "bin"
+        if not bin_dir.exists():
+            return
+
+        default_yml = """common:
+  disable_log: true
+  args: []
+  env: {}
+  app_path: ""
+app:
+  profile: "default"
+  multiple_instances: true
+  disable_telemetry: true
+  disable_crash_reporter: true
+  locale: en-US
+  cleanup: false
+"""
+        # Search for any phyrox-portable executables or folder structures in bin/
+        for exe_path in bin_dir.rglob("*phyrox-portable*.exe"):
+            try:
+                yml_path = exe_path.with_suffix(".yml")
+                should_write = False
+                if not yml_path.exists():
+                    should_write = True
+                else:
+                    content = yml_path.read_text(encoding="utf-8", errors="ignore")
+                    if "multiple_instances: true" not in content or "cleanup: false" not in content or "disable_firefox_studies" in content:
+                        should_write = True
+                if should_write:
+                    yml_path.write_text(default_yml, encoding="utf-8")
+                    logger.info(f"Auto-configured Portapps YAML at: {yml_path}")
+                _ensure_firefox_policies(exe_path)
+            except Exception as e:
+                logger.warning(f"Error configuring Portapps at {exe_path}: {e}")
+
+        # Also ensure policies.json exists for any direct firefox.exe in bin/
+        for ff_exe in bin_dir.rglob("firefox.exe"):
+            try:
+                _ensure_firefox_policies(ff_exe)
+            except Exception as e:
+                logger.debug(f"Error configuring policies for {ff_exe}: {e}")
+
 
 web_stream_manager = WebStreamManager()
+

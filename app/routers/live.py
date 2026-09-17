@@ -99,7 +99,10 @@ async def update_global_vpn(body: GlobalVPNUpdateRequest):
     }
     update_config({"streamer": {"global_vpn": new_vpn}})
     from app.vpn_manager import vpn_manager
-    vpn_manager.start_global_vpn()
+    vpn_url = vpn_manager.start_global_vpn()
+    if vpn_url:
+        import asyncio
+        asyncio.create_task(vpn_manager.warmup_tunnel())
     return {"status": "success", "global_vpn": new_vpn}
 
 

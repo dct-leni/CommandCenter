@@ -14,6 +14,7 @@ def test_create_firefox_profile_from_assets(tmp_path):
     content = user_js.read_text(encoding="utf-8")
     assert 'media.autoplay.default' in content
     assert 'dom.suspend_inactive.enabled' in content
+    assert 'dom.ipc.processCount", 1' in content
     assert 'network.proxy.type", 0' in content
 
     # Verify chrome directory and CSS files
@@ -106,4 +107,87 @@ def test_create_and_update_stream_resolution():
     update_req = LiveStreamUpdateRequest(resolution="720p")
     assert update_req.resolution == "720p"
 
+
+def test_close_browser_protects_other_stream_pids_and_hwnds():
+    """Verify close_browser never terminates an HWND or PID owned by another stream."""
+    stream_a = "live_stream_a"
+    stream_b = "live_stream_b"
+
+    # Register two fake active streams
+    web_stream_manager.window_hwnds[stream_a] = 111111
+    web_stream_manager.window_hwnds[stream_b] = 222222
+
+    # Closing stream A should remove stream A's hwnd and leave stream B's hwnd untouched
+    web_stream_manager.close_browser(stream_a)
+    assert stream_a not in web_stream_manager.window_hwnds
+    assert web_stream_manager.window_hwnds.get(stream_b) == 222222
+
+    # Clean up
+    web_stream_manager.close_browser(stream_b)
+
+
+def test_get_window_hwnd_clears_dead_hwnd(monkeypatch):
+    """Verify get_window_hwnd removes dead HWND when user32.IsWindow returns False."""
+    stream_id = "test_dead_hwnd_stream"
+    web_stream_manager.window_hwnds[stream_id] = 999999
+
+    import app.web_stream as ws
+    if hasattr(ws, "user32"):
+        monkeypatch.setattr(ws.user32, "IsWindow", lambda hwnd: 0)
+
+    # Calling get_window_hwnd should detect dead window, clear it from dict, and not return 999999
+    # (Since wait_for_window_title won't find a real window for this dummy stream, it returns None)
+    result = web_stream_manager.get_window_hwnd(stream_id, "Test", "http://fake.test", "720p")
+    assert result != 999999
+    assert stream_id not in web_stream_manager.window_hwnds
+
+
+def test_ensure_firefox_policies(tmp_path):
+    """Verify policies.json is generated with required enterprise policies."""
+    from app.web_stream import _ensure_firefox_policies
+
+    fake_portapps_root = tmp_path / "phyrox"
+    fake_portapps_app = fake_portapps_root / "app"
+    fake_portapps_data = fake_portapps_root / "data"
+    fake_portapps_app.mkdir(parents=True)
+    fake_portapps_data.mkdir(parents=True)
+    fake_exe = fake_portapps_app / "firefox.exe"
+    fake_exe.touch()
+
+    _ensure_firefox_policies(fake_exe)
+
+    dist_policy = fake_portapps_app / "distribution" / "policies.json"
+    data_policy = fake_portapps_data / "policies.json"
+    assert dist_policy.exists()
+    assert data_policy.exists()
+
+    data = json.loads(dist_policy.read_text(encoding="utf-8"))
+    assert data["policies"]["DisableAppUpdate"] is True
+    assert data["policies"]["DontCheckDefaultBrowser"] is True
+    assert data["policies"]["DisableTelemetry"] is True
+
+
+def test_ensure_phyrox_config(tmp_path, monkeypatch):
+    """Verify ensure_phyrox_config auto-generates phyrox-portable.yml and policies."""
+    fake_bin = tmp_path / "bin"
+    fake_firefox_dir = fake_bin / "firefox"
+    fake_firefox_dir.mkdir(parents=True)
+    fake_phyrox = fake_firefox_dir / "phyrox-portable.exe"
+    fake_phyrox.touch()
+
+    # Create dummy sample yml
+    sample_yml = fake_firefox_dir / "phyrox-portable.sample.yml"
+    sample_yml.write_text("common:\n  args: []\napp:\n  multiple_instances: false\n", encoding="utf-8")
+
+    import app.web_stream as ws
+    monkeypatch.setattr(ws, "_BASE_DIR", tmp_path)
+
+    web_stream_manager.ensure_phyrox_config()
+
+    target_yml = fake_firefox_dir / "phyrox-portable.yml"
+    assert target_yml.exists()
+    content = target_yml.read_text(encoding="utf-8")
+    assert "multiple_instances: true" in content
+    assert "cleanup: false" in content
+    assert "disable_firefox_studies" not in content
 
